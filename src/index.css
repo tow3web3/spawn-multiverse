@@ -1,0 +1,118 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-cream: #f4f1e8;
+  --color-ink: #141414;
+  --color-lime: #c9f24b;
+  --color-lime-soft: #b5e95b;
+  --color-candy: #f7a8ce;
+  --color-sky: #9ccbf5;
+  --color-grape: #a78bf0;
+  --color-tang: #f7be7b;
+  --color-mint: #8be0d4;
+  --color-hotpink: #f06eaa;
+  --color-up: #1f9d4d;
+  --color-down: #e0245e;
+  --color-void: #17161c;
+  --color-panel: #26242d;
+
+  --font-display: 'Anton', 'Arial Black', sans-serif;
+  --font-body: 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: 'Space Mono', ui-monospace, monospace;
+
+  --shadow-brutal-sm: 3px 3px 0 0 #141414;
+  --shadow-brutal: 6px 6px 0 0 #141414;
+  --shadow-brutal-lg: 10px 10px 0 0 #141414;
+
+  --animate-marquee: marquee 24s linear infinite;
+  --animate-marquee-slow: marquee 38s linear infinite;
+  --animate-floaty: floaty 5s ease-in-out infinite;
+  --animate-floaty-sm: floaty-sm 4s ease-in-out infinite;
+  --animate-twinkle: twinkle 2.6s ease-in-out infinite;
+  --animate-pop: pop 0.5s cubic-bezier(0.22, 1.4, 0.36, 1) both;
+  --animate-blink: blink 1.6s ease-in-out infinite;
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+  @keyframes floaty {
+    0%,
+    100% {
+      transform: translateY(-8px);
+    }
+    50% {
+      transform: translateY(8px);
+    }
+  }
+  @keyframes floaty-sm {
+    0%,
+    100% {
+      transform: translateY(-3px) rotate(var(--tag-rot, 0deg));
+    }
+    50% {
+      transform: translateY(3px) rotate(var(--tag-rot, 0deg));
+    }
+  }
+  @keyframes twinkle {
+    0%,
+    100% {
+      transform: scale(1) rotate(0deg);
+      opacity: 1;
+    }
+    50% {
+      transform: scale(0.5) rotate(18deg);
+      opacity: 0.45;
+    }
+  }
+  @keyframes pop {
+    from {
+      transform: scale(0.55);
+      opacity: 0;
+    }
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+  @keyframes blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.25;
+    }
+  }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-cream font-body text-ink antialiased;
+  }
+  ::selection {
+    background: var(--color-lime);
+    color: var(--color-ink);
+  }
+}
+
+@utility border-3 {
+  border-width: 3px;
+}
+
+@utility dot-grid {
+  background-image: radial-gradient(rgba(20, 20, 20, 0.16) 1.5px, transparent 1.5px);
+  background-size: 14px 14px;
+}
+
+@utility dot-grid-light {
+  background-image: radial-gradient(rgba(255, 255, 255, 0.09) 1.5px, transparent 1.5px);
+  background-size: 16px 16px;
+}

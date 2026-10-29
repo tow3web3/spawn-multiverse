@@ -1,0 +1,7 @@
+node_modules
+dist
+.env
+contracts/node_modules
+contracts/artifacts
+contracts/cache
+deployments/local-run
