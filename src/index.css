@@ -96,6 +96,10 @@
   }
   body {
     @apply bg-cream font-body text-ink antialiased;
+    /* The tilted marquee bands intentionally bleed past the viewport;
+       clip (not hidden — it would break the sticky nav) kills the
+       horizontal scroll that bleed would otherwise create on phones. */
+    overflow-x: clip;
   }
   ::selection {
     background: var(--color-lime);

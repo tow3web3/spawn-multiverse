@@ -13,7 +13,11 @@ import { CreatureModal } from './components/CreatureModal'
 
 export type AppMode = 'sim' | 'chain'
 
+/** Public demo builds (shareable link) have no local chain to talk to. */
+export const PUBLIC_DEMO = Boolean(import.meta.env.VITE_PUBLIC_DEMO)
+
 function loadMode(): AppMode {
+  if (PUBLIC_DEMO) return 'sim'
   try {
     const m = localStorage.getItem('spawn.mode')
     return m === 'chain' ? 'chain' : 'sim'

@@ -1,6 +1,6 @@
 import { useStore, shortAddr } from '../store'
 import { fmtUsd } from '../lib/format'
-import type { AppMode } from '../App'
+import { PUBLIC_DEMO, type AppMode } from '../App'
 
 function scrollTo(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
@@ -64,8 +64,8 @@ export function Nav({
           </button>
         </nav>
 
-        {/* sim / chain switch */}
-        <div className="flex overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold">
+        {/* sim / chain switch (hidden on the public demo — no local chain there) */}
+        <div className={`${PUBLIC_DEMO ? 'hidden' : 'flex'} overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold`}>
           {(['sim', 'chain'] as const).map((m) => (
             <button
               key={m}
