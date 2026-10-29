@@ -49,6 +49,7 @@ sending the same messages. This slot is the whole visibility strategy
 | `SpawnToken.sol` | The creature. Hub instance pre-mints the whole 1B supply to the pad; spoke replicas are minted/burned as tokens cross chains. **Sum of supplies across chains ≡ 1B, always** (tested). |
 | `OmniUSD.sol` | Demo settlement currency, one instance per chain, moved by burn/mint. The production slot for this is **USDC via Circle CCTP** — the exact same pattern. |
 | `OmniMessenger.sol` | The transport abstraction. Contracts only know `IOmniMessenger` / `IOmniReceiver`. Locally, `LocalOmniMessenger` hosts all logical chains on one node and delivers synchronously. |
+| `lz/LayerZeroOmniMessenger.sol` | The production transport: one adapter per chain over the real LayerZero V2 endpoint signatures (`lz/ILayerZeroV2.sol`), peered, with a native-fee gas tank. Tested against `lz/MockLZEndpointV2.sol`, which queues packets and lands them in **separate transactions** — the async reality of testnet/mainnet. |
 
 Run the invariants suite (`npm run chain:test`): genesis on six chains, single
 global curve, supply conservation, value conservation, ascension + refund,
@@ -72,10 +73,12 @@ Two honest demo shortcuts, both with clear production equivalents:
 
 - **Images**: stored in the browser keyed by token address; `metaURI` on-chain
   stays tiny. Production: pin to IPFS, store the `ipfs://` URI.
-- **Messaging**: `LocalOmniMessenger` delivers in the same block. Production:
-  a LayerZero V2 adapter implementing `IOmniMessenger` (one rollout per
-  chain + `setPeer` wiring); flows become async (seconds), which the UI
-  already tolerates (`CONFIRMING…`).
+- **Messaging**: `LocalOmniMessenger` delivers in the same block. The
+  production adapter already exists and is tested: `lz/LayerZeroOmniMessenger`
+  runs the whole protocol over an async queued endpoint (spawn/buy/sell land
+  in separate transactions; supply and value conservation hold — see
+  `test/layerzero.test.js`). What remains for testnet is pointing each
+  adapter at the real LayerZero V2 endpoint address and funding its gas tank.
 
 ## Path to testnet / mainnet
 
@@ -85,9 +88,10 @@ Two honest demo shortcuts, both with clear production equivalents:
    visibility section below). Ascension graduates into Raydium liquidity
    automatically, LP burned.
 2. **EVM chains (ETH, Base, BNB, Arbitrum, Optimism)** — deploy the gateway
-   bytecode as is; swap `LocalOmniMessenger` for a LayerZero V2 `OApp`
-   adapter (LayerZero V2 connects all six chains, Solana included); swap
-   `OmniUSD` for USDC + Circle CCTP (also live on Solana).
+   bytecode as is, with `lz/LayerZeroOmniMessenger` (already written and
+   async-tested) pointed at each chain's real LayerZero V2 endpoint
+   (LayerZero V2 connects all six chains, Solana included); swap `OmniUSD`
+   for USDC + Circle CCTP (also live on Solana).
 3. **EVM-hub fallback** — if the hub stays on an EVM chain instead, the same
    venue slot takes a **Uniswap v4 hook** adapter (curve logic inside a real
    Uniswap pool: every trade is an indexed swap) and ascension LPs into
