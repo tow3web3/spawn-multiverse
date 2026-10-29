@@ -21,6 +21,10 @@ async function deployWorld() {
 
   const hubUsd = await ethers.deployContract('OmniUSD', [0])
   const pad = await ethers.deployContract('SpawnPad', [messenger.target, hubUsd.target])
+  // Price discovery is a pluggable venue: the internal curve locally, a
+  // Raydium LaunchLab / Meteora DBC adapter on the production Solana hub.
+  const venue = await ethers.deployContract('InternalCurveVenue', [pad.target])
+  await (await pad.setVenue(venue.target)).wait()
   await (await hubUsd.setAgent(pad.target)).wait()
   await (await messenger.register(pad.target, 0)).wait()
 
@@ -39,7 +43,7 @@ async function deployWorld() {
     chains.push({ ...c, usd, gateway })
   }
 
-  return { messenger, hubUsd, pad, chains }
+  return { messenger, hubUsd, pad, venue, chains }
 }
 
 module.exports = { deployWorld, CHAINS }

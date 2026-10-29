@@ -98,6 +98,7 @@ async function main() {
     rpc: 'http://127.0.0.1:8545',
     messenger: world.messenger.target,
     pad: world.pad.target,
+    venue: world.venue.target,
     hubUsd: world.hubUsd.target,
     chains: world.chains.map((c) => ({
       label: c.label,

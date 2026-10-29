@@ -158,6 +158,19 @@ describe('SPAWN! omnichain protocol', () => {
     expect(total).to.equal(E(2_000)) // exactly what the faucet printed
   })
 
+  it('price discovery is a venue module only the pad can drive', async () => {
+    const token = await spawnVia(world.chains[0])
+
+    // the pad routes through the venue: both report the same market
+    expect(await world.pad.venue()).to.equal(world.venue.target)
+    expect(await world.venue.spotPrice(token)).to.equal(await world.pad.spotPrice(token))
+
+    // nobody but the pad can touch price discovery directly
+    await expect(world.venue.connect(user).execBuy(token, E(100))).to.be.revertedWith('VENUE: not pad')
+    await expect(world.venue.connect(user).execSell(token, E(100))).to.be.revertedWith('VENUE: not pad')
+    await expect(world.venue.connect(user).openMarket(user.address)).to.be.revertedWith('VENUE: not pad')
+  })
+
   it('rejects messages that do not come from the protocol', async () => {
     const token = await spawnVia(world.chains[0])
     const payload = ethers.AbiCoder.defaultAbiCoder().encode(

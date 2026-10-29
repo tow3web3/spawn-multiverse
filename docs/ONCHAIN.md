@@ -23,11 +23,28 @@ curve, the price is **identical everywhere by construction**. There is no
 arbitrage to do, because there is nothing to arbitrage: no fragmented pools,
 no per-chain price.
 
+Inside the hub, **settlement and price discovery are separate modules**. The
+pad owns custody, messaging and the canonical event stream; *where* the
+market sits is a pluggable `ICurveVenue`:
+
+```
+[SpawnPad]  ──execBuy/execSell──>  [ICurveVenue]
+ settlement                         price discovery
+ · custody, oUSD burn/mint          · InternalCurveVenue (local / EVM hub)
+ · omnichain messaging              · Raydium LaunchLab / Meteora DBC
+ · Spawned/Trade/Ascended events      adapter (production Solana hub)
+```
+
+The gateways never know which venue is live — they keep burning oUSD and
+sending the same messages. This slot is the whole visibility strategy
+(see the last section).
+
 ## Contracts (`contracts/contracts/`)
 
 | Contract | Role |
 |---|---|
-| `SpawnPad.sol` | The hub. Factory + one genesis curve per token (constant-product, virtual reserves, 800M/1B sold on the curve) + ascension to the omnipool (raised USD + reserved 200M). Executes all trades, emits `Spawned` / `Trade` / `Ascended`. |
+| `SpawnPad.sol` | The hub. Factory + settlement: token custody, oUSD burn/mint, omnichain messaging, and the canonical `Spawned` / `Trade` / `Ascended` event stream (one address for indexers). Routes every trade through the venue. |
+| `ICurveVenue.sol` / `InternalCurveVenue.sol` | The price-discovery slot. The internal venue is the genesis curve (constant-product, virtual reserves, 800M/1B on the curve) + ascension to the omnipool. Pure accounting — the pad keeps custody — so it swaps for a Raydium LaunchLab / Meteora DBC adapter without touching settlement or gateways. |
 | `SpawnGateway.sol` | One per chain. Users `spawnToken` / `buyToken` / `sellToken` here with **no approvals**. Forwards everything to the pad as omnichain messages; mints deliveries and payouts coming back. |
 | `SpawnToken.sol` | The creature. Hub instance pre-mints the whole 1B supply to the pad; spoke replicas are minted/burned as tokens cross chains. **Sum of supplies across chains ≡ 1B, always** (tested). |
 | `OmniUSD.sol` | Demo settlement currency, one instance per chain, moved by burn/mint. The production slot for this is **USDC via Circle CCTP** — the exact same pattern. |
@@ -62,32 +79,41 @@ Two honest demo shortcuts, both with clear production equivalents:
 
 ## Path to testnet / mainnet
 
-1. **EVM chains (ETH, Base, BNB, Arbitrum, Optimism)** — deploy the same
-   bytecode; swap `LocalOmniMessenger` for a LayerZero V2 `OApp` adapter;
-   swap `OmniUSD` for USDC + CCTP. Pick the hub where gas is cheapest (Base).
-2. **Solana** — needs a small Anchor program playing the `SpawnGateway` role
-   (burn USDC via CCTP, send the LayerZero message, mint the SPL replica via
-   the token program). LayerZero V2 and CCTP both support Solana today.
-3. **Ascension → real DEX liquidity (important for visibility, see below)** —
-   replace the internal omnipool with: LP the raised USD + 200M tokens into
-   **Raydium (Solana)** and/or **Uniswap v3 (EVM hub)** and burn the LP
-   position. Aggregators index those venues automatically.
+1. **Hub on Solana** — the pad's role moves into an Anchor program whose
+   `ICurveVenue` slot is a **Raydium LaunchLab (or Meteora DBC) adapter**:
+   the curve is executed by an already-indexed launch venue (see the
+   visibility section below). Ascension graduates into Raydium liquidity
+   automatically, LP burned.
+2. **EVM chains (ETH, Base, BNB, Arbitrum, Optimism)** — deploy the gateway
+   bytecode as is; swap `LocalOmniMessenger` for a LayerZero V2 `OApp`
+   adapter (LayerZero V2 connects all six chains, Solana included); swap
+   `OmniUSD` for USDC + Circle CCTP (also live on Solana).
+3. **EVM-hub fallback** — if the hub stays on an EVM chain instead, the same
+   venue slot takes a **Uniswap v4 hook** adapter (curve logic inside a real
+   Uniswap pool: every trade is an indexed swap) and ascension LPs into
+   Uniswap v3/v4 with the position burned.
 
-## Will tokens show up on Axiom / Dexscreener / etc.?
+## Visibility: Axiom / Dexscreener from the first second
 
-Only if the token **actually trades on venues those platforms index**:
+The strategy is **don't ask terminals to index us — run the market on rails
+they already index.** That is exactly what the venue slot is for:
 
-- **Axiom, Photon, Bullx** index Solana venues (pump.fun, Raydium, Meteora…).
-  A SPAWN! token appears there once the Solana leg is a real SPL token **and**
-  its ascension liquidity lands on Raydium — that's why step 3 above matters.
-- **Dexscreener / GeckoTerminal / DEXTools** index known DEX factories on EVM
-  chains the same way: ascend into Uniswap v2/v3 and the pair shows up
-  automatically, usually within minutes.
+- **Curve phase**: on the production Solana hub, `ICurveVenue` is a Raydium
+  LaunchLab / Meteora DBC adapter. Axiom, Photon, Bullx, Dexscreener,
+  GeckoTerminal and Birdeye index those programs today, so every curve-phase
+  trade — including ones routed in from Base or Arbitrum — charts on every
+  terminal from the first second. No integration deal, no waiting. (This is
+  the lesson of the post-pump.fun launchpads: pump.fun was invisible until
+  terminals indexed it; LaunchLab-based launchpads are visible at birth.)
+- **Ascension**: liquidity graduates into **Raydium** (or Uniswap v3/v4 on an
+  EVM hub) with the LP burned — aggregators pick the pair up automatically,
+  usually within minutes.
+- **Becoming a venue ourselves (later)**: the pad already emits a complete,
+  swap-shaped `Trade` stream from one address, which is what Dexscreener /
+  GeckoTerminal / DEXTools ask for in their venue-integration process. With
+  traction, "SPAWN!" becomes its own venue label next to pump.fun.
+- **What NOT to do**: fake Uniswap-V2 `Swap`/`Sync` events to impersonate a
+  pair. Indexers key off canonical factory deployments, not event shapes —
+  it fails silently and burns credibility with aggregators.
 - **Robinhood / CEX listings** are manual, curated business decisions — no
   protocol design makes that automatic.
-
-During the curve phase (before ascension) trades happen inside SPAWN!
-contracts, so third-party terminals won't chart them until either (a) the
-token ascends into an indexed DEX, or (b) SPAWN! gets indexed as a venue
-itself — which is exactly how pump.fun became visible: first nowhere, then
-everywhere.

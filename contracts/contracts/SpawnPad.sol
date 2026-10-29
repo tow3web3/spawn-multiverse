@@ -4,24 +4,23 @@ pragma solidity ^0.8.24;
 import {IOmniMessenger, IOmniReceiver} from "./OmniMessenger.sol";
 import {OmniUSD} from "./OmniUSD.sol";
 import {SpawnToken} from "./SpawnToken.sol";
+import {ICurveVenue} from "./ICurveVenue.sol";
 
 /// @title SpawnPad — the hub of the multiverse.
-/// @notice One global genesis curve per token lives HERE, on the hub chain.
-/// The six user-facing chains are entry points: their gateways forward buys
-/// and sells as omnichain messages, the pad executes them against the single
-/// curve, and sends tokens (or USD) back. That is what makes the price
-/// identical on every chain — there is only one market.
+/// @notice One global market per token lives HERE, on the hub chain. The six
+/// user-facing chains are entry points: their gateways forward buys and sells
+/// as omnichain messages, the pad executes them against the single market,
+/// and sends tokens (or USD) back. That is what makes the price identical on
+/// every chain — there is only one market.
 ///
-/// Phase 1 (curve): constant-product with virtual reserves, pump.fun style.
-/// Phase 2 (omnipool): when CURVE_SUPPLY is sold the token "ascends" — the
-/// raised OmniUSD plus the reserved POOL_SUPPLY become a real constant-product
-/// pool, owned by the protocol forever (liquidity can never be pulled).
+/// The pad owns SETTLEMENT: token custody, OmniUSD burn/mint, messaging and
+/// the canonical `Spawned` / `Trade` / `Ascended` event stream (one address
+/// for indexers to watch). PRICE DISCOVERY is delegated to a pluggable
+/// `ICurveVenue` — the internal genesis curve locally, a Raydium LaunchLab /
+/// Meteora DBC adapter on the production Solana hub, so curve-phase trades
+/// are visible on Axiom / Dexscreener from the first second.
 contract SpawnPad is IOmniReceiver {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
-    uint256 public constant CURVE_SUPPLY = 800_000_000e18;
-    uint256 public constant POOL_SUPPLY = TOTAL_SUPPLY - CURVE_SUPPLY;
-    uint256 public constant V_BASE_0 = 6_000e18;
-    uint256 public constant V_TOKENS_0 = 1_073_000_000e18;
     uint32 public constant HUB_CHAIN = 0;
 
     // Message opcodes (gateway -> pad)
@@ -32,13 +31,6 @@ contract SpawnPad is IOmniReceiver {
     uint8 internal constant OP_SYNC_TOKEN = 10;
     uint8 internal constant OP_DELIVER = 11;
     uint8 internal constant OP_PAYOUT = 12;
-
-    struct Curve {
-        uint256 vBase;
-        uint256 vTokens;
-        uint256 sold;
-        bool ascended;
-    }
 
     struct Meta {
         string name;
@@ -52,13 +44,13 @@ contract SpawnPad is IOmniReceiver {
     IOmniMessenger public immutable messenger;
     OmniUSD public immutable usd; // hub instance
     address public immutable admin;
+    ICurveVenue public venue;
 
     uint32[] public chainLabels;
     mapping(uint32 => address) public gateways;
     mapping(address => uint32) public gatewayChain;
 
     address[] public allTokens;
-    mapping(address => Curve) public curves;
     mapping(address => Meta) public metas;
 
     event Spawned(
@@ -87,6 +79,12 @@ contract SpawnPad is IOmniReceiver {
         admin = msg.sender;
     }
 
+    function setVenue(ICurveVenue v) external {
+        require(msg.sender == admin, "PAD: not admin");
+        require(address(venue) == address(0), "PAD: venue set");
+        venue = v;
+    }
+
     function setGateway(uint32 chain, address gw) external {
         require(msg.sender == admin, "PAD: not admin");
         require(gateways[chain] == address(0), "PAD: gateway set");
@@ -102,9 +100,12 @@ contract SpawnPad is IOmniReceiver {
     }
 
     function spotPrice(address token) public view returns (uint256) {
-        Curve storage c = curves[token];
-        if (c.vTokens == 0) return 0;
-        return (c.vBase * 1e18) / c.vTokens;
+        return venue.spotPrice(token);
+    }
+
+    /// Facade over the live venue, so tooling reads one address.
+    function curves(address token) external view returns (ICurveVenue.Curve memory) {
+        return venue.curveOf(token);
     }
 
     /// Everything the UI needs for one token, in one call.
@@ -128,7 +129,7 @@ contract SpawnPad is IOmniReceiver {
     {
         token = allTokens[i];
         Meta storage m = metas[token];
-        Curve storage c = curves[token];
+        ICurveVenue.Curve memory c = venue.curveOf(token);
         return (
             token,
             m.name,
@@ -141,7 +142,7 @@ contract SpawnPad is IOmniReceiver {
             c.vTokens,
             c.sold,
             c.ascended,
-            spotPrice(token)
+            venue.spotPrice(token)
         );
     }
 
@@ -189,8 +190,8 @@ contract SpawnPad is IOmniReceiver {
     ) internal {
         SpawnToken token = new SpawnToken(name, symbol, address(this), true, TOTAL_SUPPLY, address(this));
         allTokens.push(address(token));
-        curves[address(token)] = Curve(V_BASE_0, V_TOKENS_0, 0, false);
         metas[address(token)] = Meta(name, symbol, metaURI, creator, uint64(block.timestamp), srcChain);
+        venue.openMarket(address(token));
         emit Spawned(address(token), creator, srcChain, name, symbol, metaURI);
 
         // One genesis, every chain: deploy a native replica on each spoke.
@@ -207,42 +208,14 @@ contract SpawnPad is IOmniReceiver {
     }
 
     function _buy(uint32 srcChain, address token, address buyer, uint256 usdIn) internal {
-        Curve storage c = curves[token];
-        require(c.vTokens > 0, "PAD: unknown token");
-        require(usdIn > 0, "PAD: zero buy");
-
         // The spoke burned the buyer's OmniUSD; the value re-materializes here.
         usd.bridgeMint(address(this), usdIn);
 
-        uint256 k = c.vBase * c.vTokens;
-        uint256 out = c.vTokens - k / (c.vBase + usdIn);
-        uint256 spend = usdIn;
-        uint256 refund = 0;
-
-        if (!c.ascended) {
-            uint256 remaining = CURVE_SUPPLY - c.sold;
-            if (out >= remaining) {
-                out = remaining;
-                spend = k / (c.vTokens - out) - c.vBase + 1;
-                if (spend > usdIn) spend = usdIn;
-                refund = usdIn - spend;
-            }
-            require(out > 0, "PAD: dust");
-            c.vBase += spend;
-            c.vTokens -= out;
-            c.sold += out;
-            if (c.sold >= CURVE_SUPPLY) {
-                // Ascension: raised USD + reserved supply seed the omnipool.
-                uint256 raised = c.vBase - V_BASE_0;
-                c.vBase = raised;
-                c.vTokens = POOL_SUPPLY;
-                c.ascended = true;
-                emit Ascended(token, raised, uint64(block.timestamp));
-            }
-        } else {
-            require(out > 0, "PAD: dust");
-            c.vBase += usdIn;
-            c.vTokens -= out;
+        // Price discovery is the venue's job; settlement stays here.
+        (uint256 out, uint256 spend, bool ascendedNow) = venue.execBuy(token, usdIn);
+        uint256 refund = usdIn - spend;
+        if (ascendedNow) {
+            emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
         }
 
         // Ship the creature to the buyer's chain (burn hub-side, mint spoke-side).
@@ -254,30 +227,19 @@ contract SpawnPad is IOmniReceiver {
             abi.encode(OP_DELIVER, abi.encode(token, buyer, out, refund))
         );
 
-        emit Trade(token, srcChain, buyer, true, spend, out, spotPrice(token), uint64(block.timestamp));
+        emit Trade(token, srcChain, buyer, true, spend, out, venue.spotPrice(token), uint64(block.timestamp));
     }
 
     function _sell(uint32 srcChain, address token, address seller, uint256 tokensIn) internal {
-        Curve storage c = curves[token];
-        require(c.vTokens > 0, "PAD: unknown token");
-        require(tokensIn > 0, "PAD: zero sell");
-
         // The spoke burned the seller's replicas; they re-materialize in inventory.
         SpawnToken(token).bridgeMint(address(this), tokensIn);
 
-        uint256 k = c.vBase * c.vTokens;
-        uint256 usdOut = c.vBase - k / (c.vTokens + tokensIn);
-        require(usdOut > 0, "PAD: dust");
-        c.vBase -= usdOut;
-        c.vTokens += tokensIn;
-        if (!c.ascended) {
-            c.sold = c.sold > tokensIn ? c.sold - tokensIn : 0;
-        }
+        uint256 usdOut = venue.execSell(token, tokensIn);
 
         // Pay the seller out on their chain.
         usd.bridgeBurn(address(this), usdOut);
         messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(seller, usdOut)));
 
-        emit Trade(token, srcChain, seller, false, usdOut, tokensIn, spotPrice(token), uint64(block.timestamp));
+        emit Trade(token, srcChain, seller, false, usdOut, tokensIn, venue.spotPrice(token), uint64(block.timestamp));
     }
 }

@@ -14,8 +14,12 @@ Two modes, same UI (toggle in the nav):
 - **SIM** — in-browser market engine, zero setup.
 - **⛓ ONCHAIN** — a real Solidity deployment on a local chain: every buy,
   sell and spawn is a transaction against the hub-and-spoke protocol in
-  [contracts/](contracts/). See [docs/ONCHAIN.md](docs/ONCHAIN.md) for the
-  architecture and the path to testnet/mainnet.
+  [contracts/](contracts/). Price discovery is a pluggable **venue module**
+  (`ICurveVenue`): the internal genesis curve locally, a Raydium LaunchLab /
+  Meteora DBC adapter on the production Solana hub — so curve-phase trades
+  chart on Axiom/Dexscreener from the first second. See
+  [docs/ONCHAIN.md](docs/ONCHAIN.md) for the architecture and the path to
+  testnet/mainnet.
 
 ```bash
 npm run chain          # terminal 1 — local node
