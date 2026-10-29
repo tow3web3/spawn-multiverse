@@ -1,5 +1,6 @@
 import { useStore, shortAddr } from '../store'
 import { fmtUsd } from '../lib/format'
+import type { AppMode } from '../App'
 
 function scrollTo(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
@@ -22,32 +23,33 @@ function LogoBlob() {
 }
 
 export function Nav({
+  mode,
+  setMode,
   onOpenLab,
   onFreshSpawns,
 }: {
+  mode: AppMode
+  setMode: (m: AppMode) => void
   onOpenLab: () => void
   onFreshSpawns: () => void
 }) {
-  const { wallet, connect } = useStore()
+  const { wallet, connect, onchain } = useStore()
 
   const link =
     'hidden lg:inline-block font-mono text-[12px] font-bold tracking-wide hover:underline decoration-[3px] decoration-lime underline-offset-4 cursor-pointer'
 
   return (
     <header className="sticky top-0 z-40 border-b-3 border-ink bg-cream/95 backdrop-blur">
-      <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3 sm:px-6">
+      <div className="mx-auto flex max-w-7xl items-center gap-5 px-4 py-3 sm:px-6">
         <button
           className="flex items-center gap-2.5"
           onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
         >
           <LogoBlob />
           <span className="font-display text-2xl tracking-wide">SPAWN!</span>
-          <span className="mt-1 hidden font-mono text-[9px] font-bold tracking-[0.15em] opacity-60 xl:inline">
-            THE OMNICHAIN MEME MACHINE
-          </span>
         </button>
 
-        <nav className="ml-auto flex items-center gap-6">
+        <nav className="ml-auto flex items-center gap-5">
           <button className={`${link} underline`} onClick={() => scrollTo('pit')}>
             THE PIT
           </button>
@@ -62,13 +64,47 @@ export function Nav({
           </button>
         </nav>
 
-        <div className="hidden items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 font-mono text-[10px] font-bold sm:flex">
-          <span className="h-2 w-2 animate-blink rounded-full bg-up" />
-          MULTIVERSE LIVE
+        {/* sim / chain switch */}
+        <div className="flex overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold">
+          {(['sim', 'chain'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={`px-2.5 py-1.5 transition ${
+                mode === m ? 'bg-ink text-lime' : 'bg-white hover:bg-lime'
+              } ${m === 'chain' ? 'border-l-2 border-ink' : ''}`}
+              title={m === 'sim' ? 'Simulated market' : 'Local on-chain deployment'}
+            >
+              {m === 'sim' ? 'SIM' : '⛓ ONCHAIN'}
+            </button>
+          ))}
         </div>
 
+        <div className="hidden items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 font-mono text-[10px] font-bold xl:flex">
+          <span
+            className={`h-2 w-2 animate-blink rounded-full ${
+              !onchain || onchain.status === 'ready' ? 'bg-up' : 'bg-down'
+            }`}
+          />
+          {onchain
+            ? onchain.status === 'ready'
+              ? 'CHAIN LIVE'
+              : onchain.status.toUpperCase()
+            : 'MULTIVERSE LIVE'}
+        </div>
+
+        {onchain?.status === 'ready' && wallet && (
+          <button
+            onClick={() => void onchain.airdrop()}
+            title="Faucet $1,337 oUSD on every chain"
+            className="rounded-xl border-2 border-ink bg-lime px-3 py-2 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5"
+          >
+            💸 AIRDROP
+          </button>
+        )}
+
         <button
-          onClick={() => connect()}
+          onClick={() => void connect()}
           className="rounded-xl border-3 border-ink bg-ink px-4 py-2.5 font-mono text-[11px] font-bold tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
         >
           {wallet ? (
@@ -81,6 +117,14 @@ export function Nav({
           )}
         </button>
       </div>
+
+      {onchain && onchain.status !== 'ready' && (
+        <div className="border-t-2 border-ink bg-down px-4 py-1.5 text-center font-mono text-[10px] font-bold tracking-wide text-white">
+          {onchain.status === 'connecting'
+            ? '⛓ CONNECTING TO THE LOCAL CHAIN…'
+            : '⛓ LOCAL CHAIN OFFLINE — RUN `npm run chain` THEN `npm run chain:deploy`, OR FLIP BACK TO SIM.'}
+        </div>
+      )}
     </header>
   )
 }

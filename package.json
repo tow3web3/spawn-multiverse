@@ -6,11 +6,16 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "chain": "npm --prefix contracts run node",
+    "chain:deploy": "npm --prefix contracts run deploy:local",
+    "chain:bots": "npm --prefix contracts run bots",
+    "chain:test": "npm --prefix contracts test"
   },
   "dependencies": {
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "viem": "^2.57.13"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.5",

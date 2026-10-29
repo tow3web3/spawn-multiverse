@@ -29,6 +29,7 @@ export function CreatureModal({ num, onClose }: { num: number; onClose: () => vo
   const [usdStr, setUsdStr] = useState('50')
   const [pct, setPct] = useState(50)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -53,23 +54,31 @@ export function CreatureModal({ num, onClose }: { num: number; onClose: () => vo
   const rawPnl = pos ? posValue - pos.cost : 0
   const pnl = Math.abs(rawPnl) < 0.005 ? 0 : rawPnl
 
-  const doTrade = () => {
-    if (!wallet) {
-      connect()
-      setMsg({ ok: true, text: 'WALLET CONNECTED — HIT IT AGAIN TO TRADE.' })
-      return
-    }
-    const r = trade(num, side, amount, chain)
-    if (r.ok) {
-      setMsg({
-        ok: true,
-        text:
-          side === 'buy'
-            ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
-            : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}`,
-      })
-    } else {
-      setMsg({ ok: false, text: r.reason.toUpperCase() })
+  const doTrade = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      if (!wallet) {
+        await connect()
+        setMsg({ ok: true, text: 'WALLET CONNECTED — HIT IT AGAIN TO TRADE.' })
+        return
+      }
+      const r = await trade(num, side, amount, chain)
+      if (r.ok) {
+        setMsg({
+          ok: true,
+          text:
+            side === 'buy'
+              ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
+              : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}`,
+        })
+      } else {
+        setMsg({ ok: false, text: r.reason.toUpperCase() })
+      }
+    } catch {
+      setMsg({ ok: false, text: 'TRANSACTION FAILED — IS THE CHAIN RUNNING?' })
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -311,17 +320,19 @@ export function CreatureModal({ num, onClose }: { num: number; onClose: () => vo
             </p>
 
             <button
-              onClick={doTrade}
-              disabled={wallet !== null && (amount <= 0 || (side === 'sell' && !pos?.tokens))}
+              onClick={() => void doTrade()}
+              disabled={busy || (wallet !== null && (amount <= 0 || (side === 'sell' && !pos?.tokens)))}
               className={`mt-3 w-full rounded-xl border-3 border-ink px-6 py-3 font-mono text-[13px] font-bold tracking-wide shadow-brutal transition hover:-translate-y-0.5 hover:shadow-brutal-lg active:translate-y-0 active:shadow-brutal disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-brutal ${
                 side === 'buy' ? 'bg-lime' : 'bg-candy'
               }`}
             >
-              {!wallet
-                ? '◉ CONNECT WALLET TO TRADE'
-                : side === 'buy'
-                  ? `BUY $${c.ticker} ON ${chain.toUpperCase()} ↗`
-                  : `SELL $${c.ticker} ON ${chain.toUpperCase()} ↘`}
+              {busy
+                ? '✳ CONFIRMING…'
+                : !wallet
+                  ? '◉ CONNECT WALLET TO TRADE'
+                  : side === 'buy'
+                    ? `BUY $${c.ticker} ON ${chain.toUpperCase()} ↗`
+                    : `SELL $${c.ticker} ON ${chain.toUpperCase()} ↘`}
             </button>
 
             {msg && (

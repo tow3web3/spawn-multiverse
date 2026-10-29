@@ -1,0 +1,86 @@
+/**
+ * The organic on-chain market: bots that trade real transactions through the
+ * gateways, forever. Run after deploy-local:
+ *
+ *   npm run bots
+ */
+const fs = require('fs')
+const path = require('path')
+const { ethers } = require('hardhat')
+
+const E = (n) => ethers.parseEther(String(n))
+const rand = (lo, hi) => lo + Math.random() * (hi - lo)
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+async function main() {
+  const manifestPath = path.join(__dirname, '..', '..', 'public', 'onchain', 'deployment.json')
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+
+  const signers = await ethers.getSigners()
+  const bots = signers.slice(13, 19)
+  const pad = await ethers.getContractAt('SpawnPad', manifest.pad)
+  const chains = []
+  for (const c of manifest.chains) {
+    chains.push({
+      ...c,
+      gateway: await ethers.getContractAt('SpawnGateway', c.gateway),
+      usd: await ethers.getContractAt('OmniUSD', c.usd),
+    })
+  }
+
+  for (const c of chains) {
+    for (const b of bots) await (await c.usd.faucet(b.address, E(50_000))).wait()
+  }
+
+  const replicaCache = new Map()
+  async function replica(chain, token) {
+    const key = `${chain.id}:${token}`
+    if (!replicaCache.has(key)) {
+      const addr = await chain.gateway.replicaOf(token)
+      if (addr === ethers.ZeroAddress) return null
+      replicaCache.set(key, await ethers.getContractAt('SpawnToken', addr))
+    }
+    return replicaCache.get(key)
+  }
+
+  console.log('Bots online — trading the multiverse. Ctrl+C to stop.')
+  for (;;) {
+    try {
+      const len = Number(await pad.tokensLength())
+      if (len > 0) {
+        const token = await pad.allTokens(Math.floor(Math.random() * len))
+        const chain = pick(chains)
+        const bot = pick(bots)
+        const wantBuy = Math.random() < 0.58
+
+        if (!wantBuy) {
+          const rep = await replica(chain, token)
+          const bal = rep ? await rep.balanceOf(bot.address) : 0n
+          if (bal > E(1000)) {
+            const slice = (bal * BigInt(Math.floor(rand(10, 70)))) / 100n
+            await (await chain.gateway.connect(bot).sellToken(token, slice)).wait()
+            console.log(`SELL ${chain.id}`)
+          } else {
+            await (await chain.gateway.connect(bot).buyToken(token, E(rand(5, 150).toFixed(2)))).wait()
+            console.log(`BUY  ${chain.id}`)
+          }
+        } else {
+          const usdBal = await chain.usd.balanceOf(bot.address)
+          const usd = E(rand(5, 400).toFixed(2))
+          if (usdBal < usd) await (await chain.usd.faucet(bot.address, E(50_000))).wait()
+          await (await chain.gateway.connect(bot).buyToken(token, usd)).wait()
+          console.log(`BUY  ${chain.id}`)
+        }
+      }
+    } catch (e) {
+      console.error('bot trade failed:', e.shortMessage ?? e.message)
+    }
+    await sleep(rand(1200, 3000))
+  }
+}
+
+main().catch((e) => {
+  console.error(e)
+  process.exit(1)
+})

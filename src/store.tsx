@@ -297,7 +297,7 @@ function persistCustoms(world: World) {
 /* Derivation                                                         */
 /* ------------------------------------------------------------------ */
 
-function derive(meta: CreatureMeta, m: Market, now: number): Creature {
+export function deriveCreature(meta: CreatureMeta, m: Market, now: number): Creature {
   const price = priceOf(m)
   const ref = priceAt(m, Math.max(meta.spawnedAt, now - CHANGE_WINDOW))
   const recentRef = priceAt(m, Math.max(meta.spawnedAt, now - HOT_WINDOW))
@@ -348,18 +348,21 @@ export type TradeResult =
   | { ok: true; usd: number; tokens: number; price: number; ascended: boolean }
   | { ok: false; reason: string }
 
-interface StoreValue {
+export interface StoreValue {
+  mode: 'sim' | 'chain'
   creatures: Creature[]
   wallet: Wallet | null
-  connect: () => Wallet
-  spawn: (input: SpawnInput) => CreatureMeta
-  trade: (num: number, side: Side, amount: number, chain: string) => TradeResult
+  connect: () => Promise<Wallet>
+  spawn: (input: SpawnInput) => Promise<CreatureMeta>
+  trade: (num: number, side: Side, amount: number, chain: string) => Promise<TradeResult>
   getQuote: (num: number, side: Side, amount: number) => Quote | null
   getMarket: (num: number) => Market | undefined
   justSpawned: number | null
+  /** Present only in on-chain mode. */
+  onchain?: { status: 'connecting' | 'ready' | 'offline'; airdrop: () => Promise<void> }
 }
 
-const Ctx = createContext<StoreValue | null>(null)
+export const StoreCtx = createContext<StoreValue | null>(null)
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [wallet, setWallet] = useState<Wallet | null>(() => loadWallet())
@@ -493,20 +496,31 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     const world = worldRef.current!
     const now = Date.now()
     return [...world.metas.values()].map((meta) =>
-      derive(meta, world.markets.get(meta.num)!, now),
+      deriveCreature(meta, world.markets.get(meta.num)!, now),
     )
   }, [version])
 
-  const value = useMemo(
-    () => ({ creatures, wallet, connect, spawn, trade, getQuote, getMarket, justSpawned }),
+  const value = useMemo<StoreValue>(
+    () => ({
+      mode: 'sim',
+      creatures,
+      wallet,
+      connect: async () => connect(),
+      spawn: async (input: SpawnInput) => spawn(input),
+      trade: async (num: number, side: Side, amount: number, chain: string) =>
+        trade(num, side, amount, chain),
+      getQuote,
+      getMarket,
+      justSpawned,
+    }),
     [creatures, wallet, connect, spawn, trade, getQuote, getMarket, justSpawned],
   )
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>
+  return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>
 }
 
 export function useStore(): StoreValue {
-  const v = useContext(Ctx)
-  if (!v) throw new Error('useStore must be used inside <StoreProvider>')
+  const v = useContext(StoreCtx)
+  if (!v) throw new Error('useStore must be used inside a store provider')
   return v
 }

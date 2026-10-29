@@ -9,8 +9,24 @@ A launchpad prototype where every meme token launches on **all six chains at onc
 - **One price** — every chain reads the same global price reference, so the token
   costs the same everywhere, always.
 
-This is a **working prototype with a real market engine** — the money is
-fictional, the math is not. No blockchain transactions are submitted.
+Two modes, same UI (toggle in the nav):
+
+- **SIM** — in-browser market engine, zero setup.
+- **⛓ ONCHAIN** — a real Solidity deployment on a local chain: every buy,
+  sell and spawn is a transaction against the hub-and-spoke protocol in
+  [contracts/](contracts/). See [docs/ONCHAIN.md](docs/ONCHAIN.md) for the
+  architecture and the path to testnet/mainnet.
+
+```bash
+npm run chain          # terminal 1 — local node
+npm run chain:deploy   # terminal 2 — deploy + seed the pit
+npm run chain:bots     # optional — live on-chain bot market
+npm run dev            # terminal 3 — flip the nav toggle to ⛓ ONCHAIN
+npm run chain:test     # contract invariants suite
+```
+
+The money is fictional in both modes; the math (and in on-chain mode, the
+transactions) are not.
 
 ## The engine
 

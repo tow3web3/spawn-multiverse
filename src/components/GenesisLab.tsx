@@ -46,6 +46,8 @@ export function GenesisLab({
   const [imageError, setImageError] = useState(false)
   const [links, setLinks] = useState<CreatureLinks>({})
   const [devBuyStr, setDevBuyStr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [spawnErr, setSpawnErr] = useState<string | null>(null)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -67,21 +69,29 @@ export function GenesisLab({
     }
   }
 
-  const submit = () => {
-    if (!ready || !image) return
-    const c = spawn({
-      name: name.trim(),
-      ticker: ticker.trim(),
-      image,
-      links: cleanLinks(links),
-    })
-    const devBuy = Number.parseFloat(devBuyStr) || 0
-    if (devBuy > 0) {
-      const w = connect()
-      trade(c.num, 'buy', Math.min(devBuy, w.balance), randomChain())
+  const submit = async () => {
+    if (!ready || !image || busy) return
+    setBusy(true)
+    setSpawnErr(null)
+    try {
+      const c = await spawn({
+        name: name.trim(),
+        ticker: ticker.trim(),
+        image,
+        links: cleanLinks(links),
+      })
+      const devBuy = Number.parseFloat(devBuyStr) || 0
+      if (devBuy > 0) {
+        const w = await connect()
+        await trade(c.num, 'buy', Math.min(devBuy, w.balance), randomChain())
+      }
+      onClose()
+      onSpawned(c.num)
+    } catch {
+      setSpawnErr('SPAWN FAILED — IS THE LOCAL CHAIN RUNNING? CHECK THE NODE AND TRY AGAIN.')
+    } finally {
+      setBusy(false)
     }
-    onClose()
-    onSpawned(c.num)
   }
 
   const label = 'font-mono text-[10px] font-bold tracking-[0.15em] text-white/60'
@@ -273,15 +283,20 @@ export function GenesisLab({
             </div>
 
             <button
-              onClick={submit}
-              disabled={!ready}
+              onClick={() => void submit()}
+              disabled={!ready || busy}
               className="mt-7 w-full rounded-xl border-3 border-white/25 bg-void px-6 py-4 font-mono text-[13px] font-bold tracking-wide text-white shadow-[6px_6px_0_0_#c9f24b] transition hover:-translate-y-1 hover:shadow-[9px_9px_0_0_#c9f24b] active:translate-y-0 active:shadow-[6px_6px_0_0_#c9f24b] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
             >
-              ✳ SIMULATE MULTIVERSE SPAWN ↗
+              {busy ? '✳ SPAWNING ACROSS THE MULTIVERSE…' : '✳ SPAWN ACROSS THE MULTIVERSE ↗'}
             </button>
+            {spawnErr && (
+              <p className="mt-3 font-mono text-[10px] font-bold tracking-wide text-down">
+                {spawnErr}
+              </p>
+            )}
             <p className="mt-3 font-mono text-[10px] leading-relaxed text-white/35">
               {ready
-                ? 'Prototype only. Clicking this adds a fictional token to the marketplace; it does not submit a blockchain transaction.'
+                ? 'Demo money only — in on-chain mode this submits real transactions to the local SPAWN! deployment.'
                 : 'Name it, tick it, give it a face — then the multiverse opens.'}
             </p>
           </div>
