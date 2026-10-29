@@ -1,0 +1,8 @@
+{
+  "baseSepolia": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "usd": "0x008c4d40F61fd650b1DC91fD7ad540483324cE2C",
+    "pad": "0xC2f3855ECcB6bD2261831743Ece9752ec9E53811",
+    "venue": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5"
+  }
+}
