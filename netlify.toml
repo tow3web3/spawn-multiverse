@@ -1,0 +1,4 @@
+# Public demo deploy: SIM mode only — a shared link has no local chain.
+[build]
+  command = "VITE_PUBLIC_DEMO=1 npm run build"
+  publish = "dist"
