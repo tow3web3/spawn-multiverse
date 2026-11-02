@@ -17,6 +17,24 @@ import {
 
 export type Side = 'buy' | 'sell'
 
+/** Who eats the 1% trading fee — the dev picks this at launch, forever. */
+export type FeeMode = 'holders' | 'split' | 'dev' | 'burn'
+
+export interface Fees {
+  mode: FeeMode
+  /** Everything ever collected (USD). */
+  total: number
+  /** Streamed to holders (USD). */
+  holders: number
+  /** Accrued to the dev (USD) and what they already claimed. */
+  dev: number
+  devClaimed: number
+  /** Burn mode: pot waiting for the next buyback, and what's been torched. */
+  burnPot: number
+  burnedUsd: number
+  burnedTokens: number
+}
+
 export interface Trade {
   id: number
   ts: number
@@ -42,15 +60,27 @@ export interface Market {
   volume: number
   chainTokens: Record<string, number>
   balances: Map<string, number>
+  fees: Fees
   ascendedAt?: number
 }
 
 const MAX_TRADES = 30
 const MAX_HISTORY = 420
 
+/** 1% on every trade, taken on the executed notional. */
+export const FEE_RATE = 0.01
+/** Burn mode buys back in chunks, not dust. */
+const BURN_TRIGGER = 4
+/** The protocol's buyback executor, visible on the tape. */
+export const BURNER = 'SPAWN·BURNER'
+
 let tradeId = 1
 
-export function createMarket(spawnTs: number): Market {
+export function emptyFees(mode: FeeMode): Fees {
+  return { mode, total: 0, holders: 0, dev: 0, devClaimed: 0, burnPot: 0, burnedUsd: 0, burnedTokens: 0 }
+}
+
+export function createMarket(spawnTs: number, feeMode: FeeMode = 'holders'): Market {
   const state = initialState()
   return {
     state,
@@ -59,6 +89,7 @@ export function createMarket(spawnTs: number): Market {
     volume: 0,
     chainTokens: {},
     balances: new Map(),
+    fees: emptyFees(feeMode),
   }
 }
 
@@ -112,30 +143,79 @@ export type ExecResult =
   | { ok: true; usd: number; tokens: number; price: number; ascended: boolean }
   | { ok: false; reason: string }
 
+/** Splits a collected fee per the token's mode; burn mode buys back & burns. */
+function accrueFee(m: Market, fee: number, chain: string, ts: number) {
+  if (fee <= 0) return
+  const f = m.fees
+  f.total += fee
+  switch (f.mode) {
+    case 'holders':
+      f.holders += fee
+      break
+    case 'split':
+      f.holders += fee / 2
+      f.dev += fee / 2
+      break
+    case 'dev':
+      f.dev += fee
+      break
+    case 'burn': {
+      f.burnPot += fee
+      if (f.burnPot < BURN_TRIGGER) break
+      // The buyback is a REAL buy on the same curve — it moves the price —
+      // and the tokens it gets never touch a balance: they're burned.
+      const pot = f.burnPot
+      f.burnPot = 0
+      const r = applyBuy(m.state, pot)
+      if (r.tokens <= 0) break
+      m.state = r.state
+      if (r.ascended) m.ascendedAt = ts
+      f.burnedUsd += r.usd
+      f.burnedTokens += r.tokens
+      record(m, {
+        id: tradeId++,
+        ts,
+        side: 'buy',
+        chain,
+        usd: r.usd,
+        tokens: r.tokens,
+        price: r.usd / r.tokens,
+        trader: BURNER,
+      })
+      break
+    }
+  }
+}
+
 export function execute(m: Market, input: ExecInput): ExecResult {
   const ts = input.ts ?? Date.now()
 
   if (input.side === 'buy') {
     const usd = input.usd ?? 0
     if (usd <= 0) return { ok: false, reason: 'Nothing to buy.' }
-    const r = applyBuy(m.state, usd)
+    const feeIn = usd * FEE_RATE
+    const r = applyBuy(m.state, usd - feeIn)
     if (r.tokens <= 0) return { ok: false, reason: 'Curve is out of tokens.' }
+    // If the curve capped the buy, the fee shrinks with it.
+    const fee = r.usd < usd - feeIn - 1e-9 ? r.usd * FEE_RATE : feeIn
     m.state = r.state
     if (r.ascended) m.ascendedAt = ts
     m.balances.set(input.trader, (m.balances.get(input.trader) ?? 0) + r.tokens)
     m.chainTokens[input.chain] = (m.chainTokens[input.chain] ?? 0) + r.tokens
+    const spent = r.usd + fee
     const price = r.usd / r.tokens
     record(m, {
       id: tradeId++,
       ts,
       side: 'buy',
       chain: input.chain,
-      usd: r.usd,
+      usd: spent,
       tokens: r.tokens,
       price,
       trader: input.trader,
     })
-    return { ok: true, usd: r.usd, tokens: r.tokens, price, ascended: r.ascended }
+    accrueFee(m, fee, input.chain, ts)
+    return { ok: true, usd: spent, tokens: r.tokens, price, ascended: r.ascended }
   }
 
   const want = input.tokens ?? 0
@@ -146,18 +226,21 @@ export function execute(m: Market, input: ExecInput): ExecResult {
   m.state = r.state
   m.balances.set(input.trader, held - tokens)
   m.chainTokens[input.chain] = Math.max(0, (m.chainTokens[input.chain] ?? 0) - tokens)
+  const fee = r.usd * FEE_RATE
+  const net = r.usd - fee
   const price = r.usd / tokens
   record(m, {
     id: tradeId++,
     ts,
     side: 'sell',
     chain: input.chain,
-    usd: r.usd,
+    usd: net,
     tokens,
     price,
     trader: input.trader,
   })
-  return { ok: true, usd: r.usd, tokens, price, ascended: false }
+  accrueFee(m, fee, input.chain, ts)
+  return { ok: true, usd: net, tokens, price, ascended: false }
 }
 
 export function quote(m: Market, side: Side, amount: number): Quote {

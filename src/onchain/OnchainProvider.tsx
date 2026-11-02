@@ -27,7 +27,7 @@ import {
   type TradeResult,
   type Wallet,
 } from '../store'
-import { quote as marketQuote, type Market, type Side, type Trade } from '../engine/market'
+import { emptyFees, quote as marketQuote, type Market, type Side, type Trade } from '../engine/market'
 import { gatewayAbi, padAbi, tokenAbi, usdAbi, type Manifest } from './abi'
 import type { FaceId } from '../components/Faces'
 
@@ -72,7 +72,12 @@ function loadCosts(addr: string): Record<number, number> {
   }
 }
 
-function parseMetaURI(uri: string): { face?: FaceId; image?: string; links?: CreatureMeta['links'] } {
+function parseMetaURI(uri: string): {
+  face?: FaceId
+  image?: string
+  links?: CreatureMeta['links']
+  feeMode?: CreatureMeta['feeMode']
+} {
   try {
     return JSON.parse(uri)
   } catch {
@@ -166,6 +171,7 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
             color: PALETTE[(num - 1) % PALETTE.length],
             spawnedAt: Number(spawnedAt) * 1000,
             custom: false,
+            feeMode: parsed.feeMode,
           },
           market: {
             state: { phase: 'curve', vBase: 0, vTokens: 1, sold: 0 },
@@ -174,6 +180,7 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
             volume: 0,
             chainTokens: {},
             balances: new Map(),
+            fees: emptyFees(parsed.feeMode ?? 'holders'),
           },
         }
         entriesRef.current.set(num, entry)
@@ -466,7 +473,7 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
       // metaURI stays small on purpose: in production the image goes to IPFS
       // and the URI points at it; on the local devnet we keep the image in
       // this browser, keyed by the token address.
-      const metaURI = JSON.stringify({ links: input.links })
+      const metaURI = JSON.stringify({ links: input.links, feeMode: input.feeMode ?? 'holders' })
       const gw = m.chains[0] // genesis is submitted from solana; it lands everywhere
       const hash = await wc.writeContract({
         address: gw.gateway,

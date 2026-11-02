@@ -1,4 +1,4 @@
-import { LastLaunch } from './LastLaunch'
+import { HeroCharts } from './LastLaunch'
 import { ChainLogo, CHAIN_LOGO_LABELS } from './ChainLogos'
 import { Asterisk } from './bits'
 
@@ -96,8 +96,8 @@ export function Hero({
         </div>
       </div>
 
-      {/* right — the most recent launch, live */}
-      <LastLaunch onOpen={onOpenCreature} />
+      {/* right — last launch + top mcap, live */}
+      <HeroCharts onOpen={onOpenCreature} />
     </section>
   )
 }

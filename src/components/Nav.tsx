@@ -3,7 +3,16 @@ import { fmtUsd } from '../lib/format'
 import { PUBLIC_DEMO, type AppMode } from '../App'
 
 function scrollTo(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+  // From a sub-page (#/token/…), go home first, then scroll.
+  if (window.location.hash.startsWith('#/')) {
+    window.location.hash = ''
+    window.setTimeout(
+      () => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' }),
+      80,
+    )
+  } else {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
+  }
 }
 
 function LogoBlob() {
@@ -27,11 +36,13 @@ export function Nav({
   setMode,
   onOpenLab,
   onFreshSpawns,
+  onHome,
 }: {
   mode: AppMode
   setMode: (m: AppMode) => void
   onOpenLab: () => void
   onFreshSpawns: () => void
+  onHome: () => void
 }) {
   const { wallet, connect, onchain } = useStore()
 
@@ -41,10 +52,7 @@ export function Nav({
   return (
     <header className="sticky top-0 z-40 border-b-3 border-ink bg-cream/95 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center gap-5 px-4 py-3 sm:px-6">
-        <button
-          className="flex items-center gap-2.5"
-          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-        >
+        <button className="flex items-center gap-2.5" onClick={onHome}>
           <LogoBlob />
           <span className="font-display text-2xl tracking-wide">SPAWN!</span>
         </button>
@@ -55,6 +63,12 @@ export function Nav({
           </button>
           <button className={link} onClick={onFreshSpawns}>
             NEW TOKENS
+          </button>
+          <button className={link} onClick={() => (window.location.hash = '/portfolio')}>
+            PORTFOLIO
+          </button>
+          <button className={link} onClick={() => (window.location.hash = '/dev')}>
+            DEV ZONE
           </button>
           <button className={link} onClick={() => scrollTo('how')}>
             HOW IT WORKS

@@ -18,6 +18,7 @@ import {
 } from './engine/curve'
 import {
   createMarket,
+  emptyFees,
   execute,
   holdersCount,
   priceAt,
@@ -25,6 +26,8 @@ import {
   quote as marketQuote,
   randomBotTrade,
   simulateLife,
+  type FeeMode,
+  type Fees,
   type Market,
   type PricePoint,
   type SeedPhase,
@@ -33,7 +36,8 @@ import {
 } from './engine/market'
 
 export { TOTAL_SUPPLY as GLOBAL_SUPPLY, START_PRICE } from './engine/curve'
-export type { Side, Trade, PricePoint, Market } from './engine/market'
+export { FEE_RATE, BURNER } from './engine/market'
+export type { Side, Trade, PricePoint, Market, FeeMode, Fees } from './engine/market'
 
 export type Status = 'live' | 'hot' | 'ascended'
 
@@ -55,6 +59,10 @@ export interface CreatureMeta {
   color: string
   spawnedAt: number
   custom?: boolean
+  /** Who eats the 1% trading fee — chosen by the dev at launch. */
+  feeMode?: FeeMode
+  /** Wallet that launched it (dev dashboard ownership). */
+  creator?: string
 }
 
 /** A creature with its live market data derived from the engine. */
@@ -68,6 +76,8 @@ export interface Creature extends CreatureMeta {
   mcap: number
   /** 0..1 along the genesis curve; 1 once ascended. */
   progress: number
+  /** Live fee accounting (sim engine; on-chain fees land in protocol v2). */
+  fees?: Fees
 }
 
 export interface Position {
@@ -101,6 +111,7 @@ interface Seed {
   minutesAgo: number
   steps: number
   phases: SeedPhase[]
+  feeMode: FeeMode
 }
 
 const SEEDS: Seed[] = [
@@ -108,6 +119,7 @@ const SEEDS: Seed[] = [
     num: 1,
     name: 'GLOOP SUPREME',
     ticker: 'GLOOP',
+    feeMode: 'holders',
     face: 'frog',
     minutesAgo: 47,
     steps: 320,
@@ -121,6 +133,7 @@ const SEEDS: Seed[] = [
     num: 2,
     name: 'BRAINROT 3000',
     ticker: 'ROT',
+    feeMode: 'burn',
     face: 'brain',
     minutesAgo: 123,
     steps: 700,
@@ -134,6 +147,7 @@ const SEEDS: Seed[] = [
     num: 3,
     name: 'SIR BORKS',
     ticker: 'BORK',
+    feeMode: 'split',
     face: 'bork',
     minutesAgo: 82,
     steps: 260,
@@ -146,6 +160,7 @@ const SEEDS: Seed[] = [
     num: 4,
     name: 'COSMIC PICKLE',
     ticker: 'PICKL',
+    feeMode: 'dev',
     face: 'pickle',
     minutesAgo: 36,
     steps: 90,
@@ -155,6 +170,7 @@ const SEEDS: Seed[] = [
     num: 5,
     name: 'MOCHI MAYHEM',
     ticker: 'MOCHI',
+    feeMode: 'holders',
     face: 'mochi',
     minutesAgo: 118,
     steps: 300,
@@ -167,6 +183,7 @@ const SEEDS: Seed[] = [
     num: 6,
     name: 'ALIEN INTERN',
     ticker: 'INTRN',
+    feeMode: 'split',
     face: 'alien',
     minutesAgo: 3,
     steps: 26,
@@ -189,6 +206,7 @@ interface StoredCustom {
   balances: [string, number][]
   trades: Trade[]
   history: PricePoint[]
+  fees?: Fees
   ascendedAt?: number
 }
 
@@ -231,8 +249,9 @@ function buildWorld(wallet: Wallet | null): World {
       face: s.face,
       color: FACE_COLOR[s.face],
       spawnedAt,
+      feeMode: s.feeMode,
     })
-    const m = createMarket(spawnedAt)
+    const m = createMarket(spawnedAt, s.feeMode)
     simulateLife(m, spawnedAt, now - 3000, s.steps, s.phases)
     markets.set(s.num, m)
   }
@@ -250,6 +269,7 @@ function buildWorld(wallet: Wallet | null): World {
           balances: new Map(sc.balances ?? []),
           trades: sc.trades ?? [],
           history: sc.history?.length ? sc.history : [{ ts: sc.meta.spawnedAt, price: START_PRICE }],
+          fees: sc.fees ?? emptyFees(sc.meta.feeMode ?? 'holders'),
           ascendedAt: sc.ascendedAt,
         })
       }
@@ -284,6 +304,7 @@ function persistCustoms(world: World) {
         balances: [...m.balances.entries()].filter(([, v]) => v > 1),
         trades: m.trades.slice(0, 15),
         history: m.history.slice(-150),
+        fees: m.fees,
         ascendedAt: m.ascendedAt,
       })
     }
@@ -309,9 +330,10 @@ export function deriveCreature(meta: CreatureMeta, m: Market, now: number): Crea
     change: ref > 0 ? (price / ref - 1) * 100 : 0,
     volume: m.volume,
     holders: holdersCount(m),
-    supply: TOTAL_SUPPLY,
-    mcap: price * TOTAL_SUPPLY,
+    supply: TOTAL_SUPPLY - m.fees.burnedTokens,
+    mcap: price * (TOTAL_SUPPLY - m.fees.burnedTokens),
     progress: ascensionProgress(m.state),
+    fees: m.fees,
   }
 }
 
@@ -342,6 +364,8 @@ export interface SpawnInput {
   ticker: string
   image: string
   links?: CreatureLinks
+  /** Fee routing, picked once at launch. Defaults to 'holders'. */
+  feeMode?: FeeMode
 }
 
 export type TradeResult =
@@ -357,6 +381,8 @@ export interface StoreValue {
   trade: (num: number, side: Side, amount: number, chain: string) => Promise<TradeResult>
   getQuote: (num: number, side: Side, amount: number) => Quote | null
   getMarket: (num: number) => Market | undefined
+  /** Dev claims their accrued fee share (sim engine; absent on-chain for now). */
+  claimFees?: (num: number) => Promise<number>
   justSpawned: number | null
   /** Present only in on-chain mode. */
   onchain?: { status: 'connecting' | 'ready' | 'offline'; airdrop: () => Promise<void> }
@@ -466,9 +492,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       color: PALETTE[(num - 1) % PALETTE.length],
       spawnedAt: Date.now(),
       custom: true,
+      feeMode: input.feeMode ?? 'holders',
+      creator: walletRef.current?.address,
     }
     world.metas.set(num, meta)
-    const m = createMarket(meta.spawnedAt)
+    const m = createMarket(meta.spawnedAt, meta.feeMode)
     // A couple of instant snipes so a fresh spawn isn't lonely.
     randomBotTrade(m, { buyBias: 0.95 })
     randomBotTrade(m, { buyBias: 0.95 })
@@ -491,6 +519,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [],
   )
 
+  const claimFees = useCallback((num: number): number => {
+    const world = worldRef.current!
+    const w = walletRef.current
+    const m = world.markets.get(num)
+    if (!w || !m) return 0
+    const claimable = m.fees.dev - m.fees.devClaimed
+    if (claimable <= 0.005) return 0
+    m.fees.devClaimed += claimable
+    const nw: Wallet = { ...w, balance: w.balance + claimable }
+    walletRef.current = nw
+    setWallet(nw)
+    persistCustoms(world)
+    bump()
+    return claimable
+  }, [])
+
   const creatures = useMemo(() => {
     void version
     const world = worldRef.current!
@@ -511,9 +555,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         trade(num, side, amount, chain),
       getQuote,
       getMarket,
+      claimFees: async (num: number) => claimFees(num),
       justSpawned,
     }),
-    [creatures, wallet, connect, spawn, trade, getQuote, getMarket, justSpawned],
+    [creatures, wallet, connect, spawn, trade, getQuote, getMarket, claimFees, justSpawned],
   )
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>

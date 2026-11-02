@@ -16,11 +16,14 @@ export function PriceChart({
   points,
   ascendedAt,
   dark = false,
+  height = 'h-40',
 }: {
   points: PricePoint[]
   ascendedAt?: number
   /** On dark panels the line goes lime and grid/labels go white. */
   dark?: boolean
+  /** Tailwind height class for the chart box. */
+  height?: string
 }) {
   const inkOrLime = dark ? '#c9f24b' : '#141414'
   const gridColor = dark ? '#ffffff' : '#141414'
@@ -81,7 +84,7 @@ export function PriceChart({
   return (
     <div
       ref={wrapRef}
-      className="relative h-40 w-full cursor-crosshair touch-none select-none"
+      className={`relative ${height} w-full cursor-crosshair touch-none select-none`}
       onPointerMove={onMove}
       onPointerLeave={() => setHover(null)}
     >

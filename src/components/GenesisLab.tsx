@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks } from '../store'
+import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks, type FeeMode } from '../store'
 import { CHAINS } from '../lib/chains'
 import { randomChain } from '../engine/market'
 import { fmtNum, fmtPrice } from '../lib/format'
@@ -45,6 +45,7 @@ export function GenesisLab({
   const [image, setImage] = useState<string | null>(null)
   const [imageError, setImageError] = useState(false)
   const [links, setLinks] = useState<CreatureLinks>({})
+  const [feeMode, setFeeMode] = useState<FeeMode>('holders')
   const [devBuyStr, setDevBuyStr] = useState('')
   const [busy, setBusy] = useState(false)
   const [spawnErr, setSpawnErr] = useState<string | null>(null)
@@ -79,6 +80,7 @@ export function GenesisLab({
         ticker: ticker.trim(),
         image,
         links: cleanLinks(links),
+        feeMode,
       })
       const devBuy = Number.parseFloat(devBuyStr) || 0
       if (devBuy > 0) {
@@ -263,8 +265,48 @@ export function GenesisLab({
                 6 / 6 ACTIVATED ✓
               </span>
             </div>
+            <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
+              💡 You pay the launch on <span className="text-lime">ONE chain only</span> — the
+              one you launch from, with its gas token. SPAWN! deploys natively to the other
+              five. No 6 wallets, no 6 gas tokens.
+            </p>
 
-            <p className={`${label} mt-7`}>06 — SNIPE YOUR OWN SPAWN (OPTIONAL)</p>
+            <p className={`${label} mt-7`}>06 — WHO EATS THE 1% TRADING FEE?</p>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              {(
+                [
+                  ['holders', '💚 100% HOLDERS', 'Every fee streams to the people holding.'],
+                  ['split', '🤝 50 / 50', 'Half to holders, half to you.'],
+                  ['dev', '👑 100% DEV', 'All fees are yours to claim.'],
+                  ['burn', '🔥 BUYBACK & BURN', 'Fees auto-buy the token and burn it.'],
+                ] as [FeeMode, string, string][]
+              ).map(([m, title, desc]) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setFeeMode(m)}
+                  aria-pressed={feeMode === m}
+                  className={`rounded-xl border-3 p-3 text-left transition ${
+                    feeMode === m
+                      ? 'border-lime bg-lime/10 shadow-[4px_4px_0_0_#c9f24b]'
+                      : 'border-white/20 bg-void hover:border-white/40'
+                  }`}
+                >
+                  <span className="block font-mono text-[11px] font-bold tracking-wide text-white">
+                    {title}
+                  </span>
+                  <span className="mt-1 block font-mono text-[9px] leading-relaxed text-white/40">
+                    {desc}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
+              Locked at launch, forever. Fees from all six chains land in one global pot —
+              one market, one pot.
+            </p>
+
+            <p className={`${label} mt-7`}>07 — SNIPE YOUR OWN SPAWN (OPTIONAL)</p>
             <div className="mt-3 flex items-center gap-3 rounded-xl border-3 border-white/20 bg-void px-4 py-3">
               <span className="font-mono text-[13px] font-bold text-white/50">DEV BUY $</span>
               <input
