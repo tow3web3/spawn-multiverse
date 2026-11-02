@@ -1,5 +1,5 @@
-import { Face, type FaceId } from './Faces'
-import { GenesisSim } from './GenesisSim'
+import { LastLaunch } from './LastLaunch'
+import { ChainLogo, CHAIN_LOGO_LABELS } from './ChainLogos'
 import { Asterisk } from './bits'
 
 function Underline() {
@@ -21,14 +21,13 @@ function Underline() {
   )
 }
 
-const CULT: { face: FaceId; bg: string }[] = [
-  { face: 'frog', bg: '#b5e95b' },
-  { face: 'brain', bg: '#f7a8ce' },
-  { face: 'bork', bg: '#f7be7b' },
-  { face: 'alien', bg: '#8be0d4' },
-]
-
-export function Hero({ onOpenLab }: { onOpenLab: () => void }) {
+export function Hero({
+  onOpenLab,
+  onOpenCreature,
+}: {
+  onOpenLab: () => void
+  onOpenCreature: (num: number) => void
+}) {
   return (
     <section className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:py-10">
       {/* left — lime panel */}
@@ -40,31 +39,28 @@ export function Hero({ onOpenLab }: { onOpenLab: () => void }) {
 
         <div className="relative flex flex-wrap items-center gap-2">
           <span className="rounded-full border-2 border-ink bg-cream px-3 py-1 font-mono text-[10px] font-bold tracking-wide">
-            ✳ THE MEME MULTIVERSE IS OPEN
-          </span>
-          <span className="rounded-full border-2 border-ink bg-ink px-3 py-1 font-mono text-[10px] font-bold tracking-wide text-lime">
-            GENESIS ENGINE V.01
+            ✳ LIVE ON 6 CHAINS
           </span>
         </div>
 
-        <h1 className="relative mt-6 font-display text-[clamp(3.2rem,8vw,6.5rem)] leading-[0.95] tracking-wide">
-          YOUR MEME
+        <h1 className="relative mt-6 font-display text-[clamp(2.9rem,7vw,5.8rem)] leading-[0.95] tracking-wide">
+          ONE TOKEN.
           <br />
-          IS NOT
+          EVERY CHAIN.
           <br />
           <span className="relative inline-block">
-            LOCAL.
+            ONE PRICE.
             <Underline />
           </span>
         </h1>
 
         <p className="relative mt-7 max-w-md text-[17px] font-medium leading-relaxed">
-          Spawn{' '}
+          Launch a token once — it goes live{' '}
           <mark className="bg-ink px-1.5 py-0.5 font-bold text-lime">
-            one token on every chain
+            natively on all 6 chains
           </mark>{' '}
-          in the same coordinated launch. One global supply. One shared price reference. A
-          whole lot of internet nonsense.
+          at the same second. One global supply, one market, and the exact same price
+          everywhere. No bridges, no wrapped copies.
         </p>
 
         <div className="relative mt-8 flex flex-wrap gap-3">
@@ -72,7 +68,7 @@ export function Hero({ onOpenLab }: { onOpenLab: () => void }) {
             onClick={onOpenLab}
             className="rounded-xl border-3 border-ink bg-ink px-6 py-3.5 font-mono text-[13px] font-bold tracking-wide text-white shadow-brutal transition hover:-translate-y-1 hover:shadow-brutal-lg active:translate-y-0 active:shadow-brutal"
           >
-            SPAWN A MEME ↗
+            LAUNCH A TOKEN ↗
           </button>
           <a
             href="#pit"
@@ -82,33 +78,26 @@ export function Hero({ onOpenLab }: { onOpenLab: () => void }) {
           </a>
         </div>
 
-        <div className="relative mt-10 flex flex-wrap items-end justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex -space-x-2.5">
-              {CULT.map(({ face, bg }) => (
-                <span
-                  key={face}
-                  className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border-2 border-ink"
-                  style={{ background: bg }}
-                >
-                  <Face id={face} size={26} />
-                </span>
-              ))}
-            </div>
-            <span className="font-mono text-[10px] font-bold leading-tight tracking-wide">
-              THE CULT IS
-              <br />
-              EVERYWHERE
-            </span>
+        <div className="relative mt-10">
+          <p className="font-mono text-[10px] font-bold tracking-[0.2em] opacity-70">
+            LIVE ON
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {CHAIN_LOGO_LABELS.map(({ id, label }) => (
+              <span
+                key={id}
+                className="flex items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm"
+              >
+                <ChainLogo id={id} size={16} />
+                {label}
+              </span>
+            ))}
           </div>
-          <span className="font-mono text-[10px] font-bold tracking-wide opacity-70">
-            6 CHAINS. 1 GENESIS. 0 GEOGRAPHICAL LIMITS.
-          </span>
         </div>
       </div>
 
-      {/* right — genesis simulation */}
-      <GenesisSim />
+      {/* right — the most recent launch, live */}
+      <LastLaunch onOpen={onOpenCreature} />
     </section>
   )
 }

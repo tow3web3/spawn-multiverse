@@ -5,9 +5,9 @@ import { CreatureCard } from './CreatureCard'
 export type PitTab = 'all' | 'hot' | 'new' | 'ascended'
 
 const TABS: { id: PitTab; label: string }[] = [
-  { id: 'all', label: 'ALL CREATURES' },
+  { id: 'all', label: 'ALL TOKENS' },
   { id: 'hot', label: '🔥 HOT RIGHT NOW' },
-  { id: 'new', label: '✳ JUST SPAWNED' },
+  { id: 'new', label: '✳ NEW' },
   { id: 'ascended', label: '⬆ ASCENDED' },
 ]
 
@@ -141,7 +141,7 @@ export function ThePit({
       </div>
 
       <div className="mt-5 flex items-center justify-between font-mono text-[10px] font-bold tracking-[0.15em] opacity-60">
-        <span>{filtered.length} CREATURES LOCATED</span>
+        <span>{filtered.length} TOKENS LISTED</span>
         <span>▦ SORTED BY MEME VELOCITY ↓</span>
       </div>
 

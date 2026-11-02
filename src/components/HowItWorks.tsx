@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useStore } from '../store'
 import { CHAINS } from '../lib/chains'
 import { fmtPrice } from '../lib/format'
@@ -8,7 +9,7 @@ const STEPS = [
     num: '01',
     title: 'SPAWN ONCE',
     bg: '#c9f24b',
-    body: 'Pick a face, name your menace, hit spawn. The genesis engine coordinates one native deployment on all six chains in a single launch — no bridging, no wrapped versions, no knock-off contracts.',
+    body: 'Upload an image, name your token, hit launch. One native deployment goes live on all six chains in a single coordinated genesis — no bridging, no wrapped versions, no knock-off contracts.',
   },
   {
     num: '02',
@@ -24,8 +25,28 @@ const STEPS = [
   },
 ]
 
+const MORE = [
+  {
+    title: 'WHY IS THE PRICE THE SAME?',
+    body: 'Because there is only ONE market. Every buy and sell — from any chain — executes against the same global curve. The price isn’t synchronized between chains; it’s the same number because it’s the same market. Nothing to arbitrage.',
+  },
+  {
+    title: 'THE CURVE, THEN ASCENSION',
+    body: 'Every token starts on a launch curve: 800M of the 1B supply sells there, starting near zero. Around $86K market cap the curve completes and the token ASCENDS — everything raised plus the reserved 200M seed a permanent pool. Trading never stops.',
+  },
+  {
+    title: 'YOUR BAG IS CHAIN-NATIVE',
+    body: 'Buy from Base and you hold real tokens ON Base — not an IOU. Sell them from the chain where they live. Across all six chains the total supply always adds up to exactly 1,000,000,000. Always.',
+  },
+  {
+    title: 'FIXED RULES FOR EVERYONE',
+    body: 'Supply is 1B for every token — not configurable, no hidden premine. The only head start anyone can get is a public dev buy at launch, visible to all. Pool liquidity belongs to the protocol forever: it can never be pulled.',
+  },
+]
+
 export function HowItWorks() {
   const { creatures } = useStore()
+  const [more, setMore] = useState(false)
   const gloop = creatures.find((c) => c.ticker === 'GLOOP')
   const price = gloop ? fmtPrice(gloop.price) : '$0.0000412'
 
@@ -58,6 +79,29 @@ export function HowItWorks() {
             </div>
           ))}
         </div>
+
+        {/* deeper dive, on demand */}
+        <div className="mt-8 text-center">
+          <button
+            onClick={() => setMore((m) => !m)}
+            aria-expanded={more}
+            className="rounded-xl border-3 border-lime bg-transparent px-6 py-3 font-mono text-[12px] font-bold tracking-[0.15em] text-lime transition hover:bg-lime hover:text-ink"
+          >
+            {more ? 'LESS ↑' : 'MORE ↓'}
+          </button>
+        </div>
+        {more && (
+          <div className="mt-6 grid gap-4 md:grid-cols-2">
+            {MORE.map((m) => (
+              <div key={m.title} className="rounded-2xl border-2 border-white/15 bg-void p-5">
+                <h4 className="font-display text-lg tracking-wide text-lime">{m.title}</h4>
+                <p className="mt-2 text-[14px] font-medium leading-relaxed text-white/80">
+                  {m.body}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* live proof strip */}
         <div className="mt-10 rounded-2xl border-3 border-white/20 bg-void p-5">

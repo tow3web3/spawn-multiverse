@@ -58,7 +58,7 @@ export default function App() {
         onFreshSpawns={() => goToPit('new')}
       />
       <main>
-        <Hero onOpenLab={() => setLabOpen(true)} />
+        <Hero onOpenLab={() => setLabOpen(true)} onOpenCreature={setDetail} />
         <MarqueeBand />
         <ThePit
           tab={pitTab}

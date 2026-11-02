@@ -54,7 +54,7 @@ export function Nav({
             THE PIT
           </button>
           <button className={link} onClick={onFreshSpawns}>
-            FRESH SPAWNS
+            NEW TOKENS
           </button>
           <button className={link} onClick={() => scrollTo('how')}>
             HOW IT WORKS
