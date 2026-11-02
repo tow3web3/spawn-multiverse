@@ -29,9 +29,9 @@ export function Hero({
   onOpenCreature: (num: number) => void
 }) {
   return (
-    <section className="mx-auto grid max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:py-10">
+    <section className="mx-auto grid max-w-7xl gap-5 px-4 py-4 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:py-6">
       {/* left — lime panel */}
-      <div className="relative overflow-hidden rounded-3xl border-3 border-ink bg-lime p-6 shadow-brutal sm:p-10">
+      <div className="relative overflow-hidden rounded-3xl border-3 border-ink bg-lime p-5 shadow-brutal sm:p-7">
         <Asterisk
           size={420}
           className="pointer-events-none absolute -right-24 top-6 opacity-[0.08]"
@@ -43,7 +43,7 @@ export function Hero({
           </span>
         </div>
 
-        <h1 className="relative mt-6 font-display text-[clamp(2.9rem,7vw,5.8rem)] leading-[0.95] tracking-wide">
+        <h1 className="relative mt-4 font-display text-[clamp(2.4rem,5.5vw,4.6rem)] leading-[0.95] tracking-wide">
           ONE TOKEN.
           <br />
           EVERY CHAIN.
@@ -54,7 +54,7 @@ export function Hero({
           </span>
         </h1>
 
-        <p className="relative mt-7 max-w-md text-[17px] font-medium leading-relaxed">
+        <p className="relative mt-4 max-w-md text-[15px] font-medium leading-relaxed">
           Launch a token once — it goes live{' '}
           <mark className="bg-ink px-1.5 py-0.5 font-bold text-lime">
             natively on all 6 chains
@@ -63,7 +63,7 @@ export function Hero({
           everywhere. No bridges, no wrapped copies.
         </p>
 
-        <div className="relative mt-8 flex flex-wrap gap-3">
+        <div className="relative mt-5 flex flex-wrap gap-3">
           <button
             onClick={onOpenLab}
             className="rounded-xl border-3 border-ink bg-ink px-6 py-3.5 font-mono text-[13px] font-bold tracking-wide text-white shadow-brutal transition hover:-translate-y-1 hover:shadow-brutal-lg active:translate-y-0 active:shadow-brutal"
@@ -78,7 +78,7 @@ export function Hero({
           </a>
         </div>
 
-        <div className="relative mt-10">
+        <div className="relative mt-6">
           <p className="font-mono text-[10px] font-bold tracking-[0.2em] opacity-70">
             LIVE ON
           </p>

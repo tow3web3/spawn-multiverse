@@ -15,10 +15,15 @@ const PAD_Y = 0.1
 export function PriceChart({
   points,
   ascendedAt,
+  dark = false,
 }: {
   points: PricePoint[]
   ascendedAt?: number
+  /** On dark panels the line goes lime and grid/labels go white. */
+  dark?: boolean
 }) {
+  const inkOrLime = dark ? '#c9f24b' : '#141414'
+  const gridColor = dark ? '#ffffff' : '#141414'
   const wrapRef = useRef<HTMLDivElement>(null)
   const [hover, setHover] = useState<number | null>(null)
 
@@ -88,17 +93,17 @@ export function PriceChart({
             x2={W}
             y1={H * f}
             y2={H * f}
-            stroke="#141414"
-            strokeOpacity="0.08"
+            stroke={gridColor}
+            strokeOpacity={dark ? 0.1 : 0.08}
             strokeWidth="1"
             vectorEffect="non-scaling-stroke"
           />
         ))}
-        <path d={area} fill="#c9f24b" fillOpacity="0.35" />
+        <path d={area} fill="#c9f24b" fillOpacity={dark ? 0.16 : 0.35} />
         <path
           d={line}
           fill="none"
-          stroke="#141414"
+          stroke={inkOrLime}
           strokeWidth="2"
           strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
@@ -121,7 +126,7 @@ export function PriceChart({
             x2={x(hovered.ts)}
             y1="0"
             y2={H}
-            stroke="#141414"
+            stroke={dark ? '#ffffff' : '#141414'}
             strokeOpacity="0.35"
             strokeWidth="1"
             strokeDasharray="3 3"
@@ -131,13 +136,13 @@ export function PriceChart({
       </svg>
 
       {/* min / max labels */}
-      <span className="pointer-events-none absolute right-1 top-0.5 font-mono text-[9px] font-bold opacity-45">
+      <span className={`pointer-events-none absolute right-1 top-0.5 font-mono text-[9px] font-bold opacity-45 ${dark ? 'text-white' : ''}`}>
         {fmtPrice(hi)}
       </span>
-      <span className="pointer-events-none absolute bottom-0.5 right-1 font-mono text-[9px] font-bold opacity-45">
+      <span className={`pointer-events-none absolute bottom-0.5 right-1 font-mono text-[9px] font-bold opacity-45 ${dark ? 'text-white' : ''}`}>
         {fmtPrice(lo)}
       </span>
-      <span className="pointer-events-none absolute bottom-0.5 left-1 font-mono text-[9px] font-bold opacity-45">
+      <span className={`pointer-events-none absolute bottom-0.5 left-1 font-mono text-[9px] font-bold opacity-45 ${dark ? 'text-white' : ''}`}>
         {timeShort(t0)} AGO
       </span>
 
