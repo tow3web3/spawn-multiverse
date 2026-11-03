@@ -18,14 +18,14 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
   })
 
   async function spawnVia(chain) {
-    await (await chain.gateway.connect(user).spawnToken('GLOOP SUPREME', 'GLOOP', '{}', 0)).wait()
+    await (await chain.gateway.connect(user).spawnToken('GLOOP SUPREME', 'GLOOP', '{}', 0, 0)).wait()
     await world.deliverAll()
     return world.pad.allTokens((await world.pad.tokensLength()) - 1n)
   }
 
   it('a spawn crosses the network asynchronously and lands on every chain', async () => {
     const sol = world.chains[0]
-    await (await sol.gateway.connect(user).spawnToken('GLOOP SUPREME', 'GLOOP', '{}', 0)).wait()
+    await (await sol.gateway.connect(user).spawnToken('GLOOP SUPREME', 'GLOOP', '{}', 0, 0)).wait()
 
     // in flight: the hub knows nothing yet
     expect(await world.endpoint.pending()).to.equal(1n)

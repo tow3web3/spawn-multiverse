@@ -23,10 +23,22 @@ contract SpawnPad is IOmniReceiver {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
     uint32 public constant HUB_CHAIN = 0;
 
+    /// 1% on every trade, routed per the token's launch-time fee mode.
+    uint256 public constant FEE_BPS = 100;
+    /// Burn mode buys back in chunks, not dust.
+    uint256 public constant BURN_TRIGGER = 4e18;
+
+    // Fee modes (locked at launch, forever)
+    uint8 public constant FEE_HOLDERS = 0; // 100% streams to holders
+    uint8 public constant FEE_SPLIT = 1; // 50/50 holders & dev
+    uint8 public constant FEE_DEV = 2; // 100% to the dev, claimable
+    uint8 public constant FEE_BURN = 3; // auto buyback & burn
+
     // Message opcodes (gateway -> pad)
     uint8 internal constant OP_SPAWN = 1;
     uint8 internal constant OP_BUY = 2;
     uint8 internal constant OP_SELL = 3;
+    uint8 internal constant OP_CLAIM = 4;
     // Message opcodes (pad -> gateway)
     uint8 internal constant OP_SYNC_TOKEN = 10;
     uint8 internal constant OP_DELIVER = 11;
@@ -41,6 +53,20 @@ contract SpawnPad is IOmniReceiver {
         uint32 homeChain;
     }
 
+    /// One global fee pot per token — fees from all six chains land HERE,
+    /// because there is only one market. That is what makes holder streams,
+    /// dev claims and buyback&burn single-pot problems instead of six.
+    struct FeeState {
+        uint8 mode;
+        uint256 total;
+        uint256 holders;
+        uint256 dev;
+        uint256 devClaimed;
+        uint256 burnPot;
+        uint256 burnedUsd;
+        uint256 burnedTokens;
+    }
+
     IOmniMessenger public immutable messenger;
     OmniUSD public immutable usd; // hub instance
     address public immutable admin;
@@ -52,6 +78,7 @@ contract SpawnPad is IOmniReceiver {
 
     address[] public allTokens;
     mapping(address => Meta) public metas;
+    mapping(address => FeeState) public feesOf;
 
     event Spawned(
         address indexed token,
@@ -72,6 +99,9 @@ contract SpawnPad is IOmniReceiver {
         uint64 ts
     );
     event Ascended(address indexed token, uint256 raisedUsd, uint64 ts);
+    event FeeAccrued(address indexed token, uint8 mode, uint256 amount);
+    event BuybackBurn(address indexed token, uint256 usd, uint256 tokens);
+    event DevClaimed(address indexed token, address indexed dev, uint256 amount);
 
     constructor(IOmniMessenger _messenger, OmniUSD _usd) {
         messenger = _messenger;
@@ -158,9 +188,13 @@ contract SpawnPad is IOmniReceiver {
                 string memory name,
                 string memory symbol,
                 string memory metaURI,
-                uint256 devBuyUsd
-            ) = abi.decode(data, (address, string, string, string, uint256));
-            _spawn(srcChain, creator, name, symbol, metaURI, devBuyUsd);
+                uint256 devBuyUsd,
+                uint8 feeMode
+            ) = abi.decode(data, (address, string, string, string, uint256, uint8));
+            _spawn(srcChain, creator, name, symbol, metaURI, devBuyUsd, feeMode);
+        } else if (op == OP_CLAIM) {
+            (address token, address claimer) = abi.decode(data, (address, address));
+            _claim(srcChain, token, claimer);
         } else if (op == OP_BUY) {
             (address token, address buyer, uint256 usdIn) = abi.decode(
                 data,
@@ -186,11 +220,14 @@ contract SpawnPad is IOmniReceiver {
         string memory name,
         string memory symbol,
         string memory metaURI,
-        uint256 devBuyUsd
+        uint256 devBuyUsd,
+        uint8 feeMode
     ) internal {
+        require(feeMode <= FEE_BURN, "PAD: bad fee mode");
         SpawnToken token = new SpawnToken(name, symbol, address(this), true, TOTAL_SUPPLY, address(this));
         allTokens.push(address(token));
         metas[address(token)] = Meta(name, symbol, metaURI, creator, uint64(block.timestamp), srcChain);
+        feesOf[address(token)].mode = feeMode;
         venue.openMarket(address(token));
         emit Spawned(address(token), creator, srcChain, name, symbol, metaURI);
 
@@ -211,9 +248,12 @@ contract SpawnPad is IOmniReceiver {
         // The spoke burned the buyer's OmniUSD; the value re-materializes here.
         usd.bridgeMint(address(this), usdIn);
 
-        // Price discovery is the venue's job; settlement stays here.
-        (uint256 out, uint256 spend, bool ascendedNow) = venue.execBuy(token, usdIn);
-        uint256 refund = usdIn - spend;
+        // 1% fee off the top; price discovery is the venue's job.
+        uint256 feeIn = (usdIn * FEE_BPS) / 10_000;
+        (uint256 out, uint256 spend, bool ascendedNow) = venue.execBuy(token, usdIn - feeIn);
+        // If the curve capped the buy, the fee shrinks with it.
+        uint256 fee = spend < usdIn - feeIn ? (spend * FEE_BPS) / 10_000 : feeIn;
+        uint256 refund = usdIn - spend - fee;
         if (ascendedNow) {
             emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
         }
@@ -227,7 +267,8 @@ contract SpawnPad is IOmniReceiver {
             abi.encode(OP_DELIVER, abi.encode(token, buyer, out, refund))
         );
 
-        emit Trade(token, srcChain, buyer, true, spend, out, venue.spotPrice(token), uint64(block.timestamp));
+        emit Trade(token, srcChain, buyer, true, spend + fee, out, venue.spotPrice(token), uint64(block.timestamp));
+        _accrueFee(token, fee);
     }
 
     function _sell(uint32 srcChain, address token, address seller, uint256 tokensIn) internal {
@@ -235,11 +276,62 @@ contract SpawnPad is IOmniReceiver {
         SpawnToken(token).bridgeMint(address(this), tokensIn);
 
         uint256 usdOut = venue.execSell(token, tokensIn);
+        uint256 fee = (usdOut * FEE_BPS) / 10_000;
+        uint256 net = usdOut - fee;
 
-        // Pay the seller out on their chain.
-        usd.bridgeBurn(address(this), usdOut);
-        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(seller, usdOut)));
+        // Pay the seller out on their chain, net of the fee.
+        usd.bridgeBurn(address(this), net);
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(seller, net)));
 
-        emit Trade(token, srcChain, seller, false, usdOut, tokensIn, venue.spotPrice(token), uint64(block.timestamp));
+        emit Trade(token, srcChain, seller, false, net, tokensIn, venue.spotPrice(token), uint64(block.timestamp));
+        _accrueFee(token, fee);
+    }
+
+    /// Routes a collected fee per the token's mode. Fees are oUSD already
+    /// held by the pad, so every mode settles inside one pot on the hub.
+    function _accrueFee(address token, uint256 fee) internal {
+        if (fee == 0) return;
+        FeeState storage f = feesOf[token];
+        f.total += fee;
+        if (f.mode == FEE_HOLDERS) {
+            f.holders += fee;
+        } else if (f.mode == FEE_SPLIT) {
+            uint256 half = fee / 2;
+            f.holders += half;
+            f.dev += fee - half;
+        } else if (f.mode == FEE_DEV) {
+            f.dev += fee;
+        } else {
+            f.burnPot += fee;
+            if (f.burnPot >= BURN_TRIGGER) {
+                // The buyback is a REAL buy on the same curve — it moves the
+                // price — and the tokens it gets are burned on the spot, so
+                // global supply shrinks for every chain at once.
+                uint256 pot = f.burnPot;
+                f.burnPot = 0;
+                (uint256 out, uint256 spent, bool asc) = venue.execBuy(token, pot);
+                if (spent < pot) f.burnPot = pot - spent;
+                f.burnedUsd += spent;
+                f.burnedTokens += out;
+                SpawnToken(token).bridgeBurn(address(this), out);
+                if (asc) emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
+                emit BuybackBurn(token, spent, out);
+                emit Trade(token, HUB_CHAIN, address(this), true, spent, out, venue.spotPrice(token), uint64(block.timestamp));
+            }
+        }
+        emit FeeAccrued(token, f.mode, fee);
+    }
+
+    /// The dev claims their accrued share, paid out in oUSD on the chain
+    /// they claim from — like every other payout.
+    function _claim(uint32 srcChain, address token, address claimer) internal {
+        require(metas[token].creator == claimer, "PAD: not the dev");
+        FeeState storage f = feesOf[token];
+        uint256 amount = f.dev - f.devClaimed;
+        require(amount > 0, "PAD: nothing to claim");
+        f.devClaimed += amount;
+        usd.bridgeBurn(address(this), amount);
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(claimer, amount)));
+        emit DevClaimed(token, claimer, amount);
     }
 }

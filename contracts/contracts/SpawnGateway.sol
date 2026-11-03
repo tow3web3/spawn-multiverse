@@ -18,6 +18,7 @@ contract SpawnGateway is IOmniReceiver {
     uint8 internal constant OP_SPAWN = 1;
     uint8 internal constant OP_BUY = 2;
     uint8 internal constant OP_SELL = 3;
+    uint8 internal constant OP_CLAIM = 4;
     uint8 internal constant OP_SYNC_TOKEN = 10;
     uint8 internal constant OP_DELIVER = 11;
     uint8 internal constant OP_PAYOUT = 12;
@@ -45,14 +46,20 @@ contract SpawnGateway is IOmniReceiver {
         string calldata name,
         string calldata symbol,
         string calldata metaURI,
-        uint256 devBuyUsd
+        uint256 devBuyUsd,
+        uint8 feeMode
     ) external {
         if (devBuyUsd > 0) usd.bridgeBurn(msg.sender, devBuyUsd);
         messenger.send(
             HUB_CHAIN,
             pad,
-            abi.encode(OP_SPAWN, abi.encode(msg.sender, name, symbol, metaURI, devBuyUsd))
+            abi.encode(OP_SPAWN, abi.encode(msg.sender, name, symbol, metaURI, devBuyUsd, feeMode))
         );
+    }
+
+    /// The dev claims their accrued fee share; the pad pays out on THIS chain.
+    function claimFees(address hubToken) external {
+        messenger.send(HUB_CHAIN, pad, abi.encode(OP_CLAIM, abi.encode(hubToken, msg.sender)));
     }
 
     function buyToken(address hubToken, uint256 usdIn) external {

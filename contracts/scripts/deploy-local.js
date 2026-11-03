@@ -65,7 +65,7 @@ async function main() {
     const chain = pick(world.chains)
     const creator = pick(traders)
     const metaURI = JSON.stringify({ face: def.face })
-    await (await chain.gateway.connect(creator).spawnToken(def.name, def.sym, metaURI, 0)).wait()
+    await (await chain.gateway.connect(creator).spawnToken(def.name, def.sym, metaURI, 0, def.mode ?? 0)).wait()
     const token = await world.pad.allTokens((await world.pad.tokensLength()) - 1n)
     console.log(`  spawned ${def.sym.padEnd(6)} ${token}`)
 
@@ -81,14 +81,14 @@ async function main() {
 
   console.log('Seeding the pit with real trades…')
   const seeds = [
-    { name: 'GLOOP SUPREME', sym: 'GLOOP', face: 'frog', buys: 36, size: [60, 600], sellEvery: 7 },
+    { name: 'GLOOP SUPREME', sym: 'GLOOP', mode: 0, face: 'frog', buys: 36, size: [60, 600], sellEvery: 7 },
     // ROT gets whale-pumped through ascension, then trades on the omnipool
-    { name: 'BRAINROT 3000', sym: 'ROT', face: 'brain', buys: 24, size: [200, 900], sellEvery: 9, whale: 16_000, poolBuys: 8 },
-    { name: 'SIR BORKS', sym: 'BORK', face: 'bork', buys: 22, size: [50, 450], sellEvery: 6 },
-    { name: 'COSMIC PICKLE', sym: 'PICKL', face: 'pickle', buys: 10, size: [30, 250], sellEvery: 5 },
+    { name: 'BRAINROT 3000', sym: 'ROT', mode: 3, face: 'brain', buys: 24, size: [200, 900], sellEvery: 9, whale: 16_000, poolBuys: 8 },
+    { name: 'SIR BORKS', sym: 'BORK', mode: 1, face: 'bork', buys: 22, size: [50, 450], sellEvery: 6 },
+    { name: 'COSMIC PICKLE', sym: 'PICKL', mode: 2, face: 'pickle', buys: 10, size: [30, 250], sellEvery: 5 },
     // MOCHI pumps then takes a beating
-    { name: 'MOCHI MAYHEM', sym: 'MOCHI', face: 'mochi', buys: 18, size: [60, 400], dumps: 5 },
-    { name: 'ALIEN INTERN', sym: 'INTRN', face: 'alien', buys: 4, size: [20, 120] },
+    { name: 'MOCHI MAYHEM', sym: 'MOCHI', mode: 0, face: 'mochi', buys: 18, size: [60, 400], dumps: 5 },
+    { name: 'ALIEN INTERN', sym: 'INTRN', mode: 1, face: 'alien', buys: 4, size: [20, 120] },
   ]
   for (const def of seeds) await spawnSeed(def)
 

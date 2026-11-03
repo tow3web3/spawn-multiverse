@@ -43,7 +43,7 @@ sending the same messages. This slot is the whole visibility strategy
 
 | Contract | Role |
 |---|---|
-| `SpawnPad.sol` | The hub. Factory + settlement: token custody, oUSD burn/mint, omnichain messaging, and the canonical `Spawned` / `Trade` / `Ascended` event stream (one address for indexers). Routes every trade through the venue. |
+| `SpawnPad.sol` | The hub. Factory + settlement: token custody, oUSD burn/mint, omnichain messaging, and the canonical `Spawned` / `Trade` / `Ascended` event stream (one address for indexers). Routes every trade through the venue and takes the **1% fee** into one global pot per token. |
 | `ICurveVenue.sol` / `InternalCurveVenue.sol` | The price-discovery slot. The internal venue is the genesis curve (constant-product, virtual reserves, 800M/1B on the curve) + ascension to the omnipool. Pure accounting — the pad keeps custody — so it swaps for a Raydium LaunchLab / Meteora DBC adapter without touching settlement or gateways. |
 | `SpawnGateway.sol` | One per chain. Users `spawnToken` / `buyToken` / `sellToken` here with **no approvals**. Forwards everything to the pad as omnichain messages; mints deliveries and payouts coming back. |
 | `SpawnToken.sol` | The creature. Hub instance pre-mints the whole 1B supply to the pad; spoke replicas are minted/burned as tokens cross chains. **Sum of supplies across chains ≡ 1B, always** (tested). |
@@ -51,9 +51,26 @@ sending the same messages. This slot is the whole visibility strategy
 | `OmniMessenger.sol` | The transport abstraction. Contracts only know `IOmniMessenger` / `IOmniReceiver`. Locally, `LocalOmniMessenger` hosts all logical chains on one node and delivers synchronously. |
 | `lz/LayerZeroOmniMessenger.sol` | The production transport: one adapter per chain over the real LayerZero V2 endpoint signatures (`lz/ILayerZeroV2.sol`), peered, with a native-fee gas tank. Tested against `lz/MockLZEndpointV2.sol`, which queues packets and lands them in **separate transactions** — the async reality of testnet/mainnet. |
 
+## Fees: one market, one pot
+
+Every trade pays **1%**, routed per a fee mode the dev locks at launch:
+`FEE_HOLDERS` (100% to holders), `FEE_SPLIT` (50/50), `FEE_DEV` (100% dev,
+claimable) or `FEE_BURN` (auto buyback & burn). Because there is only one
+market, fees from all six chains land in **one oUSD pot on the hub** — no
+per-chain reconciliation:
+
+- **Dev claim** — `gateway.claimFees(token)` from ANY chain; the hub verifies
+  the creator and pays out there via the ordinary `OP_PAYOUT` path.
+- **Buyback & burn** — once the pot passes $4 the pad executes a REAL buy on
+  the curve (it moves the price) and burns the tokens on the spot, shrinking
+  global supply for every chain at once (`BuybackBurn` event, tested).
+- **Holder stream** — accrues in the pot today; pro-rata distribution (a
+  snapshot/merkle claim across chain-native balances) is the v3 piece.
+
 Run the invariants suite (`npm run chain:test`): genesis on six chains, single
-global curve, supply conservation, value conservation, ascension + refund,
-message authentication.
+global curve, supply conservation (including under burns), value conservation,
+ascension + refund, fee routing + dev claim + buyback&burn, message
+authentication.
 
 ## Running locally
 

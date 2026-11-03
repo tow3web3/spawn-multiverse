@@ -27,8 +27,17 @@ import {
   type TradeResult,
   type Wallet,
 } from '../store'
-import { emptyFees, quote as marketQuote, type Market, type Side, type Trade } from '../engine/market'
-import { gatewayAbi, padAbi, tokenAbi, usdAbi, type Manifest } from './abi'
+import {
+  emptyFees,
+  quote as marketQuote,
+  type FeeMode,
+  type Market,
+  type Side,
+  type Trade,
+} from '../engine/market'
+
+const FEE_MODE_NAME: readonly FeeMode[] = ['holders', 'split', 'dev', 'burn']
+import { FEE_MODE_INDEX, gatewayAbi, padAbi, tokenAbi, usdAbi, type Manifest } from './abi'
 import type { FaceId } from '../components/Faces'
 
 const PALETTE = ['#b5e95b', '#f7a8ce', '#9ccbf5', '#a78bf0', '#f7be7b', '#8be0d4']
@@ -138,7 +147,7 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
     const len = Number(await client.readContract({ address: m.pad, abi: padAbi, functionName: 'tokensLength' }))
     for (let i = 0; i < len; i++) {
       const num = i + 1
-      const [token, name, symbol, metaURI, , spawnedAt, , vBase, vTokens, sold, ascended] =
+      const [token, name, symbol, metaURI, creator, spawnedAt, , vBase, vTokens, sold, ascended] =
         (await client.readContract({
           address: m.pad,
           abi: padAbi,
@@ -170,7 +179,10 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
             links: parsed.links,
             color: PALETTE[(num - 1) % PALETTE.length],
             spawnedAt: Number(spawnedAt) * 1000,
-            custom: false,
+            // every on-chain token was launched by someone; `creator` gates
+            // the dev dashboard to the launches of the connected wallet
+            custom: true,
+            creator,
             feeMode: parsed.feeMode,
           },
           market: {
@@ -190,6 +202,27 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
         vBase: ef(vBase),
         vTokens: ef(vTokens),
         sold: ef(sold),
+      }
+
+      // live fee accounting, straight from the hub's one global pot
+      const [fm, fTotal, fHolders, fDev, fDevClaimed, fBurnPot, fBurnedUsd, fBurnedTokens] =
+        (await client.readContract({
+          address: m.pad,
+          abi: padAbi,
+          functionName: 'feesOf',
+          args: [token],
+        })) as [number, bigint, bigint, bigint, bigint, bigint, bigint, bigint]
+      const feeMode = FEE_MODE_NAME[fm] ?? 'holders'
+      entry.meta.feeMode = feeMode
+      entry.market.fees = {
+        mode: feeMode,
+        total: ef(fTotal),
+        holders: ef(fHolders),
+        dev: ef(fDev),
+        devClaimed: ef(fDevClaimed),
+        burnPot: ef(fBurnPot),
+        burnedUsd: ef(fBurnedUsd),
+        burnedTokens: ef(fBurnedTokens),
       }
     }
 
@@ -479,7 +512,13 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
         address: gw.gateway,
         abi: gatewayAbi,
         functionName: 'spawnToken',
-        args: [input.name.toUpperCase(), input.ticker.toUpperCase(), metaURI, 0n],
+        args: [
+          input.name.toUpperCase(),
+          input.ticker.toUpperCase(),
+          metaURI,
+          0n,
+          FEE_MODE_INDEX[input.feeMode ?? 'holders'],
+        ],
         chain: hardhat,
         account: burner,
       })
@@ -515,6 +554,34 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
 
   const getMarket = useCallback((num: number) => entriesRef.current.get(num)?.market, [])
 
+  /** Real on-chain claim: the gateway messages the hub, the hub pays out
+   * oUSD on that chain; the next poll picks the balance up. */
+  const claimFees = useCallback(
+    async (num: number): Promise<number> => {
+      const m = manifestRef.current
+      const client = clientRef.current
+      const wc = walletClientRef.current
+      const burner = burnerRef.current
+      const entry = entriesRef.current.get(num)
+      if (!m || !client || !wc || !burner || !entry) return 0
+      const f = entry.market.fees
+      const claimable = f ? Math.max(0, f.dev - f.devClaimed) : 0
+      if (claimable <= 0.005) return 0
+      const hash = await wc.writeContract({
+        address: m.chains[0].gateway,
+        abi: gatewayAbi,
+        functionName: 'claimFees',
+        args: [entry.token],
+        chain: hardhat,
+        account: burner,
+      })
+      await client.waitForTransactionReceipt({ hash })
+      await poll()
+      return claimable
+    },
+    [poll],
+  )
+
   const creatures = useMemo(() => {
     void version
     const now = Date.now()
@@ -529,12 +596,13 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
       connect,
       spawn,
       trade,
+      claimFees,
       getQuote,
       getMarket,
       justSpawned,
       onchain: { status, airdrop },
     }),
-    [creatures, wallet, connect, spawn, trade, getQuote, getMarket, justSpawned, status, airdrop],
+    [creatures, wallet, connect, spawn, trade, claimFees, getQuote, getMarket, justSpawned, status, airdrop],
   )
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>

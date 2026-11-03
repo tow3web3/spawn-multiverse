@@ -1,47 +1,47 @@
 {
   "chainId": 31337,
   "rpc": "http://127.0.0.1:8545",
-  "messenger": "0xab16A69A5a8c12C732e0DEFF4BE56A70bb64c926",
-  "pad": "0x1f10F3Ba7ACB61b2F50B9d6DdCf91a6f787C0E82",
-  "venue": "0x457cCf29090fe5A24c19c1bc95F492168C0EaFdb",
-  "hubUsd": "0xE3011A37A904aB90C8881a99BD1F6E21401f1522",
+  "messenger": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "pad": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  "venue": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  "hubUsd": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
   "chains": [
     {
       "label": 1,
       "id": "solana",
-      "gateway": "0x2a810409872AfC346F9B5b26571Fd6eC42EA4849",
-      "usd": "0xB82008565FdC7e44609fA118A4a681E92581e680"
+      "gateway": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
+      "usd": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
     },
     {
       "label": 2,
       "id": "ethereum",
-      "gateway": "0xd6e1afe5cA8D00A2EFC01B89997abE2De47fdfAf",
-      "usd": "0xF32D39ff9f6Aa7a7A64d7a4F00a54826Ef791a55"
+      "gateway": "0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82",
+      "usd": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0"
     },
     {
       "label": 3,
       "id": "base",
-      "gateway": "0x5FeaeBfB4439F3516c74939A9D04e95AFE82C4ae",
-      "usd": "0xB0f05d25e41FbC2b52013099ED9616f1206Ae21B"
+      "gateway": "0x68B1D87F95878fE05B998F19b66F4baba5De1aed",
+      "usd": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE"
     },
     {
       "label": 4,
       "id": "bnb",
-      "gateway": "0x927b167526bAbB9be047421db732C663a0b77B11",
-      "usd": "0xfcDB4564c18A9134002b9771816092C9693622e3"
+      "gateway": "0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44",
+      "usd": "0x4ed7c70F96B99c776995fB64377f0d4aB3B0e1C1"
     },
     {
       "label": 5,
       "id": "arbitrum",
-      "gateway": "0x6C2d83262fF84cBaDb3e416D527403135D757892",
-      "usd": "0x638A246F0Ec8883eF68280293FFE8Cfbabe61B44"
+      "gateway": "0xc5a5C42992dECbae36851359345FE25997F5C42d",
+      "usd": "0x09635F643e140090A9A8Dcd712eD6285858ceBef"
     },
     {
       "label": 6,
       "id": "optimism",
-      "gateway": "0x4bf010f1b9beDA5450a8dD702ED602A104ff65EE",
-      "usd": "0x0ed64d01D0B4B655E410EF1441dD677B695639E7"
+      "gateway": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
+      "usd": "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB"
     }
   ],
-  "deployedAt": 1793242773218
+  "deployedAt": 1793718032904
 }

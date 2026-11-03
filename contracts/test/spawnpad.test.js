@@ -12,8 +12,8 @@ describe('SPAWN! omnichain protocol', () => {
     world = await deployWorld()
   })
 
-  async function spawnVia(chain, name = 'GLOOP SUPREME', sym = 'GLOOP', dev = 0n) {
-    await (await chain.gateway.connect(user).spawnToken(name, sym, '{"face":"frog"}', dev)).wait()
+  async function spawnVia(chain, name = 'GLOOP SUPREME', sym = 'GLOOP', dev = 0n, feeMode = 0) {
+    await (await chain.gateway.connect(user).spawnToken(name, sym, '{"face":"frog"}', dev, feeMode)).wait()
     const len = await world.pad.tokensLength()
     return world.pad.allTokens(len - 1n)
   }
@@ -91,10 +91,10 @@ describe('SPAWN! omnichain protocol', () => {
     expect(await rep.balanceOf(user)).to.equal(bal - bal / 2n)
 
     // selling the FIRST half of the bag happens on the upper half of the
-    // curve, so it returns slightly more than half the spend
+    // curve, so it returns about half the spend (minus the 1% fee each way)
     const got = (await c.usd.balanceOf(user)) - usdBefore
-    expect(got).to.be.gt(E(100))
-    expect(got).to.be.lt(E(105))
+    expect(got).to.be.gt(E(96))
+    expect(got).to.be.lt(E(103))
   })
 
   it('ascends when the curve fills: refund, omnipool, trading continues', async () => {
@@ -115,8 +115,8 @@ describe('SPAWN! omnichain protocol', () => {
 
     // the excess above what the curve could absorb came back as a refund
     const refund = await c.usd.balanceOf(user)
-    expect(refund).to.be.gt(E(2_300))
-    expect(refund).to.be.lt(E(2_500))
+    expect(refund).to.be.gt(E(2_100))
+    expect(refund).to.be.lt(E(2_400))
 
     // the buyer holds the entire curve allocation
     const rep = await ethers.getContractAt('SpawnToken', await c.gateway.replicaOf(token))
@@ -133,7 +133,7 @@ describe('SPAWN! omnichain protocol', () => {
   it('dev buy at spawn gives the creator the first bag', async () => {
     const c = world.chains[2]
     await (await c.usd.faucet(user, E(100))).wait()
-    await (await c.gateway.connect(user).spawnToken('SUNNY BLOB', 'SUNNY', '{}', E(25))).wait()
+    await (await c.gateway.connect(user).spawnToken('SUNNY BLOB', 'SUNNY', '{}', E(25), 0)).wait()
 
     const token = await world.pad.allTokens(0)
     const rep = await ethers.getContractAt('SpawnToken', await c.gateway.replicaOf(token))
@@ -169,6 +169,69 @@ describe('SPAWN! omnichain protocol', () => {
     await expect(world.venue.connect(user).execBuy(token, E(100))).to.be.revertedWith('VENUE: not pad')
     await expect(world.venue.connect(user).execSell(token, E(100))).to.be.revertedWith('VENUE: not pad')
     await expect(world.venue.connect(user).openMarket(user.address)).to.be.revertedWith('VENUE: not pad')
+  })
+
+  it('takes 1% on every trade and routes it per the launch fee mode', async () => {
+    const c = world.chains[1]
+    await (await c.gateway.connect(user).spawnToken('FEE GOBLIN', 'FGOB', '{}', 0, 1)).wait() // 50/50
+    const token = await world.pad.allTokens(0)
+    await (await c.usd.faucet(user, E(1_000))).wait()
+    await (await c.gateway.connect(user).buyToken(token, E(100))).wait()
+
+    let f = await world.pad.feesOf(token)
+    expect(f.mode).to.equal(1)
+    expect(f.total).to.equal(E(1)) // exactly 1% of $100
+    expect(f.holders).to.equal(E(0.5))
+    expect(f.dev).to.equal(E(0.5))
+
+    // selling pays the fee too, on the gross proceeds
+    const rep = await ethers.getContractAt('SpawnToken', await c.gateway.replicaOf(token))
+    await (await c.gateway.connect(user).sellToken(token, await rep.balanceOf(user))).wait()
+    f = await world.pad.feesOf(token)
+    expect(f.total).to.be.gt(E(1.9))
+    expect(f.total).to.be.lt(E(2.1))
+  })
+
+  it('the dev claims their fee share on the chain of their choice', async () => {
+    const home = world.chains[0]
+    await (await home.gateway.connect(user).spawnToken('FEE KING', 'KING', '{}', 0, 2)).wait() // 100% dev
+    const token = await world.pad.allTokens(0)
+    const away = world.chains[3]
+    await (await away.usd.faucet(user2, E(500))).wait()
+    await (await away.gateway.connect(user2).buyToken(token, E(400))).wait()
+
+    // the dev claims from a chain they never touched — payout lands there
+    const claimChain = world.chains[5]
+    const before = await claimChain.usd.balanceOf(user.address)
+    await (await claimChain.gateway.connect(user).claimFees(token)).wait()
+    expect((await claimChain.usd.balanceOf(user.address)) - before).to.equal(E(4)) // 1% of $400
+
+    await expect(claimChain.gateway.connect(user).claimFees(token)).to.be.revertedWith(
+      'PAD: nothing to claim',
+    )
+    await expect(claimChain.gateway.connect(user2).claimFees(token)).to.be.revertedWith(
+      'PAD: not the dev',
+    )
+  })
+
+  it('burn mode buys back on the curve and burns — global supply shrinks', async () => {
+    const c = world.chains[2]
+    await (await c.gateway.connect(user).spawnToken('PYRO', 'PYRO', '{}', 0, 3)).wait()
+    const token = await world.pad.allTokens(0)
+    await (await c.usd.faucet(user, E(2_000))).wait()
+    await (await c.gateway.connect(user).buyToken(token, E(500))).wait() // $5 fee -> trigger
+
+    const f = await world.pad.feesOf(token)
+    expect(f.burnedTokens).to.be.gt(0n)
+    expect(f.burnedUsd).to.be.gt(E(4.9))
+
+    let total = await (await ethers.getContractAt('SpawnToken', token)).totalSupply()
+    for (const ch of world.chains) {
+      total += await (
+        await ethers.getContractAt('SpawnToken', await ch.gateway.replicaOf(token))
+      ).totalSupply()
+    }
+    expect(total).to.equal(E(1_000_000_000) - f.burnedTokens)
   })
 
   it('rejects messages that do not come from the protocol', async () => {
