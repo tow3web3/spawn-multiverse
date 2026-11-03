@@ -5,6 +5,7 @@ import { TickerBar } from './components/TickerBar'
 import { Nav } from './components/Nav'
 import { Hero } from './components/Hero'
 import { MarqueeBand } from './components/MarqueeBand'
+import { TrendingNow } from './components/TrendingNow'
 import { ThePit, type PitTab } from './components/ThePit'
 import { HowItWorks } from './components/HowItWorks'
 import { Footer } from './components/Footer'
@@ -108,6 +109,7 @@ export default function App() {
         ) : (
           <>
             <Hero onOpenLab={() => setLabOpen(true)} onOpenCreature={openToken} />
+            <TrendingNow onOpen={openToken} />
             <MarqueeBand />
             <ThePit
               tab={pitTab}

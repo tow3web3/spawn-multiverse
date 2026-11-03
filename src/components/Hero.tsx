@@ -1,6 +1,17 @@
+import { useStore } from '../store'
+import { fmtMoney, fmtTokens } from '../lib/format'
 import { HeroCharts } from './LastLaunch'
 import { ChainLogo, CHAIN_LOGO_LABELS } from './ChainLogos'
 import { Asterisk } from './bits'
+
+/** The whole pitch, scannable in five chips. */
+const FEATURES: { label: string; cls: string; bg?: string }[] = [
+  { label: '⛓ 6 CHAINS, 1 LAUNCH', cls: 'bg-ink text-lime' },
+  { label: '✳ ONE GLOBAL SUPPLY', cls: 'bg-white' },
+  { label: '⚖ ONE PRICE EVERYWHERE', cls: '', bg: '#9ccbf5' },
+  { label: '⛽ GAS ON ONE CHAIN ONLY', cls: 'bg-white' },
+  { label: '💸 FEES: HOLDERS / DEV / 🔥 BURN', cls: 'bg-tang' },
+]
 
 function Underline() {
   return (
@@ -28,6 +39,16 @@ export function Hero({
   onOpenLab: () => void
   onOpenCreature: (num: number) => void
 }) {
+  const { creatures } = useStore()
+  const traded = creatures.reduce((a, c) => a + c.volume, 0)
+  const burned = creatures.reduce((a, c) => a + (c.fees?.burnedTokens ?? 0), 0)
+  const ascended = creatures.filter((c) => c.status === 'ascended').length
+  const stats: string[] = [
+    `✳ ${creatures.length} TOKENS LIVE`,
+    `📈 ${fmtMoney(traded)} TRADED`,
+    ...(burned > 0 ? [`🔥 ${fmtTokens(burned)} BURNED`] : []),
+    ...(ascended > 0 ? [`⬆ ${ascended} ASCENDED`] : []),
+  ]
   return (
     <section className="mx-auto grid max-w-7xl gap-5 px-4 py-4 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:py-6">
       {/* left — lime panel */}
@@ -55,13 +76,25 @@ export function Hero({
         </h1>
 
         <p className="relative mt-4 max-w-md text-[15px] font-medium leading-relaxed">
-          Launch a token once — it goes live{' '}
+          Launch once — your token goes live{' '}
           <mark className="bg-ink px-1.5 py-0.5 font-bold text-lime">
             natively on all 6 chains
           </mark>{' '}
-          at the same second. One global supply, one market, and the exact same price
-          everywhere. No bridges, no wrapped copies.
+          at the same second. No bridges, no wrapped copies.
         </p>
+
+        {/* the pitch, scannable */}
+        <div className="relative mt-4 flex max-w-lg flex-wrap gap-2">
+          {FEATURES.map(({ label: l, cls, bg }) => (
+            <span
+              key={l}
+              className={`rounded-full border-2 border-ink px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm ${cls}`}
+              style={bg ? { background: bg } : undefined}
+            >
+              {l}
+            </span>
+          ))}
+        </div>
 
         <div className="relative mt-5 flex flex-wrap gap-3">
           <button
@@ -78,7 +111,14 @@ export function Hero({
           </a>
         </div>
 
-        <div className="relative mt-6">
+        {/* live protocol stats */}
+        <div className="relative mt-4 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] font-bold tracking-wide opacity-75">
+          {stats.map((s) => (
+            <span key={s}>{s}</span>
+          ))}
+        </div>
+
+        <div className="relative mt-4">
           <p className="font-mono text-[10px] font-bold tracking-[0.2em] opacity-70">
             LIVE ON
           </p>

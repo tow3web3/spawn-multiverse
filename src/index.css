@@ -94,6 +94,19 @@
   html {
     scroll-behavior: smooth;
   }
+  /* Horizontal token marquee: halves are duplicated, -50% loops seamlessly.
+     Pointing at it pauses it (and reduced-motion disables it). */
+  .marquee-track {
+    animation: marquee 35s linear infinite;
+  }
+  .marquee-hover:hover .marquee-track {
+    animation-play-state: paused;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .marquee-track {
+      animation: none;
+    }
+  }
   body {
     @apply bg-cream font-body text-ink antialiased;
     /* The tilted marquee bands intentionally bleed past the viewport;
