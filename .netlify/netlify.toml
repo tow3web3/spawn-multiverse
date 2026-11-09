@@ -1,16 +1,15 @@
+functionsDirectory = "/Users/gabrieldevarine/pangg/netlify/functions"
+functionsDirectoryOrigin = "config"
 plugins = []
 headers = []
 redirects = []
-
-[functions]
-
-[functions."*"]
 
 [build]
 publish = "/Users/gabrieldevarine/pangg/dist"
 publishOrigin = "config"
 commandOrigin = "config"
 command = "VITE_PUBLIC_DEMO=1 npm run build"
+functions = "/Users/gabrieldevarine/pangg/netlify/functions"
 
 [build.environment]
 
@@ -25,3 +24,7 @@ command = "VITE_PUBLIC_DEMO=1 npm run build"
 [build.processing.js]
 
 [build.services]
+
+[functions]
+
+[functions."*"]

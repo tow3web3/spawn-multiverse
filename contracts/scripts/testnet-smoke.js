@@ -17,7 +17,7 @@ const HUB_RPC = 'https://sepolia.base.org'
 const E = (n) => ethers.parseEther(String(n))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function waitFor(what, fn, tries = 36, everyMs = 10_000) {
+async function waitFor(what, fn, tries = 90, everyMs = 10_000) {
   for (let i = 0; i < tries; i++) {
     const v = await fn().catch(() => undefined)
     if (v) return v

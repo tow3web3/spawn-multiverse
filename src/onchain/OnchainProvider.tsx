@@ -93,10 +93,19 @@ async function getLogsChunked(
   to: bigint,
   chunk: bigint,
 ) {
-  const out = []
+  const ranges: [bigint, bigint][] = []
   for (let b = from; b <= to; b += chunk + 1n) {
-    const end = b + chunk > to ? to : b + chunk
-    out.push(...(await client.getLogs({ address, fromBlock: b, toBlock: end })))
+    ranges.push([b, b + chunk > to ? to : b + chunk])
+  }
+  const out = []
+  const BATCH = 8 // parallel requests per wave — fast backfill, polite to RPCs
+  for (let i = 0; i < ranges.length; i += BATCH) {
+    const wave = await Promise.all(
+      ranges
+        .slice(i, i + BATCH)
+        .map(([f, t]) => client.getLogs({ address, fromBlock: f, toBlock: t })),
+    )
+    for (const r of wave) out.push(...r)
   }
   return out
 }
@@ -289,6 +298,10 @@ export function OnchainProvider({
         burnedTokens: ef(fBurnedTokens),
       }
     }
+
+    // the roster is enough to render the pit — don't make the UI wait for
+    // the (possibly long) first log backfill below
+    bump()
 
     // 2. event tape -> history, volume, holders, chain allocation (hub)
     const latest = await hub.getBlockNumber()
