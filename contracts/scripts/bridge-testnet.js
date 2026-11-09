@@ -23,7 +23,10 @@ const L2 = [
   { name: 'Base Sepolia    ', rpc: 'https://sepolia.base.org', bridge: '0xfd0Bf71F60660E2f608ed56e1659C450eB113120', kind: 'opstack' },
   { name: 'Arbitrum Sepolia', rpc: 'https://sepolia-rollup.arbitrum.io/rpc', bridge: '0xaAe29B0366299461418F5324a79Afc425BE5ae21', kind: 'arbitrum' },
 ]
-const OPSTACK_ABI = ['function MESSENGER() view returns (address)']
+const OPSTACK_ABI = [
+  'function MESSENGER() view returns (address)',
+  'function depositETH(uint32 minGasLimit, bytes extraData) payable',
+]
 const INBOX_ABI = ['function bridge() view returns (address)', 'function depositEth() payable returns (uint256)']
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -68,22 +71,36 @@ async function main() {
   const l2Before = []
   for (const t of L2) l2Before.push(await new ethers.JsonRpcProvider(t.rpc).getBalance(wallet.address))
 
+  // Each leg stands alone: a congested portal must not block the others.
+  const sent = []
   for (const t of L2) {
-    let tx
-    if (t.kind === 'opstack') {
-      tx = await wallet.sendTransaction({ to: t.bridge, value: share, gasLimit: 300_000 })
-    } else {
-      const inbox = new ethers.Contract(t.bridge, INBOX_ABI, wallet)
-      tx = await inbox.depositEth({ value: share })
+    try {
+      let tx
+      if (t.kind === 'opstack') {
+        const bridge = new ethers.Contract(t.bridge, OPSTACK_ABI, wallet)
+        // OP-stack portals meter deposits: under load the required burn
+        // explodes, so size the limit from a live estimate.
+        const est = await bridge.depositETH.estimateGas(200_000, '0x', { value: share })
+        const gasLimit = (est * 3n) / 2n
+        console.log(`  ${t.name}: estimateGas ${est} → limit ${gasLimit}`)
+        tx = await bridge.depositETH(200_000, '0x', { value: share, gasLimit })
+      } else {
+        const inbox = new ethers.Contract(t.bridge, INBOX_ABI, wallet)
+        tx = await inbox.depositEth({ value: share })
+      }
+      console.log(`→ ${t.name}: L1 tx ${tx.hash}`)
+      await tx.wait()
+      sent.push(t)
+    } catch (e) {
+      console.log(`✗ ${t.name}: deposit failed — ${String(e?.shortMessage ?? e).slice(0, 120)}`)
     }
-    console.log(`→ ${t.name}: L1 tx ${tx.hash}`)
-    await tx.wait()
   }
-  console.log('all L1 deposits confirmed — waiting for L2 credit (minutes)…')
+  if (sent.length === 0) throw new Error('no deposit went through')
+  console.log(`${sent.length}/3 deposits confirmed — waiting for L2 credit (minutes)…`)
 
-  // 3. wait for the funds to land on each L2
-  for (let i = 0; i < L2.length; i++) {
-    const t = L2[i]
+  // 3. wait for the funds to land on each successfully-deposited L2
+  for (const t of sent) {
+    const i = L2.indexOf(t)
     const p = new ethers.JsonRpcProvider(t.rpc)
     let credited = false
     for (let k = 0; k < 90; k++) {

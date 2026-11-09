@@ -10,5 +10,15 @@
     "usd": "0x6e8A6bb7A988851bAEEff90c1577beFe2EAe8615",
     "pad": "0xcA6b51B8760EC432070cE356345c3ea9489f61Bd",
     "venue": "0x7121282DcadFf97eA401bF61564B68e0aA8A3091"
+  },
+  "optimismSepolia": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "usd": "0x008c4d40F61fd650b1DC91fD7ad540483324cE2C",
+    "gateway": "0xC2f3855ECcB6bD2261831743Ece9752ec9E53811"
+  },
+  "arbitrumSepolia": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "usd": "0x008c4d40F61fd650b1DC91fD7ad540483324cE2C",
+    "gateway": "0xC2f3855ECcB6bD2261831743Ece9752ec9E53811"
   }
 }
