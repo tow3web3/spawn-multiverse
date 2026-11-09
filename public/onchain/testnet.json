@@ -1,0 +1,10 @@
+{
+  "chainId": 84532,
+  "rpc": "https://sepolia.base.org",
+  "pad": "0xcA6b51B8760EC432070cE356345c3ea9489f61Bd",
+  "venue": "0x7121282DcadFf97eA401bF61564B68e0aA8A3091",
+  "hubUsd": "0x6e8A6bb7A988851bAEEff90c1577beFe2EAe8615",
+  "fromBlock": 56655436,
+  "chains": [],
+  "deployedAt": 1794253016000
+}

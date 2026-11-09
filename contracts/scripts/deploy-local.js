@@ -100,11 +100,14 @@ async function main() {
     pad: world.pad.target,
     venue: world.venue.target,
     hubUsd: world.hubUsd.target,
+    fromBlock: 0,
     chains: world.chains.map((c) => ({
       label: c.label,
       id: c.id,
       gateway: c.gateway.target,
       usd: c.usd.target,
+      chainId: 31337,
+      rpc: 'http://127.0.0.1:8545',
     })),
     deployedAt: Date.now(),
   }

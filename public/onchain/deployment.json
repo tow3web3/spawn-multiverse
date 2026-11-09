@@ -5,43 +5,56 @@
   "pad": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
   "venue": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
   "hubUsd": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "fromBlock": 0,
   "chains": [
     {
       "label": 1,
       "id": "solana",
       "gateway": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
-      "usd": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
+      "usd": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
     },
     {
       "label": 2,
       "id": "ethereum",
       "gateway": "0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82",
-      "usd": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0"
+      "usd": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
     },
     {
       "label": 3,
       "id": "base",
       "gateway": "0x68B1D87F95878fE05B998F19b66F4baba5De1aed",
-      "usd": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE"
+      "usd": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
     },
     {
       "label": 4,
       "id": "bnb",
       "gateway": "0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44",
-      "usd": "0x4ed7c70F96B99c776995fB64377f0d4aB3B0e1C1"
+      "usd": "0x4ed7c70F96B99c776995fB64377f0d4aB3B0e1C1",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
     },
     {
       "label": 5,
       "id": "arbitrum",
       "gateway": "0xc5a5C42992dECbae36851359345FE25997F5C42d",
-      "usd": "0x09635F643e140090A9A8Dcd712eD6285858ceBef"
+      "usd": "0x09635F643e140090A9A8Dcd712eD6285858ceBef",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
     },
     {
       "label": 6,
       "id": "optimism",
       "gateway": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
-      "usd": "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB"
+      "usd": "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
     }
   ],
-  "deployedAt": 1793718032904
+  "deployedAt": 1794253025184
 }

@@ -1,23 +1,29 @@
 /**
  * The on-chain store: same StoreValue contract as the sim provider, but every
- * number is read from the local SPAWN! deployment and every action is a real
- * transaction signed by a burner wallet. The UI cannot tell the difference —
- * that is the point.
+ * number is read from a real SPAWN! deployment and every action is a real
+ * transaction signed by a burner wallet.
+ *
+ * Works against two worlds through one manifest format:
+ *  - LOCAL devnet: every logical chain lives on one hardhat node; omnichain
+ *    messages deliver synchronously (results parse out of the same receipt).
+ *  - PUBLIC TESTNET: the hub is Base Sepolia and each spoke is its own
+ *    network; messages travel over live LayerZero, so results land on the
+ *    hub minutes after the spoke tx — we poll for them.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   createPublicClient,
   createWalletClient,
+  defineChain,
   formatEther,
   http,
   parseEther,
   parseEventLogs,
   type Address,
+  type Chain,
   type PublicClient,
-  type WalletClient,
 } from 'viem'
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
-import { hardhat } from 'viem/chains'
 import {
   StoreCtx,
   deriveCreature,
@@ -35,24 +41,64 @@ import {
   type Side,
   type Trade,
 } from '../engine/market'
-
-const FEE_MODE_NAME: readonly FeeMode[] = ['holders', 'split', 'dev', 'burn']
 import { FEE_MODE_INDEX, gatewayAbi, padAbi, tokenAbi, usdAbi, type Manifest } from './abi'
 import type { FaceId } from '../components/Faces'
 
+const FEE_MODE_NAME: readonly FeeMode[] = ['holders', 'split', 'dev', 'burn']
 const PALETTE = ['#b5e95b', '#f7a8ce', '#9ccbf5', '#a78bf0', '#f7be7b', '#8be0d4']
-const POLL_MS = 2500
 const AIRDROP_PER_CHAIN = 1337
+const ZERO = '0x0000000000000000000000000000000000000000'
 // Hardhat's well-known dev account #0 — funds burner wallets with gas on the
 // LOCAL dev chain only. Never reuse outside a throwaway devnet.
 const FUNDER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as const
+// Public RPCs cap eth_getLogs hard (Base Sepolia: 200 blocks per call).
+const LOG_CHUNK_LOCAL = 100_000n
+const LOG_CHUNK_PUBLIC = 199n
+// Testnet first load only backfills this many hub blocks of tape (~33h on
+// Base's 2s blocks) — keeps page loads fast on capped public RPCs.
+const BACKFILL_BLOCKS = 60_000n
 
 const ef = (v: bigint) => Number(formatEther(v))
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 interface TokenEntry {
   meta: CreatureMeta
   token: Address
   market: Market
+}
+
+/** One spoke network: its contracts and a client to reach it. */
+interface ChainIO {
+  id: string
+  label: number
+  gateway: Address
+  usd: Address
+  chain: Chain
+  client: PublicClient
+}
+
+function mkChain(id: number, rpc: string, name: string): Chain {
+  return defineChain({
+    id,
+    name,
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: { default: { http: [rpc] } },
+  })
+}
+
+async function getLogsChunked(
+  client: PublicClient,
+  address: Address,
+  from: bigint,
+  to: bigint,
+  chunk: bigint,
+) {
+  const out = []
+  for (let b = from; b <= to; b += chunk + 1n) {
+    const end = b + chunk > to ? to : b + chunk
+    out.push(...(await client.getLogs({ address, fromBlock: b, toBlock: end })))
+  }
+  return out
 }
 
 function loadBurner(): PrivateKeyAccount {
@@ -94,23 +140,40 @@ function parseMetaURI(uri: string): {
   }
 }
 
-export function OnchainProvider({ children }: { children: React.ReactNode }) {
+export function OnchainProvider({
+  children,
+  manifestUrl = '/onchain/deployment.json',
+}: {
+  children: React.ReactNode
+  manifestUrl?: string
+}) {
   const [status, setStatus] = useState<'connecting' | 'ready' | 'offline'>('connecting')
   const [wallet, setWallet] = useState<Wallet | null>(null)
   const [justSpawned, setJustSpawned] = useState<number | null>(null)
   const [version, bump] = useReducer((x: number) => x + 1, 0)
 
   const manifestRef = useRef<Manifest | null>(null)
-  const clientRef = useRef<PublicClient | null>(null)
-  const walletClientRef = useRef<WalletClient | null>(null)
+  const hubClientRef = useRef<PublicClient | null>(null)
+  const hubChainRef = useRef<Chain | null>(null)
+  const iosRef = useRef<ChainIO[]>([])
+  const isLocalRef = useRef(true)
   const burnerRef = useRef<PrivateKeyAccount | null>(null)
   const entriesRef = useRef<Map<number, TokenEntry>>(new Map())
   const replicaCache = useRef<Map<string, Address>>(new Map())
   const usdByChainRef = useRef<Record<string, bigint>>({})
+  const gasByChainRef = useRef<Record<string, bigint>>({})
   const tokensByChainRef = useRef<Map<number, Record<string, bigint>>>(new Map())
   const lastBlockRef = useRef(0n)
   const connectedRef = useRef(false)
   const costsRef = useRef<Record<number, number>>({})
+
+  const io = (chainId: string) => iosRef.current.find((c) => c.id === chainId)
+  const wcFor = (c: ChainIO) =>
+    createWalletClient({
+      account: burnerRef.current!,
+      chain: c.chain,
+      transport: http(c.chain.rpcUrls.default.http[0]),
+    })
 
   const saveCosts = () => {
     const b = burnerRef.current
@@ -126,29 +189,31 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
     const key = `${chainId}:${token}`
     const cached = replicaCache.current.get(key)
     if (cached) return cached
-    const m = manifestRef.current!
-    const gw = m.chains.find((c) => c.id === chainId)!
-    const addr = (await clientRef.current!.readContract({
-      address: gw.gateway,
+    const c = io(chainId)
+    if (!c) return ZERO
+    const addr = (await c.client.readContract({
+      address: c.gateway,
       abi: gatewayAbi,
       functionName: 'replicaOf',
       args: [token],
     })) as Address
-    if (addr !== '0x0000000000000000000000000000000000000000') replicaCache.current.set(key, addr)
+    if (addr !== ZERO) replicaCache.current.set(key, addr)
     return addr
   }, [])
 
   const poll = useCallback(async () => {
-    const client = clientRef.current
+    const hub = hubClientRef.current
     const m = manifestRef.current
-    if (!client || !m) return
+    if (!hub || !m) return
 
-    // 1. token roster + curve state
-    const len = Number(await client.readContract({ address: m.pad, abi: padAbi, functionName: 'tokensLength' }))
+    // 1. token roster + curve state + fees (hub)
+    const len = Number(
+      await hub.readContract({ address: m.pad, abi: padAbi, functionName: 'tokensLength' }),
+    )
     for (let i = 0; i < len; i++) {
       const num = i + 1
       const [token, name, symbol, metaURI, creator, spawnedAt, , vBase, vTokens, sold, ascended] =
-        (await client.readContract({
+        (await hub.readContract({
           address: m.pad,
           abi: padAbi,
           functionName: 'getToken',
@@ -158,8 +223,8 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
       let entry = entriesRef.current.get(num)
       if (!entry) {
         const parsed = parseMetaURI(metaURI)
-        // Images live off-chain (IPFS in production; localStorage keyed by
-        // token address on the local devnet) — metaURI stays tiny.
+        // Images live off-chain (IPFS in production; this browser's storage
+        // on dev/test deployments) — metaURI stays tiny.
         let image = parsed.image
         if (!image) {
           try {
@@ -204,9 +269,8 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
         sold: ef(sold),
       }
 
-      // live fee accounting, straight from the hub's one global pot
       const [fm, fTotal, fHolders, fDev, fDevClaimed, fBurnPot, fBurnedUsd, fBurnedTokens] =
-        (await client.readContract({
+        (await hub.readContract({
           address: m.pad,
           abi: padAbi,
           functionName: 'feesOf',
@@ -226,10 +290,16 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // 2. event tape -> history, volume, holders, chain allocation
-    const latest = await client.getBlockNumber()
+    // 2. event tape -> history, volume, holders, chain allocation (hub)
+    const latest = await hub.getBlockNumber()
     if (latest >= lastBlockRef.current) {
-      const logs = await client.getLogs({ address: m.pad, fromBlock: lastBlockRef.current, toBlock: latest })
+      const logs = await getLogsChunked(
+        hub,
+        m.pad,
+        lastBlockRef.current,
+        latest,
+        isLocalRef.current ? LOG_CHUNK_LOCAL : LOG_CHUNK_PUBLIC,
+      )
       lastBlockRef.current = latest + 1n
       const parsed = parseEventLogs({ abi: padAbi, logs })
       const byToken = new Map<string, TokenEntry>()
@@ -240,7 +310,7 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
           const a = log.args
           const entry = byToken.get((a.token as string).toLowerCase())
           if (!entry) continue
-          const chainId = m.chains.find((c) => c.label === Number(a.chain))?.id ?? 'solana'
+          const chainId = m.chains.find((c) => c.label === Number(a.chain))?.id ?? 'hub'
           const trade: Trade = {
             id: Number(log.blockNumber) * 1000 + Number(log.logIndex ?? 0),
             ts: Number(a.ts) * 1000,
@@ -262,7 +332,10 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
             (mk.chainTokens[chainId] ?? 0) + (trade.side === 'buy' ? trade.tokens : -trade.tokens),
           )
           const held = mk.balances.get(trade.trader) ?? 0
-          mk.balances.set(trade.trader, Math.max(0, held + (trade.side === 'buy' ? trade.tokens : -trade.tokens)))
+          mk.balances.set(
+            trade.trader,
+            Math.max(0, held + (trade.side === 'buy' ? trade.tokens : -trade.tokens)),
+          )
         } else if (log.eventName === 'Ascended') {
           const entry = byToken.get((log.args.token as string).toLowerCase())
           if (entry) entry.market.ascendedAt = Number(log.args.ts) * 1000
@@ -270,34 +343,45 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // 3. burner balances (oUSD per chain + token positions per chain)
+    // 3. burner balances: oUSD + gas + token positions, per spoke network
     const burner = burnerRef.current
     if (burner && connectedRef.current) {
       const usdByChain: Record<string, bigint> = {}
-      for (const c of m.chains) {
-        usdByChain[c.id] = (await client.readContract({
-          address: c.usd,
-          abi: usdAbi,
-          functionName: 'balanceOf',
-          args: [burner.address],
-        })) as bigint
+      const gasByChain: Record<string, bigint> = {}
+      for (const c of iosRef.current) {
+        try {
+          usdByChain[c.id] = (await c.client.readContract({
+            address: c.usd,
+            abi: usdAbi,
+            functionName: 'balanceOf',
+            args: [burner.address],
+          })) as bigint
+          gasByChain[c.id] = await c.client.getBalance({ address: burner.address })
+        } catch {
+          usdByChain[c.id] = usdByChainRef.current[c.id] ?? 0n
+        }
       }
       usdByChainRef.current = usdByChain
+      gasByChainRef.current = gasByChain
       const positions: Wallet['positions'] = {}
       for (const [num, entry] of entriesRef.current) {
         const perChain: Record<string, bigint> = {}
         let sum = 0n
-        for (const c of m.chains) {
-          const rep = await replicaAddr(c.id, entry.token)
-          if (rep === '0x0000000000000000000000000000000000000000') continue
-          const bal = (await client.readContract({
-            address: rep,
-            abi: tokenAbi,
-            functionName: 'balanceOf',
-            args: [burner.address],
-          })) as bigint
-          perChain[c.id] = bal
-          sum += bal
+        for (const c of iosRef.current) {
+          try {
+            const rep = await replicaAddr(c.id, entry.token)
+            if (rep === ZERO) continue
+            const bal = (await c.client.readContract({
+              address: rep,
+              abi: tokenAbi,
+              functionName: 'balanceOf',
+              args: [burner.address],
+            })) as bigint
+            perChain[c.id] = bal
+            sum += bal
+          } catch {
+            /* spoke briefly unreachable — keep going */
+          }
         }
         tokensByChainRef.current.set(num, perChain)
         if (sum > 0n) positions[num] = { tokens: ef(sum), cost: costsRef.current[num] ?? 0 }
@@ -309,37 +393,64 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
     bump()
   }, [replicaAddr])
 
-  // boot: fetch manifest, check the chain, start polling
+  // boot: fetch manifest, build one client per network, start polling
   useEffect(() => {
     let timer: number | undefined
     let stopped = false
     ;(async () => {
       try {
-        const res = await fetch('/onchain/deployment.json', { cache: 'no-store' })
+        const res = await fetch(manifestUrl, { cache: 'no-store' })
         if (!res.ok) throw new Error('no manifest')
         const manifest = (await res.json()) as Manifest
         manifestRef.current = manifest
-        const client = createPublicClient({
-          chain: hardhat,
-          transport: http(manifest.rpc, { batch: true }),
+        isLocalRef.current = manifest.chainId === 31337
+
+        const hubChain = mkChain(manifest.chainId, manifest.rpc, 'spawn-hub')
+        hubChainRef.current = hubChain
+        const hub = createPublicClient({ chain: hubChain, transport: http(manifest.rpc, { batch: true }) })
+        await hub.getChainId()
+        hubClientRef.current = hub
+        lastBlockRef.current = BigInt(manifest.fromBlock ?? 0)
+        if (!isLocalRef.current) {
+          const tip = await hub.getBlockNumber()
+          const floor = tip > BACKFILL_BLOCKS ? tip - BACKFILL_BLOCKS : 0n
+          if (floor > lastBlockRef.current) lastBlockRef.current = floor
+        }
+
+        iosRef.current = manifest.chains.map((c) => {
+          const chainId = c.chainId ?? manifest.chainId
+          const rpc = c.rpc ?? manifest.rpc
+          const sameAsHub = chainId === manifest.chainId && rpc === manifest.rpc
+          const chain = sameAsHub ? hubChain : mkChain(chainId, rpc, `spawn-${c.id}`)
+          return {
+            id: c.id,
+            label: c.label,
+            gateway: c.gateway,
+            usd: c.usd,
+            chain,
+            client: sameAsHub
+              ? hub
+              : createPublicClient({ chain, transport: http(rpc, { batch: true }) }),
+          }
         })
-        await client.getChainId()
-        clientRef.current = client
+
         burnerRef.current = loadBurner()
         costsRef.current = loadCosts(burnerRef.current.address)
-        walletClientRef.current = createWalletClient({
-          account: burnerRef.current,
-          chain: hardhat,
-          transport: http(manifest.rpc),
-        })
-        // if this burner has traded before, resume it silently
-        const eth = await client.getBalance({ address: burnerRef.current.address })
-        if (eth > 0n) connectedRef.current = true
+        // if this burner has gas anywhere, resume it silently
+        for (const c of iosRef.current) {
+          const eth = await c.client.getBalance({ address: burnerRef.current.address }).catch(() => 0n)
+          if (eth > 0n) {
+            connectedRef.current = true
+            break
+          }
+        }
         if (stopped) return
         setStatus('ready')
         await poll()
-        timer = window.setInterval(() => void poll().catch(() => undefined), POLL_MS)
-      } catch {
+        const every = isLocalRef.current ? 2500 : 8000
+        timer = window.setInterval(() => void poll().catch(() => undefined), every)
+      } catch (e) {
+        console.error('onchain boot failed:', e)
         if (!stopped) setStatus('offline')
       }
     })()
@@ -347,79 +458,160 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
       stopped = true
       if (timer) window.clearInterval(timer)
     }
-  }, [poll])
+  }, [poll, manifestUrl])
 
+  /** Faucets oUSD on every spoke where the burner can pay for gas. */
   const airdrop = useCallback(async () => {
-    const m = manifestRef.current
-    const wc = walletClientRef.current
-    const client = clientRef.current
     const burner = burnerRef.current
-    if (!m || !wc || !client || !burner) throw new Error('chain offline')
-    for (const c of m.chains) {
-      const hash = await wc.writeContract({
-        address: c.usd,
-        abi: usdAbi,
-        functionName: 'faucet',
-        args: [burner.address, parseEther(String(AIRDROP_PER_CHAIN))],
-        chain: hardhat,
-        account: burner,
-      })
-      await client.waitForTransactionReceipt({ hash })
+    if (!burner) throw new Error('chain offline')
+    let done = 0
+    for (const c of iosRef.current) {
+      try {
+        const gas = await c.client.getBalance({ address: burner.address })
+        if (gas === 0n) continue
+        const hash = await wcFor(c).writeContract({
+          address: c.usd,
+          abi: usdAbi,
+          functionName: 'faucet',
+          args: [burner.address, parseEther(String(AIRDROP_PER_CHAIN))],
+          chain: c.chain,
+          account: burner,
+        })
+        await c.client.waitForTransactionReceipt({ hash })
+        done++
+      } catch {
+        /* chain unreachable or faucet capped — keep going */
+      }
     }
     await poll()
+    if (done === 0) throw new Error('no gas on any chain — the burner needs testnet ETH first')
   }, [poll])
 
   const connect = useCallback(async (): Promise<Wallet> => {
     const m = manifestRef.current
-    const client = clientRef.current
     const burner = burnerRef.current
-    if (!m || !client || !burner) throw new Error('chain offline')
-    // gas for the burner, from the local dev faucet account
-    const eth = await client.getBalance({ address: burner.address })
-    if (eth < parseEther('1')) {
-      const funder = privateKeyToAccount(FUNDER_PK)
-      const funderClient = createWalletClient({ account: funder, chain: hardhat, transport: http(m.rpc) })
-      const hash = await funderClient.sendTransaction({
-        to: burner.address,
-        value: parseEther('100'),
-        chain: hardhat,
-        account: funder,
-      })
-      await client.waitForTransactionReceipt({ hash })
+    if (!m || !burner) throw new Error('chain offline')
+
+    if (isLocalRef.current) {
+      // local devnet: gas comes from hardhat's dev faucet account
+      const hub = hubClientRef.current!
+      const eth = await hub.getBalance({ address: burner.address })
+      if (eth < parseEther('1')) {
+        const funder = privateKeyToAccount(FUNDER_PK)
+        const funderClient = createWalletClient({
+          account: funder,
+          chain: hubChainRef.current!,
+          transport: http(m.rpc),
+        })
+        const hash = await funderClient.sendTransaction({
+          to: burner.address,
+          value: parseEther('100'),
+          chain: hubChainRef.current!,
+          account: funder,
+        })
+        await hub.waitForTransactionReceipt({ hash })
+      }
+    } else if (m.gasDrip) {
+      // public testnet: ask the gas drip to wet new burners
+      try {
+        await fetch(m.gasDrip, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ address: burner.address }),
+        })
+        await sleep(4000)
+      } catch {
+        /* drip offline — the user can still fund the burner by hand */
+      }
     }
+
     connectedRef.current = true
-    // first connect: print some play money on every chain
-    const anyUsd = (await client.readContract({
-      address: m.chains[0].usd,
-      abi: usdAbi,
-      functionName: 'balanceOf',
-      args: [burner.address],
-    })) as bigint
-    if (anyUsd === 0n) await airdrop()
-    else await poll()
+    try {
+      await airdrop()
+    } catch {
+      /* no gas yet — connected with an empty wallet; UI shows the state */
+    }
     const total = Object.values(usdByChainRef.current).reduce((a, b) => a + b, 0n)
     return {
       address: burner.address,
       balance: ef(total),
       positions: wallet?.positions ?? {},
     }
-  }, [airdrop, poll, wallet])
+  }, [airdrop, wallet])
+
+  /** Testnet: wait for the hub to receive this trader's Trade via LayerZero. */
+  const waitHubTrade = useCallback(
+    async (token: Address, trader: Address, fromBlock: bigint, timeoutMs: number) => {
+      const hub = hubClientRef.current!
+      const m = manifestRef.current!
+      const t0 = Date.now()
+      while (Date.now() - t0 < timeoutMs) {
+        try {
+          const latest = await hub.getBlockNumber()
+          if (latest >= fromBlock) {
+            const logs = await getLogsChunked(
+              hub,
+              m.pad,
+              fromBlock,
+              latest,
+              isLocalRef.current ? LOG_CHUNK_LOCAL : LOG_CHUNK_PUBLIC,
+            )
+            const parsed = parseEventLogs({ abi: padAbi, logs })
+            const t = parsed.find(
+              (e) =>
+                e.eventName === 'Trade' &&
+                (e.args.token as string).toLowerCase() === token.toLowerCase() &&
+                (e.args.trader as string).toLowerCase() === trader.toLowerCase(),
+            )
+            if (t) {
+              const a = t.args as { usd: bigint; tokens: bigint; priceAfter: bigint }
+              return {
+                usd: ef(a.usd),
+                tokens: ef(a.tokens),
+                price: ef(a.priceAfter),
+                ascended: parsed.some(
+                  (e) =>
+                    e.eventName === 'Ascended' &&
+                    (e.args.token as string).toLowerCase() === token.toLowerCase(),
+                ),
+              }
+            }
+          }
+        } catch {
+          /* transient RPC hiccup */
+        }
+        await sleep(6000)
+      }
+      return null
+    },
+    [],
+  )
 
   const trade = useCallback(
     async (num: number, side: Side, amount: number, chainId: string): Promise<TradeResult> => {
-      const m = manifestRef.current
-      const client = clientRef.current
-      const wc = walletClientRef.current
       const burner = burnerRef.current
       const entry = entriesRef.current.get(num)
-      if (!m || !client || !wc || !burner) return { ok: false, reason: 'Chain offline.' }
+      if (!burner || !hubClientRef.current) return { ok: false, reason: 'Chain offline.' }
       if (!connectedRef.current) return { ok: false, reason: 'Connect a wallet first.' }
       if (!entry) return { ok: false, reason: 'Unknown creature.' }
       if (!(amount > 0)) return { ok: false, reason: 'Enter an amount.' }
-      const gw = m.chains.find((c) => c.id === chainId)
-      if (!gw) return { ok: false, reason: 'Unknown chain.' }
+      const c = io(chainId)
+      if (!c) {
+        const have = iosRef.current.map((x) => x.id.toUpperCase()).join(' + ')
+        return { ok: false, reason: `${chainId.toUpperCase()} isn't live on this deployment yet — try ${have}.` }
+      }
+      if (!isLocalRef.current) {
+        const gas = gasByChainRef.current[chainId] ?? (await c.client.getBalance({ address: burner.address }))
+        if (gas < parseEther('0.00002')) {
+          return {
+            ok: false,
+            reason: `No gas on ${chainId.toUpperCase()} — send a drop of testnet ETH to your burner ${burner.address.slice(0, 8)}…`,
+          }
+        }
+      }
 
       try {
+        const hubMark = await hubClientRef.current.getBlockNumber()
         let hash: `0x${string}`
         if (side === 'buy') {
           const usdWei = parseEther(amount.toFixed(6))
@@ -430,12 +622,12 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
               reason: `Only $${Number(formatEther(have)).toFixed(2)} oUSD on ${chainId.toUpperCase()} — hit AIRDROP or pick another chain.`,
             }
           }
-          hash = await wc.writeContract({
-            address: gw.gateway,
+          hash = await wcFor(c).writeContract({
+            address: c.gateway,
             abi: gatewayAbi,
             functionName: 'buyToken',
             args: [entry.token, usdWei],
-            chain: hardhat,
+            chain: c.chain,
             account: burner,
           })
         } else {
@@ -454,22 +646,46 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
           }
           let tokensWei = parseEther(amount.toFixed(18))
           if (tokensWei > have) tokensWei = have
-          hash = await wc.writeContract({
-            address: gw.gateway,
+          hash = await wcFor(c).writeContract({
+            address: c.gateway,
             abi: gatewayAbi,
             functionName: 'sellToken',
             args: [entry.token, tokensWei],
-            chain: hardhat,
+            chain: c.chain,
             account: burner,
           })
         }
 
-        const receipt = await client.waitForTransactionReceipt({ hash })
-        const events = parseEventLogs({ abi: padAbi, logs: receipt.logs })
-        const t = events.find((e) => e.eventName === 'Trade')
-        const ascended = events.some((e) => e.eventName === 'Ascended')
-        const usd = t ? ef(t.args.usd as bigint) : amount
-        const tokens = t ? ef(t.args.tokens as bigint) : 0
+        const receipt = await c.client.waitForTransactionReceipt({ hash })
+
+        let usd = 0
+        let tokens = 0
+        let price = 0
+        let ascended = false
+        if (isLocalRef.current) {
+          // synchronous messenger: the hub events are in this very receipt
+          const events = parseEventLogs({ abi: padAbi, logs: receipt.logs })
+          const t = events.find((e) => e.eventName === 'Trade')
+          ascended = events.some((e) => e.eventName === 'Ascended')
+          usd = t ? ef(t.args.usd as bigint) : amount
+          tokens = t ? ef(t.args.tokens as bigint) : 0
+          price = t ? ef(t.args.priceAfter as bigint) : 0
+        } else {
+          // live LayerZero: the trade lands on the hub in a minute or three
+          const got = await waitHubTrade(entry.token, burner.address, hubMark, 240_000)
+          if (got) {
+            usd = got.usd
+            tokens = got.tokens
+            price = got.price
+            ascended = got.ascended
+          } else {
+            // the message is still in flight — estimate from the quote
+            const q = marketQuote(entry.market, side, amount)
+            usd = side === 'buy' ? amount : q.usd
+            tokens = side === 'buy' ? q.tokens : amount
+            price = entry.market.state.vBase / entry.market.state.vTokens
+          }
+        }
         if (side === 'buy') costsRef.current[num] = (costsRef.current[num] ?? 0) + usd
         else {
           const pos = wallet?.positions[num]
@@ -479,37 +695,33 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
         }
         saveCosts()
         await poll()
-        return {
-          ok: true,
-          usd,
-          tokens,
-          price: t ? ef(t.args.priceAfter as bigint) : 0,
-          ascended,
-        }
+        return { ok: true, usd, tokens, price, ascended }
       } catch (e) {
         const msg = e instanceof Error ? e.message.split('\n')[0] : 'Transaction failed.'
         return { ok: false, reason: msg.slice(0, 120) }
       }
     },
-    [poll, wallet],
+    [poll, waitHubTrade, wallet],
   )
 
   const spawn = useCallback(
     async (input: SpawnInput): Promise<CreatureMeta> => {
-      const m = manifestRef.current
-      const client = clientRef.current
-      const wc = walletClientRef.current
       const burner = burnerRef.current
-      if (!m || !client || !wc || !burner) throw new Error('chain offline')
+      const hub = hubClientRef.current
+      const m = manifestRef.current
+      if (!burner || !hub || !m || iosRef.current.length === 0) throw new Error('chain offline')
       if (!connectedRef.current) await connect()
 
       // metaURI stays small on purpose: in production the image goes to IPFS
-      // and the URI points at it; on the local devnet we keep the image in
+      // and the URI points at it; on dev/test deployments the image lives in
       // this browser, keyed by the token address.
       const metaURI = JSON.stringify({ links: input.links, feeMode: input.feeMode ?? 'holders' })
-      const gw = m.chains[0] // genesis is submitted from solana; it lands everywhere
-      const hash = await wc.writeContract({
-        address: gw.gateway,
+      const c = iosRef.current[0] // genesis submits from the first spoke; it lands everywhere
+      const before = Number(
+        await hub.readContract({ address: m.pad, abi: padAbi, functionName: 'tokensLength' }),
+      )
+      const hash = await wcFor(c).writeContract({
+        address: c.gateway,
         abi: gatewayAbi,
         functionName: 'spawnToken',
         args: [
@@ -519,15 +731,41 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
           0n,
           FEE_MODE_INDEX[input.feeMode ?? 'holders'],
         ],
-        chain: hardhat,
+        chain: c.chain,
         account: burner,
       })
-      const receipt = await client.waitForTransactionReceipt({ hash })
-      const spawned = parseEventLogs({ abi: padAbi, logs: receipt.logs }).find(
-        (e) => e.eventName === 'Spawned',
-      )
-      const token = (spawned?.args.token as Address) ?? '0x'
-      if (token !== '0x') {
+      const receipt = await c.client.waitForTransactionReceipt({ hash })
+
+      let token: Address | undefined
+      if (isLocalRef.current) {
+        const spawned = parseEventLogs({ abi: padAbi, logs: receipt.logs }).find(
+          (e) => e.eventName === 'Spawned',
+        )
+        token = spawned?.args.token as Address | undefined
+      } else {
+        // wait for OP_SPAWN to land on the hub over LayerZero
+        const t0 = Date.now()
+        while (Date.now() - t0 < 300_000 && !token) {
+          await sleep(8000)
+          try {
+            const len = Number(
+              await hub.readContract({ address: m.pad, abi: padAbi, functionName: 'tokensLength' }),
+            )
+            for (let i = before; i < len; i++) {
+              const [addr, , , , creator] = (await hub.readContract({
+                address: m.pad,
+                abi: padAbi,
+                functionName: 'getToken',
+                args: [BigInt(i)],
+              })) as unknown as [Address, string, string, string, Address]
+              if (creator.toLowerCase() === burner.address.toLowerCase()) token = addr
+            }
+          } catch {
+            /* transient */
+          }
+        }
+      }
+      if (token) {
         try {
           localStorage.setItem(`spawn.img.${token.toLowerCase()}`, input.image)
         } catch {
@@ -535,13 +773,15 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
         }
       }
       await poll()
-      const entry = [...entriesRef.current.values()].find(
-        (en) => en.token.toLowerCase() === token.toLowerCase(),
-      )
+      const entry = token
+        ? [...entriesRef.current.values()].find((en) => en.token.toLowerCase() === token.toLowerCase())
+        : undefined
       const num = entry?.meta.num ?? entriesRef.current.size
       setJustSpawned(num)
       window.setTimeout(() => setJustSpawned(null), 4000)
-      return entry?.meta ?? { num, name: input.name, ticker: input.ticker, color: PALETTE[0], spawnedAt: Date.now() }
+      return (
+        entry?.meta ?? { num, name: input.name, ticker: input.ticker, color: PALETTE[0], spawnedAt: Date.now() }
+      )
     },
     [connect, poll],
   )
@@ -555,27 +795,32 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
   const getMarket = useCallback((num: number) => entriesRef.current.get(num)?.market, [])
 
   /** Real on-chain claim: the gateway messages the hub, the hub pays out
-   * oUSD on that chain; the next poll picks the balance up. */
+   * oUSD on that chain; polling picks the balance up. */
   const claimFees = useCallback(
     async (num: number): Promise<number> => {
-      const m = manifestRef.current
-      const client = clientRef.current
-      const wc = walletClientRef.current
       const burner = burnerRef.current
       const entry = entriesRef.current.get(num)
-      if (!m || !client || !wc || !burner || !entry) return 0
+      if (!burner || !entry || iosRef.current.length === 0) return 0
       const f = entry.market.fees
       const claimable = f ? Math.max(0, f.dev - f.devClaimed) : 0
       if (claimable <= 0.005) return 0
-      const hash = await wc.writeContract({
-        address: m.chains[0].gateway,
+      // claim from the first spoke the burner can pay gas on
+      let c = iosRef.current[0]
+      for (const x of iosRef.current) {
+        if ((gasByChainRef.current[x.id] ?? 0n) > 0n) {
+          c = x
+          break
+        }
+      }
+      const hash = await wcFor(c).writeContract({
+        address: c.gateway,
         abi: gatewayAbi,
         functionName: 'claimFees',
         args: [entry.token],
-        chain: hardhat,
+        chain: c.chain,
         account: burner,
       })
-      await client.waitForTransactionReceipt({ hash })
+      await c.client.waitForTransactionReceipt({ hash })
       await poll()
       return claimable
     },
@@ -600,7 +845,11 @@ export function OnchainProvider({ children }: { children: React.ReactNode }) {
       getQuote,
       getMarket,
       justSpawned,
-      onchain: { status, airdrop },
+      onchain: {
+        status,
+        airdrop,
+        chains: manifestRef.current?.chains.map((c) => c.id),
+      },
     }),
     [creatures, wallet, connect, spawn, trade, claimFees, getQuote, getMarket, justSpawned, status, airdrop],
   )

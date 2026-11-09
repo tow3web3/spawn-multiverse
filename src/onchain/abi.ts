@@ -33,12 +33,25 @@ export const tokenAbi = parseAbi([
 ])
 
 export interface Manifest {
+  /** Hub chain id + RPC (the pad lives here). */
   chainId: number
   rpc: string
-  messenger: `0x${string}`
+  messenger?: `0x${string}`
   pad: `0x${string}`
   /** Price-discovery module behind the pad (InternalCurveVenue locally; LaunchLab/DBC adapter in prod). */
   venue?: `0x${string}`
-  hubUsd: `0x${string}`
-  chains: { label: number; id: string; gateway: `0x${string}`; usd: `0x${string}` }[]
+  hubUsd?: `0x${string}`
+  /** First hub block worth scanning for pad events (deploy block). */
+  fromBlock?: number
+  /** Optional gas-drip endpoint for burner wallets on public testnets. */
+  gasDrip?: string
+  chains: {
+    label: number
+    id: string
+    gateway: `0x${string}`
+    usd: `0x${string}`
+    /** Spoke chain id + RPC; defaults to the hub's when absent (local devnet). */
+    chainId?: number
+    rpc?: string
+  }[]
 }

@@ -14,16 +14,17 @@ import { TokenPage } from './components/TokenPage'
 import { PortfolioPage } from './components/PortfolioPage'
 import { DevDashboard } from './components/DevDashboard'
 
-export type AppMode = 'sim' | 'chain'
+export type AppMode = 'sim' | 'testnet' | 'chain'
 
-/** Public demo builds (shareable link) have no local chain to talk to. */
+/** Public demo builds (shareable link) have no LOCAL chain — but testnet works anywhere. */
 export const PUBLIC_DEMO = Boolean(import.meta.env.VITE_PUBLIC_DEMO)
 
 function loadMode(): AppMode {
-  if (PUBLIC_DEMO) return 'sim'
   try {
     const m = localStorage.getItem('spawn.mode')
-    return m === 'chain' ? 'chain' : 'sim'
+    if (m === 'testnet') return 'testnet'
+    if (m === 'chain') return PUBLIC_DEMO ? 'sim' : 'chain'
+    return 'sim'
   } catch {
     return 'sim'
   }
@@ -83,10 +84,8 @@ export default function App() {
   }
   const openToken = (num: number) => navigate(`/token/${num}`)
 
-  const Provider = mode === 'chain' ? OnchainProvider : StoreProvider
-
-  return (
-    <Provider key={mode}>
+  const content = (
+    <>
       <TickerBar />
       <Nav
         mode={mode}
@@ -134,6 +133,17 @@ export default function App() {
           }}
         />
       )}
-    </Provider>
+    </>
+  )
+
+  return mode === 'sim' ? (
+    <StoreProvider key="sim">{content}</StoreProvider>
+  ) : (
+    <OnchainProvider
+      key={mode}
+      manifestUrl={mode === 'testnet' ? '/onchain/testnet.json' : '/onchain/deployment.json'}
+    >
+      {content}
+    </OnchainProvider>
   )
 }

@@ -385,7 +385,12 @@ export interface StoreValue {
   claimFees?: (num: number) => Promise<number>
   justSpawned: number | null
   /** Present only in on-chain mode. */
-  onchain?: { status: 'connecting' | 'ready' | 'offline'; airdrop: () => Promise<void> }
+  onchain?: {
+    status: 'connecting' | 'ready' | 'offline'
+    airdrop: () => Promise<void>
+    /** Chain ids actually live on this deployment (testnet has fewer than 6). */
+    chains?: string[]
+  }
 }
 
 export const StoreCtx = createContext<StoreValue | null>(null)

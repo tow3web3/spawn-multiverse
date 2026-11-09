@@ -78,20 +78,28 @@ export function Nav({
           </button>
         </nav>
 
-        {/* sim / chain switch (hidden on the public demo — no local chain there) */}
-        <div className={`${PUBLIC_DEMO ? 'hidden' : 'flex'} overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold`}>
-          {(['sim', 'chain'] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={`px-2.5 py-1.5 transition ${
-                mode === m ? 'bg-ink text-lime' : 'bg-white hover:bg-lime'
-              } ${m === 'chain' ? 'border-l-2 border-ink' : ''}`}
-              title={m === 'sim' ? 'Simulated market' : 'Local on-chain deployment'}
-            >
-              {m === 'sim' ? 'SIM' : '⛓ ONCHAIN'}
-            </button>
-          ))}
+        {/* market mode switch — LOCAL only exists outside the public build */}
+        <div className="flex overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold">
+          {(PUBLIC_DEMO ? (['sim', 'testnet'] as const) : (['sim', 'testnet', 'chain'] as const)).map(
+            (m, i) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={`px-2.5 py-1.5 transition ${
+                  mode === m ? 'bg-ink text-lime' : 'bg-white hover:bg-lime'
+                } ${i > 0 ? 'border-l-2 border-ink' : ''}`}
+                title={
+                  m === 'sim'
+                    ? 'Simulated market'
+                    : m === 'testnet'
+                      ? 'Real contracts on public testnets (Base/Optimism/Arbitrum Sepolia)'
+                      : 'Local on-chain deployment'
+                }
+              >
+                {m === 'sim' ? 'SIM' : m === 'testnet' ? '⛓ TESTNET' : 'LOCAL'}
+              </button>
+            ),
+          )}
         </div>
 
         <div className="hidden items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 font-mono text-[10px] font-bold xl:flex">
@@ -135,8 +143,10 @@ export function Nav({
       {onchain && onchain.status !== 'ready' && (
         <div className="border-t-2 border-ink bg-down px-4 py-1.5 text-center font-mono text-[10px] font-bold tracking-wide text-white">
           {onchain.status === 'connecting'
-            ? '⛓ CONNECTING TO THE LOCAL CHAIN…'
-            : '⛓ LOCAL CHAIN OFFLINE — RUN `npm run chain` THEN `npm run chain:deploy`, OR FLIP BACK TO SIM.'}
+            ? '⛓ CONNECTING TO THE CHAIN…'
+            : mode === 'testnet'
+              ? '⛓ TESTNET DEPLOYMENT NOT LIVE YET — THE MULTIVERSE IS BEING WIRED. FLIP BACK TO SIM FOR NOW.'
+              : '⛓ LOCAL CHAIN OFFLINE — RUN `npm run chain` THEN `npm run chain:deploy`, OR FLIP BACK TO SIM.'}
         </div>
       )}
     </header>

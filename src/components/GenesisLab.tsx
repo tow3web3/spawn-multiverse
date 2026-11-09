@@ -39,7 +39,8 @@ export function GenesisLab({
   onClose: () => void
   onSpawned: (num: number) => void
 }) {
-  const { spawn, trade, connect } = useStore()
+  const { spawn, trade, connect, onchain } = useStore()
+  const liveChains = onchain?.chains ? CHAINS.filter((c) => onchain.chains!.includes(c.id)) : CHAINS
   const [name, setName] = useState('')
   const [ticker, setTicker] = useState('')
   const [image, setImage] = useState<string | null>(null)
@@ -251,7 +252,7 @@ export function GenesisLab({
             <p className={`${label} mt-7`}>05 — ALL CHAINS SPAWN TOGETHER</p>
             <div className="mt-3 flex items-center justify-between rounded-xl border-3 border-white/20 bg-void px-4 py-3">
               <div className="flex gap-1.5">
-                {CHAINS.map((ch) => (
+                {liveChains.map((ch) => (
                   <span
                     key={ch.id}
                     title={ch.label}
@@ -262,7 +263,7 @@ export function GenesisLab({
                 ))}
               </div>
               <span className="font-mono text-[11px] font-bold text-lime">
-                6 / 6 ACTIVATED ✓
+                {liveChains.length} / 6 ACTIVATED ✓
               </span>
             </div>
             <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">

@@ -29,12 +29,18 @@ const label = 'font-mono text-[10px] font-bold tracking-[0.15em] opacity-60'
 const card = 'rounded-2xl border-3 border-ink bg-white p-4 shadow-brutal-sm'
 
 export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) {
-  const { mode, creatures, wallet, connect, trade, getQuote, getMarket } = useStore()
+  const { mode, creatures, wallet, connect, trade, getQuote, getMarket, onchain } = useStore()
   const c = creatures.find((x) => x.num === num)
   const market = getMarket(num)
 
   const [side, setSide] = useState<Side>('buy')
   const [chain, setChain] = useState('solana')
+  // some deployments (testnet) run fewer than the 6 chains
+  const liveChains = onchain?.chains ? CHAINS.filter((c) => onchain.chains!.includes(c.id)) : CHAINS
+  useEffect(() => {
+    if (liveChains.length && !liveChains.some((c) => c.id === chain)) setChain(liveChains[0].id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onchain?.chains?.join(), chain])
   const [usdStr, setUsdStr] = useState('50')
   const [pct, setPct] = useState(50)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
@@ -366,7 +372,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
             <p className={`${label} mt-3`}>FROM WHICH CHAIN?</p>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {CHAINS.map((ch) => (
+              {liveChains.map((ch) => (
                 <button
                   key={ch.id}
                   onClick={() => setChain(ch.id)}
@@ -487,9 +493,11 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
           {/* chain sync grid */}
           <div className={card}>
-            <p className={label}>ONE GLOBAL PRICE · SIX NATIVE DEPLOYMENTS</p>
+            <p className={label}>
+              ONE GLOBAL PRICE · {liveChains.length === 6 ? 'SIX' : liveChains.length} NATIVE DEPLOYMENTS
+            </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-2">
-              {CHAINS.map((ch) => (
+              {liveChains.map((ch) => (
                 <div
                   key={ch.id}
                   className="flex items-center gap-2 rounded-lg border-2 border-ink/20 bg-cream/60 px-2 py-1.5"

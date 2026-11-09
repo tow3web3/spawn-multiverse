@@ -19,9 +19,15 @@ const ENDPOINT = '0x6EDCE65403992e310A62460808c4b910D972f10f'
 
 // Our chain labels (see lib-deploy CHAINS): 5 = arbitrum, 6 = optimism.
 const NETS = {
-  baseSepolia: { eid: 40245, role: 'hub' },
-  optimismSepolia: { eid: 40232, role: 'spoke', label: 6, id: 'optimism' },
-  arbitrumSepolia: { eid: 40231, role: 'spoke', label: 5, id: 'arbitrum' },
+  baseSepolia: { eid: 40245, role: 'hub', chainId: 84532, rpc: 'https://sepolia.base.org' },
+  optimismSepolia: {
+    eid: 40232, role: 'spoke', label: 6, id: 'optimism',
+    chainId: 11155420, rpc: 'https://sepolia.optimism.io',
+  },
+  arbitrumSepolia: {
+    eid: 40231, role: 'spoke', label: 5, id: 'arbitrum',
+    chainId: 421614, rpc: 'https://sepolia-rollup.arbitrum.io/rpc',
+  },
 }
 
 const FILE = path.join(__dirname, '..', 'deployments', 'testnet.json')
@@ -159,6 +165,48 @@ async function main() {
 
   const bal1 = await ethers.provider.getBalance(deployer.address)
   console.log(`coût: ${ethers.formatEther(bal0 - bal1)} ETH — reste ${ethers.formatEther(bal1)} ETH`)
+
+  await writeFrontendManifest(load())
+}
+
+/** Publishes public/onchain/testnet.json so the site's TESTNET mode can
+ * talk to whatever is deployed so far. Re-run on any network to refresh. */
+async function writeFrontendManifest(all) {
+  const hub = all.baseSepolia
+  if (!hub?.pad) return
+  const outPath = path.join(__dirname, '..', '..', 'public', 'onchain', 'testnet.json')
+  let fromBlock
+  try {
+    fromBlock = JSON.parse(fs.readFileSync(outPath, 'utf8')).fromBlock
+  } catch {
+    /* first write */
+  }
+  if (!fromBlock) {
+    const hubProvider = new ethers.JsonRpcProvider(NETS.baseSepolia.rpc)
+    fromBlock = Math.max(0, Number(await hubProvider.getBlockNumber()) - 300)
+  }
+  const chains = []
+  for (const [net, cfg] of Object.entries(NETS)) {
+    if (cfg.role !== 'spoke' || !all[net]?.gateway) continue
+    chains.push({
+      label: cfg.label, id: cfg.id,
+      gateway: all[net].gateway, usd: all[net].usd,
+      chainId: cfg.chainId, rpc: cfg.rpc,
+    })
+  }
+  const manifest = {
+    chainId: NETS.baseSepolia.chainId,
+    rpc: NETS.baseSepolia.rpc,
+    pad: hub.pad,
+    venue: hub.venue,
+    hubUsd: hub.usd,
+    fromBlock,
+    chains,
+    deployedAt: Date.now(),
+  }
+  fs.mkdirSync(path.dirname(outPath), { recursive: true })
+  fs.writeFileSync(outPath, JSON.stringify(manifest, null, 2))
+  console.log(`manifest frontend: public/onchain/testnet.json (${chains.length} spoke(s))`)
 }
 
 main().catch((e) => {
