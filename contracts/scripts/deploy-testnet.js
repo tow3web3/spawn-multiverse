@@ -201,6 +201,7 @@ async function writeFrontendManifest(all) {
     venue: hub.venue,
     hubUsd: hub.usd,
     fromBlock,
+    gasDrip: '/.netlify/functions/gas-drip',
     chains,
     deployedAt: Date.now(),
   }

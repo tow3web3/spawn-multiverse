@@ -5,6 +5,7 @@
   "venue": "0x7121282DcadFf97eA401bF61564B68e0aA8A3091",
   "hubUsd": "0x6e8A6bb7A988851bAEEff90c1577beFe2EAe8615",
   "fromBlock": 56655436,
+  "gasDrip": "/.netlify/functions/gas-drip",
   "chains": [],
-  "deployedAt": 1794253016000
+  "deployedAt": 1794256075039
 }
