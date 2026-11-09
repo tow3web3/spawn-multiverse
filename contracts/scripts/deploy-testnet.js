@@ -45,6 +45,23 @@ function save(state) {
   fs.writeFileSync(FILE, JSON.stringify(state, null, 2))
 }
 
+/** The adapter pays real LayerZero fees from its own balance — keep a tank
+ * filled, sized to whatever the deployer can spare on this network. */
+async function topUpTank(adapter, deployer) {
+  const tankBal = await ethers.provider.getBalance(adapter)
+  if (tankBal >= ethers.parseEther('0.002')) return
+  const mine = await ethers.provider.getBalance(deployer.address)
+  // keep a reserve for future wiring txs; send a third of the rest
+  const spare = mine > ethers.parseEther('0.00005') ? (mine - ethers.parseEther('0.00003')) / 3n : 0n
+  const amount = spare > ethers.parseEther('0.005') ? ethers.parseEther('0.005') : spare
+  if (amount <= 0n) {
+    console.log('  (gas tank left empty — deployer balance too low)')
+    return
+  }
+  await (await deployer.sendTransaction({ to: adapter, value: amount })).wait()
+  console.log(`  gas tank +${ethers.formatEther(amount)} ETH`)
+}
+
 async function deployOnce(state, key, name, args) {
   if (state[key]) {
     console.log(`  ${key.padEnd(8)} = ${state[key]} (déjà déployé)`)
@@ -94,6 +111,7 @@ async function main() {
       await (await adapter.setOptions(OPTIONS)).wait()
       console.log('  adapter.setOptions ✓')
     }
+    await topUpTank(adapter.target, deployer)
 
     // Wire every spoke that exists in the manifest but isn't routed yet.
     for (const [net, c] of Object.entries(NETS)) {
@@ -135,6 +153,7 @@ async function main() {
       await (await adapter.setRoute(0, NETS.baseSepolia.eid, b32(hub.adapter))).wait()
       console.log('  route spoke -> hub ✓')
     }
+    await topUpTank(adapter.target, deployer)
     console.log('  ➜ relance le script sur baseSepolia pour câbler hub -> spoke')
   }
 
