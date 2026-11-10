@@ -5,7 +5,8 @@
 //! remaining_accounts of lz_receive start directly at the op accounts. What
 //! these tests therefore PROVE: peer gating, codec-driven dispatch, replica
 //! mint creation, the decimal bridge, ATA creation and minting for DELIVER /
-//! PAYOUT / FEE_DROP, and the 2a recipient rule. What they DEFER to devnet
+//! PAYOUT / FEE_DROP, and the v4 recipient rule (the bytes32 wire rider IS
+//! the recipient's pubkey, exactly). What they DEFER to devnet
 //! (phase 2b): the real clear()/register CPIs and executor-driven account
 //! resolution.
 
@@ -20,7 +21,7 @@ use {
         signature::{Keypair, Signer},
         transaction::VersionedTransaction,
     },
-    spawn_gateway::msg_codec::{EvmAddress, SpawnMsg, U256},
+    spawn_gateway::msg_codec::{WireAddr, SpawnMsg, U256},
 };
 
 const TOKEN_PROGRAM: Pubkey = anchor_lang::solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -28,7 +29,9 @@ const ATA_PROGRAM: Pubkey = anchor_lang::solana_program::pubkey!("ATokenGPvbdGVx
 const SYSTEM: Pubkey = anchor_lang::solana_program::pubkey!("11111111111111111111111111111111");
 
 const HUB_EID: u32 = 40245;
-const HUB_TOKEN: [u8; 20] = [0x8b; 20];
+// Deliberately a WIDE token id (every byte set): the Solana side treats wire
+// token ids as opaque 32-byte seeds and must not impose any padding rule.
+const HUB_TOKEN: [u8; 32] = [0x8b; 32];
 const HUB_PEER_LAST20: [u8; 20] = [0x59; 20];
 
 fn peer_bytes32() -> [u8; 32] {
@@ -185,7 +188,7 @@ fn sync_token(w: &mut World) -> (Pubkey, Pubkey) {
     let (replica, mint) = replica_pdas(&w.program);
     w.lz_receive(
         &SpawnMsg::SyncToken {
-            hub_token: EvmAddress(HUB_TOKEN),
+            hub_token: WireAddr(HUB_TOKEN),
             name: "OMNI TEST".into(),
             symbol: "OMNI".into(),
         },
@@ -200,11 +203,11 @@ fn sync_token(w: &mut World) -> (Pubkey, Pubkey) {
     (replica, mint)
 }
 
-/// A keypair recipient plus the 20-byte wire address that names it under the
-/// phase-2a truncation rule (to == pubkey[12..32]).
-fn recipient_and_wire() -> (Keypair, EvmAddress) {
+/// A keypair recipient plus the bytes32 wire rider that names it (protocol
+/// v4: the rider IS the pubkey).
+fn recipient_and_wire() -> (Keypair, WireAddr) {
     let kp = Keypair::new();
-    let to = EvmAddress(kp.pubkey().to_bytes()[12..32].try_into().unwrap());
+    let to = WireAddr::from_pubkey(&kp.pubkey());
     (kp, to)
 }
 
@@ -242,7 +245,7 @@ fn deliver_mints_scaled_tokens_and_refund() {
 
     w.lz_receive(
         &SpawnMsg::Deliver {
-            hub_token: EvmAddress(HUB_TOKEN),
+            hub_token: WireAddr(HUB_TOKEN),
             to,
             tokens: U256::from_u128(884_495_291_384_607_698_648_615), // 884,495.29… ×1e18
             refund: U256::from_u128(2_000_000_000_000_000_000),       // $2 ×1e18
@@ -295,7 +298,7 @@ fn fee_drop_parks_in_store_vault() {
 
     w.lz_receive(
         &SpawnMsg::FeeDrop {
-            hub_token: EvmAddress(HUB_TOKEN),
+            hub_token: WireAddr(HUB_TOKEN),
             amount: U256::from_u128(1_000_000_000_000_000_000),
         },
         vec![
@@ -323,7 +326,7 @@ fn rejects_wrong_sender_and_wrong_recipient() {
         nonce: 2,
         guid: [0u8; 32],
         message: SpawnMsg::SyncToken {
-            hub_token: EvmAddress([1; 20]),
+            hub_token: WireAddr([1; 32]),
             name: "X".into(),
             symbol: "X".into(),
         }
@@ -345,15 +348,15 @@ fn rejects_wrong_sender_and_wrong_recipient() {
         .unwrap_err();
     assert!(err.contains("Error"), "unexpected: {err}");
 
-    // recipient whose pubkey does not end in the wire address → refused
+    // recipient account that does not match the wire rider → refused
     let (recipient, _) = recipient_and_wire();
     let ata = ata_of(&recipient.pubkey(), &mint);
     let usd_ata = ata_of(&recipient.pubkey(), &w.usd_mint);
     let err = w
         .lz_receive(
             &SpawnMsg::Deliver {
-                hub_token: EvmAddress(HUB_TOKEN),
-                to: EvmAddress([0xBB; 20]),
+                hub_token: WireAddr(HUB_TOKEN),
+                to: WireAddr([0xBB; 32]),
                 tokens: U256::from_u128(1_000_000_000_000),
                 refund: U256::from_u128(0),
             },

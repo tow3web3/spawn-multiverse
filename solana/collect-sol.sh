@@ -4,7 +4,7 @@
 # (~2.1 SOL), then exits. The rate limiter refusing is normal — we just try
 # again later; faucet.solana.com (human captcha) tops up faster if available.
 ADDR="EzXiHeBppPFfLsWXQrQuSJKexPq8T3xKpizfTJ3EUEt"
-NEED=2.2
+NEED=4.7
 URL="https://api.devnet.solana.com"
 for i in {1..48}; do
   BAL=$(solana balance "$ADDR" --url "$URL" 2>/dev/null | awk '{print $1}')

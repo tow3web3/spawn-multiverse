@@ -59,12 +59,17 @@ Deploy wallet: `solana/.keys/devnet.json` (gitignored), address
   are skipped so LiteSVM can drive `lz_receive` directly. What the tests
   therefore do NOT cover: the real clear()/register CPIs and the executor's
   account-resolution round — that is exactly the devnet milestone of 2b.
-- **Known protocol gap (decided, deferred)**: the wire carries 20-byte EVM
-  recipients in OP_DELIVER/OP_PAYOUT — a Solana pubkey cannot ride in them.
-  2a enforces an explicit interim rule (`to == pubkey[12..32]`) so handlers
-  are real and testable; `lz_receive_types_v2` refuses those two ops. The
-  real fix is hub-side: bytes32 recipients for the Solana route (phase 2b,
-  EVM contract change + codec vectors extension).
+- **Recipient gap — RESOLVED (protocol v4)**: every account rider on the
+  wire is now `bytes32`, on ALL routes (not just Solana): token ids,
+  creators, recipients. EVM addresses ride left-padded and the EVM receivers
+  enforce a checked downcast (top 12 bytes zero or revert "PAD: bad
+  recipient"/"GW: bad recipient" — proven in the hardhat suite); Solana
+  consumes riders directly as `Pubkey`s (`WireAddr([u8;32])`). The interim
+  `pubkey[12..32]` truncation rule is gone and `lz_receive_types_v2` now
+  resolves DELIVER/PAYOUT accounts (recipient + both ATAs) from the wire.
+  Note the hub still STORES identities as `address`, so a Solana-held
+  position (creator/trader identity on the hub) needs its own evolution —
+  tracked under 2b's send-path work.
 - Devnet deploy still awaits faucet SOL (collector script running; the
   program is now ~480KB ⇒ budget ~4.5 SOL):
   `anchor deploy --provider.cluster devnet --provider.wallet .keys/devnet.json`.
@@ -118,27 +123,25 @@ Deploy wallet: `solana/.keys/devnet.json` (gitignored), address
 
 Done in 2a: oapp crate integration (✔ compat proven), Store/Peer refactor,
 register path, byte-exact codec + vectors, receive path + types_v2.
+Done since (protocol v4): **bytes32 riders on every route** — EVM contracts,
+vectors (25, incl. wide Solana-shaped riders), Rust codec/handlers/types_v2
+all updated and green; see the resolved gap note above. The v4 wire needs a
+hub+spokes testnet redeploy (archive pattern) before a live Solana smoke.
 Still to do, in order:
 
-1. **bytes32 recipients for the Solana route** (EVM side): OP_DELIVER /
-   OP_PAYOUT / OP_SYNC… recipients toward chain label 1 must carry 32
-   bytes. Cleanest: new ops (or a versioned envelope) used only on the
-   Solana route, so EVM↔EVM stays untouched; extend
-   `gen-codec-vectors.js` + both codecs. Then lift the 2a truncation rule
-   and let `lz_receive_types_v2` resolve DELIVER/PAYOUT accounts.
-2. **Send path**: `spawn`/`buy`/`sell`/`claim` instructions — burn/escrow
+1. **Send path**: `spawn`/`buy`/`sell`/`claim` instructions — burn/escrow
    SPL payment, build the envelope with the codec, quote + CPI
    `endpoint_cpi::send` with type-3 options naming 4M EVM gas (same as the
    EVM adapters); fee paid in SOL by the caller (payer account = our "gas
    tank" equivalent).
-3. **Devnet deploy + registration**: fund `.keys/devnet.json` (~4.5 SOL for
+2. **Devnet deploy + registration**: fund `.keys/devnet.json` (~4.5 SOL for
    ~480KB), `anchor deploy`, `init_store` with the REAL endpoint
    (`76y77prsiCMvXMjuoZ5VRrhG5qYBrUMYTE5WgHqgjEn6` — verify on-chain again
    at deploy time), `init_usd_mint`, `set_peer_config(40245, hub adapter)`.
-4. **Hub side**: `setRoute(1, 40168, <store PDA bytes32>)` on the Base
+3. **Hub side**: `setRoute(1, 40168, <store PDA bytes32>)` on the Base
    Sepolia adapter (label 1 = solana in lib-deploy CHAINS), and
    `pad.setGateway(1, …)` once the hub can address a Solana gateway.
-5. **Smoke**: hub → devnet SYNC_TOKEN + DELIVER observed via LayerZero Scan
+4. **Smoke**: hub → devnet SYNC_TOKEN + DELIVER observed via LayerZero Scan
    testnet, then the reverse (spawn from Solana). Replaces the stale
    `app/smoke.cjs`.
 
@@ -147,8 +150,9 @@ Still to do, in order:
 - Executor + `lz_receive_types_v2` behavior against the REAL devnet
   executor remains the big unknown; the account lists mirror the handlers
   exactly, but only a live delivery proves the dance. Budget days.
-- bytes32-recipient protocol evolution touches hub contracts → needs its
-  own EVM tests + a careful testnet redeploy (archive pattern exists).
+- ~~bytes32-recipient evolution~~ — done (protocol v4, all stacks green);
+  only the testnet redeploy of the v4 contracts remains, via the archive
+  pattern.
 - Rent on executor-driven account creation is paid by the executor's payer;
   enforced-options gas/value sizing on the Solana side needs measuring.
 - Devnet airdrops stay rationed; the collector script drips toward the

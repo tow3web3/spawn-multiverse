@@ -96,12 +96,10 @@ fn clip(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
-/// PHASE-2A RECIPIENT RULE: the wire carries 20-byte EVM recipients, which
-/// cannot name a Solana pubkey. Until the hub speaks bytes32 recipients
-/// (phase 2b), a delivery's recipient account must satisfy
-/// `to == pubkey[12..32]` — deterministic and testable, nothing more.
-fn check_recipient(to: &msg_codec::EvmAddress, recipient: &Pubkey) -> Result<()> {
-    require!(to.0 == recipient.to_bytes()[12..32], GatewayError::RecipientMismatch);
+/// Wire riders are bytes32 (protocol v4): a Solana recipient IS the 32-byte
+/// value — the supplied recipient account must match it exactly.
+fn check_recipient(to: &msg_codec::WireAddr, recipient: &Pubkey) -> Result<()> {
+    require!(to.0 == recipient.to_bytes(), GatewayError::RecipientMismatch);
     Ok(())
 }
 
@@ -109,7 +107,7 @@ fn check_recipient(to: &msg_codec::EvmAddress, recipient: &Pubkey) -> Result<()>
 fn handle_sync_token<'info>(
     ctx: &Context<'_, '_, 'info, 'info, LzReceive<'info>>,
     rest: &[AccountInfo<'info>],
-    hub_token: msg_codec::EvmAddress,
+    hub_token: msg_codec::WireAddr,
     name: String,
     symbol: String,
 ) -> Result<()> {
@@ -179,7 +177,7 @@ fn handle_sync_token<'info>(
 fn load_replica<'info>(
     program_id: &Pubkey,
     replica_info: &AccountInfo<'info>,
-    hub_token: &msg_codec::EvmAddress,
+    hub_token: &msg_codec::WireAddr,
 ) -> Result<Replica> {
     require!(replica_info.owner == program_id, GatewayError::NoReplica);
     let replica = Replica::try_deserialize(&mut &replica_info.try_borrow_data()?[..])?;
@@ -241,8 +239,8 @@ fn mint_into_ata<'info>(
 fn handle_deliver<'info>(
     ctx: &Context<'_, '_, 'info, 'info, LzReceive<'info>>,
     rest: &[AccountInfo<'info>],
-    hub_token: msg_codec::EvmAddress,
-    to: msg_codec::EvmAddress,
+    hub_token: msg_codec::WireAddr,
+    to: msg_codec::WireAddr,
     tokens: msg_codec::U256,
     refund: msg_codec::U256,
 ) -> Result<()> {
@@ -269,7 +267,7 @@ fn handle_deliver<'info>(
 fn handle_payout<'info>(
     ctx: &Context<'_, '_, 'info, 'info, LzReceive<'info>>,
     rest: &[AccountInfo<'info>],
-    to: msg_codec::EvmAddress,
+    to: msg_codec::WireAddr,
     usd_out: msg_codec::U256,
 ) -> Result<()> {
     require!(rest.len() >= 6, GatewayError::AccountMismatch);
@@ -292,7 +290,7 @@ fn handle_payout<'info>(
 fn handle_fee_drop<'info>(
     ctx: &Context<'_, '_, 'info, 'info, LzReceive<'info>>,
     rest: &[AccountInfo<'info>],
-    hub_token: msg_codec::EvmAddress,
+    hub_token: msg_codec::WireAddr,
     amount: msg_codec::U256,
 ) -> Result<()> {
     require!(rest.len() >= 6, GatewayError::AccountMismatch);

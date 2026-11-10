@@ -250,4 +250,24 @@ describe('SPAWN! omnichain protocol', () => {
       'LOM: unknown sender',
     )
   })
+
+  it('rejects wire recipients whose top 12 bytes are not zero', async () => {
+    // Wire riders are bytes32 so Solana pubkeys fit; a value consumed as an
+    // EVM address must be zero-padded — dirty high bytes must revert.
+    const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
+    const token = await spawnVia(world.chains[0])
+    const coder = ethers.AbiCoder.defaultAbiCoder()
+    const dirtyBuyer = '0x01' + '00'.repeat(11) + user.address.slice(2)
+    const payload = coder.encode(
+      ['uint8', 'bytes'],
+      [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [ethers.zeroPadValue(token, 32), dirtyBuyer, E(100)])],
+    )
+    await impersonateAccount(world.messenger.target)
+    await setBalance(world.messenger.target, E(1))
+    const msgr = await ethers.getSigner(world.messenger.target)
+    const src = world.chains[0]
+    await expect(
+      world.pad.connect(msgr).onOmniMessage(await src.gateway.chainLabel(), src.gateway.target, payload),
+    ).to.be.revertedWith('PAD: bad recipient')
+  })
 })

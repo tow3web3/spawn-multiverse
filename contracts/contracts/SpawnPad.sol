@@ -196,35 +196,49 @@ contract SpawnPad is IOmniReceiver {
 
     /* -------------------------- messaging -------------------------- */
 
+    /// WIRE CONVENTION: every account rider in a cross-chain payload is a
+    /// `bytes32`, so 32-byte chains (Solana) ride the same messages as EVM
+    /// ones. EVM addresses left-pad with zeros on send; a value consumed as
+    /// an EVM `address` must have its top 12 bytes zero, checked here.
+    /// Events and storage keep `address` — only the wire widens.
+    function _addr(bytes32 b) internal pure returns (address) {
+        require(uint256(b) >> 160 == 0, "PAD: bad recipient");
+        return address(uint160(uint256(b)));
+    }
+
+    function _b32(address a) internal pure returns (bytes32) {
+        return bytes32(uint256(uint160(a)));
+    }
+
     function onOmniMessage(uint32 srcChain, address srcSender, bytes calldata payload) external {
         require(msg.sender == address(messenger), "PAD: not messenger");
         require(gateways[srcChain] == srcSender, "PAD: not a gateway");
         (uint8 op, bytes memory data) = abi.decode(payload, (uint8, bytes));
         if (op == OP_SPAWN) {
             (
-                address creator,
+                bytes32 creator, // consumed as `address` here (metas/events)
                 string memory name,
                 string memory symbol,
                 string memory metaURI,
                 uint256 devBuyUsd,
                 uint8 feeMode
-            ) = abi.decode(data, (address, string, string, string, uint256, uint8));
-            _spawn(srcChain, creator, name, symbol, metaURI, devBuyUsd, feeMode);
+            ) = abi.decode(data, (bytes32, string, string, string, uint256, uint8));
+            _spawn(srcChain, _addr(creator), name, symbol, metaURI, devBuyUsd, feeMode);
         } else if (op == OP_CLAIM) {
-            (address token, address claimer) = abi.decode(data, (address, address));
-            _claim(srcChain, token, claimer);
+            (bytes32 token, bytes32 claimer) = abi.decode(data, (bytes32, bytes32));
+            _claim(srcChain, _addr(token), _addr(claimer));
         } else if (op == OP_BUY) {
-            (address token, address buyer, uint256 usdIn) = abi.decode(
+            (bytes32 token, bytes32 buyer, uint256 usdIn) = abi.decode(
                 data,
-                (address, address, uint256)
+                (bytes32, bytes32, uint256)
             );
-            _buy(srcChain, token, buyer, usdIn);
+            _buy(srcChain, _addr(token), _addr(buyer), usdIn);
         } else if (op == OP_SELL) {
-            (address token, address seller, uint256 tokensIn) = abi.decode(
+            (bytes32 token, bytes32 seller, uint256 tokensIn) = abi.decode(
                 data,
-                (address, address, uint256)
+                (bytes32, bytes32, uint256)
             );
-            _sell(srcChain, token, seller, tokensIn);
+            _sell(srcChain, _addr(token), _addr(seller), tokensIn);
         } else {
             revert("PAD: bad op");
         }
@@ -263,7 +277,9 @@ contract SpawnPad is IOmniReceiver {
             messenger.send(
                 ch,
                 gateways[ch],
-                abi.encode(OP_SYNC_TOKEN, abi.encode(address(token), name, symbol))
+                // token id rides as bytes32: the hub is EVM so it always
+                // fits; a Solana gateway consumes it as a raw 32-byte seed.
+                abi.encode(OP_SYNC_TOKEN, abi.encode(_b32(address(token)), name, symbol))
             );
         }
 
@@ -291,7 +307,8 @@ contract SpawnPad is IOmniReceiver {
         messenger.send(
             srcChain,
             gateways[srcChain],
-            abi.encode(OP_DELIVER, abi.encode(token, buyer, out, refund))
+            // token id + recipient both ride as bytes32 (wire convention)
+            abi.encode(OP_DELIVER, abi.encode(_b32(token), _b32(buyer), out, refund))
         );
 
         emit Trade(token, srcChain, buyer, true, spend + fee, out, venue.spotPrice(token), uint64(block.timestamp));
@@ -309,7 +326,8 @@ contract SpawnPad is IOmniReceiver {
 
         // Pay the seller out on their chain, net of the fee.
         usd.bridgeBurn(address(this), net);
-        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(seller, net)));
+        // recipient rides as bytes32 (wire convention)
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(_b32(seller), net)));
 
         emit Trade(token, srcChain, seller, false, net, tokensIn, venue.spotPrice(token), uint64(block.timestamp));
         _accrueFee(token, fee);
@@ -382,7 +400,8 @@ contract SpawnPad is IOmniReceiver {
             // The slice burns here and re-materializes in the spoke's
             // distributor — the same burn/mint pattern as every payout.
             usd.bridgeBurn(address(this), share);
-            messenger.send(ch, gateways[ch], abi.encode(OP_FEE_DROP, abi.encode(token, share)));
+            // token id rides as bytes32 (wire convention)
+            messenger.send(ch, gateways[ch], abi.encode(OP_FEE_DROP, abi.encode(_b32(token), share)));
             paid += share;
         }
         f.holdersPaid += paid; // rounding dust stays in the pot
@@ -398,7 +417,8 @@ contract SpawnPad is IOmniReceiver {
         require(amount > 0, "PAD: nothing to claim");
         f.devClaimed += amount;
         usd.bridgeBurn(address(this), amount);
-        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(claimer, amount)));
+        // recipient rides as bytes32 (wire convention)
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(_b32(claimer), amount)));
         emit DevClaimed(token, claimer, amount);
     }
 }

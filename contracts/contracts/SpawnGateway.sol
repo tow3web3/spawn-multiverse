@@ -55,6 +55,19 @@ contract SpawnGateway is IOmniReceiver {
 
     /* ------------------------- user actions ------------------------- */
 
+    /// WIRE CONVENTION: every account rider in a cross-chain payload is a
+    /// `bytes32`, so 32-byte chains (Solana) ride the same messages as EVM
+    /// ones. EVM addresses left-pad with zeros on send; a value consumed as
+    /// an EVM `address` must have its top 12 bytes zero, checked here.
+    function _addr(bytes32 b) internal pure returns (address) {
+        require(uint256(b) >> 160 == 0, "GW: bad recipient");
+        return address(uint160(uint256(b)));
+    }
+
+    function _b32(address a) internal pure returns (bytes32) {
+        return bytes32(uint256(uint160(a)));
+    }
+
     function spawnToken(
         string calldata name,
         string calldata symbol,
@@ -66,19 +79,22 @@ contract SpawnGateway is IOmniReceiver {
         messenger.send(
             HUB_CHAIN,
             pad,
-            abi.encode(OP_SPAWN, abi.encode(msg.sender, name, symbol, metaURI, devBuyUsd, feeMode))
+            // creator rides as bytes32; the hub consumes it as an address
+            abi.encode(OP_SPAWN, abi.encode(_b32(msg.sender), name, symbol, metaURI, devBuyUsd, feeMode))
         );
     }
 
     /// The dev claims their accrued fee share; the pad pays out on THIS chain.
     function claimFees(address hubToken) external {
-        messenger.send(HUB_CHAIN, pad, abi.encode(OP_CLAIM, abi.encode(hubToken, msg.sender)));
+        // token id + claimer ride as bytes32 (wire convention)
+        messenger.send(HUB_CHAIN, pad, abi.encode(OP_CLAIM, abi.encode(_b32(hubToken), _b32(msg.sender))));
     }
 
     function buyToken(address hubToken, uint256 usdIn) external {
         require(usdIn > 0, "GW: zero");
         usd.bridgeBurn(msg.sender, usdIn);
-        messenger.send(HUB_CHAIN, pad, abi.encode(OP_BUY, abi.encode(hubToken, msg.sender, usdIn)));
+        // token id + buyer ride as bytes32 (wire convention)
+        messenger.send(HUB_CHAIN, pad, abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn)));
     }
 
     function sellToken(address hubToken, uint256 tokens) external {
@@ -86,7 +102,8 @@ contract SpawnGateway is IOmniReceiver {
         SpawnToken rep = replicaOf[hubToken];
         require(address(rep) != address(0), "GW: no replica");
         rep.bridgeBurn(msg.sender, tokens);
-        messenger.send(HUB_CHAIN, pad, abi.encode(OP_SELL, abi.encode(hubToken, msg.sender, tokens)));
+        // token id + seller ride as bytes32 (wire convention)
+        messenger.send(HUB_CHAIN, pad, abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens)));
     }
 
     /* -------------------------- messaging -------------------------- */
@@ -96,10 +113,11 @@ contract SpawnGateway is IOmniReceiver {
         require(srcChain == HUB_CHAIN && srcSender == pad, "GW: not the pad");
         (uint8 op, bytes memory data) = abi.decode(payload, (uint8, bytes));
         if (op == OP_SYNC_TOKEN) {
-            (address hubToken, string memory name, string memory symbol) = abi.decode(
+            (bytes32 hubTokenB, string memory name, string memory symbol) = abi.decode(
                 data,
-                (address, string, string)
+                (bytes32, string, string)
             );
+            address hubToken = _addr(hubTokenB);
             SpawnToken rep = new SpawnToken(
                 name,
                 symbol,
@@ -112,18 +130,18 @@ contract SpawnGateway is IOmniReceiver {
             replicaOf[hubToken] = rep;
             emit ReplicaDeployed(hubToken, address(rep), name, symbol);
         } else if (op == OP_DELIVER) {
-            (address hubToken, address to, uint256 tokens, uint256 refund) = abi.decode(
+            (bytes32 hubToken, bytes32 to, uint256 tokens, uint256 refund) = abi.decode(
                 data,
-                (address, address, uint256, uint256)
+                (bytes32, bytes32, uint256, uint256)
             );
-            replicaOf[hubToken].bridgeMint(to, tokens);
-            if (refund > 0) usd.bridgeMint(to, refund);
+            replicaOf[_addr(hubToken)].bridgeMint(_addr(to), tokens);
+            if (refund > 0) usd.bridgeMint(_addr(to), refund);
         } else if (op == OP_PAYOUT) {
-            (address to, uint256 usdOut) = abi.decode(data, (address, uint256));
-            usd.bridgeMint(to, usdOut);
+            (bytes32 to, uint256 usdOut) = abi.decode(data, (bytes32, uint256));
+            usd.bridgeMint(_addr(to), usdOut);
         } else if (op == OP_FEE_DROP) {
-            (address hubToken, uint256 amount) = abi.decode(data, (address, uint256));
-            SpawnToken rep = replicaOf[hubToken];
+            (bytes32 hubTokenB, uint256 amount) = abi.decode(data, (bytes32, uint256));
+            SpawnToken rep = replicaOf[_addr(hubTokenB)];
             require(address(rep) != address(0), "GW: no replica");
             // the hub burned this slice of the holders pot; it re-materializes
             // in the local distributor, keyed by this chain's replica

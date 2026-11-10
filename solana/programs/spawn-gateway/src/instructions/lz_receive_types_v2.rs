@@ -66,13 +66,35 @@ impl LzReceiveTypesV2<'_> {
                     meta(anchor_spl::associated_token::ID, false),
                 ]);
             }
-            // PHASE-2A LIMIT: a 20-byte EVM recipient cannot be resolved to
-            // a Solana pubkey, so executor-driven delivery of these two ops
-            // waits for the bytes32-recipient protocol evolution (phase 2b).
-            // lz_receive itself handles them fine when the caller supplies
-            // the accounts (see the LiteSVM tests).
-            SpawnMsg::Deliver { .. } | SpawnMsg::Payout { .. } => {
-                return Err(GatewayError::RecipientMismatch.into());
+            // Wire riders are bytes32 (protocol v4): the recipient IS a
+            // Solana pubkey, so the executor can resolve delivery accounts.
+            SpawnMsg::Deliver { hub_token, to, refund, .. } => {
+                let (replica, _) = Pubkey::find_program_address(&[REPLICA_SEED, &hub_token.0], program_id);
+                let (mint, _) = Pubkey::find_program_address(&[MINT_SEED, &hub_token.0], program_id);
+                let recipient = to.pubkey();
+                let _ = refund; // refund ships to the same recipient's usd ATA
+                accounts.extend([
+                    meta(replica, false),
+                    meta(mint, true),
+                    meta(recipient, false),
+                    meta(get_associated_token_address(&recipient, &mint), true),
+                    meta(usd_mint, true),
+                    meta(get_associated_token_address(&recipient, &usd_mint), true),
+                    meta(system_program::ID, false),
+                    meta(token::ID, false),
+                    meta(anchor_spl::associated_token::ID, false),
+                ]);
+            }
+            SpawnMsg::Payout { to, .. } => {
+                let recipient = to.pubkey();
+                accounts.extend([
+                    meta(recipient, false),
+                    meta(usd_mint, true),
+                    meta(get_associated_token_address(&recipient, &usd_mint), true),
+                    meta(system_program::ID, false),
+                    meta(token::ID, false),
+                    meta(anchor_spl::associated_token::ID, false),
+                ]);
             }
             _ => return Err(GatewayError::UnknownOp.into()),
         }

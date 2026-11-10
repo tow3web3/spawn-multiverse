@@ -60,11 +60,12 @@ pub struct EnforcedOptions {
 }
 
 /// Replica registry entry (PDA, seeds = [REPLICA_SEED, hub_token]) — the
-/// Solana analog of SpawnGateway.replicaOf: maps the 20-byte hub token to
-/// its local SPL mint. Created on OP_SYNC_TOKEN.
+/// Solana analog of SpawnGateway.replicaOf: maps the 32-byte wire token id
+/// (the EVM hub token, left-padded) to its local SPL mint. Created on
+/// OP_SYNC_TOKEN.
 #[account]
 pub struct Replica {
-    pub hub_token: [u8; 20],
+    pub hub_token: [u8; 32],
     pub mint: Pubkey,
     pub name: String,
     pub symbol: String,

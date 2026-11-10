@@ -4,64 +4,83 @@
  * (ethers AbiCoder ≡ solc abi.encode). The Solana codec must round-trip each
  * vector bit-for-bit — that is the cross-chain contract.
  *
+ * WIRE CONVENTION (protocol v4): every account rider is a `bytes32`. EVM
+ * addresses ride left-padded; 32-byte chains (Solana) ride raw pubkeys.
+ * Vectors flagged `wide: true` carry riders whose top 12 bytes are NOT zero:
+ * the Solana codec must accept them verbatim, while an EVM receiver must
+ * revert ("PAD: bad recipient" / "GW: bad recipient") when it would consume
+ * them as an `address` — that revert is proven in the hardhat suite.
+ *
  *   npx hardhat run scripts/gen-codec-vectors.js
  */
 const fs = require('fs')
 const path = require('path')
-const { AbiCoder } = require('ethers')
+const { AbiCoder, zeroPadValue } = require('ethers')
 
 const coder = AbiCoder.defaultAbiCoder()
 const env = (op, types, values) =>
   coder.encode(['uint8', 'bytes'], [op, coder.encode(types, values)])
 
-const A0 = '0x0000000000000000000000000000000000000000'
-const A1 = '0x1111111111111111111111111111111111111111'
-const AMAX = '0xffffffffffffffffffffffffffffffffffffffff'
-const PAD = '0xcA6b51B8760EC432070cE356345c3ea9489f61Bd'
-const TOK = '0x8b7240CDE08F02CAb803974cA8aA04af5E81e56c'
+const pad32 = (a) => zeroPadValue(a, 32)
+const B0 = pad32('0x0000000000000000000000000000000000000000')
+const B1 = pad32('0x1111111111111111111111111111111111111111')
+const BMAX = pad32('0xffffffffffffffffffffffffffffffffffffffff')
+const PAD = pad32('0xcA6b51B8760EC432070cE356345c3ea9489f61Bd')
+const TOK = pad32('0x8b7240CDE08F02CAb803974cA8aA04af5E81e56c')
+// Solana-shaped riders: all 32 bytes in use — legal on the wire, EVM-unrepresentable.
+const SOL1 = '0x' + '05'.repeat(32)
+const SOLMAX = '0x' + 'ff'.repeat(32)
 const U256_MAX = (1n << 256n) - 1n
 const E18 = 10n ** 18n
 
 const OPS = {
-  SPAWN: { op: 1, types: ['address', 'string', 'string', 'string', 'uint256', 'uint8'] },
-  BUY: { op: 2, types: ['address', 'address', 'uint256'] },
-  SELL: { op: 3, types: ['address', 'address', 'uint256'] },
-  CLAIM: { op: 4, types: ['address', 'address'] },
-  SYNC_TOKEN: { op: 10, types: ['address', 'string', 'string'] },
-  DELIVER: { op: 11, types: ['address', 'address', 'uint256', 'uint256'] },
-  PAYOUT: { op: 12, types: ['address', 'uint256'] },
-  FEE_DROP: { op: 13, types: ['address', 'uint256'] },
+  SPAWN: { op: 1, types: ['bytes32', 'string', 'string', 'string', 'uint256', 'uint8'] },
+  BUY: { op: 2, types: ['bytes32', 'bytes32', 'uint256'] },
+  SELL: { op: 3, types: ['bytes32', 'bytes32', 'uint256'] },
+  CLAIM: { op: 4, types: ['bytes32', 'bytes32'] },
+  SYNC_TOKEN: { op: 10, types: ['bytes32', 'string', 'string'] },
+  DELIVER: { op: 11, types: ['bytes32', 'bytes32', 'uint256', 'uint256'] },
+  PAYOUT: { op: 12, types: ['bytes32', 'uint256'] },
+  FEE_DROP: { op: 13, types: ['bytes32', 'uint256'] },
 }
 
+// [name, values, wide?]
 const CASES = [
-  ['SPAWN', [A1, 'OMNI TEST', 'OMNI', '{"smoke":true}', 0n, 1]],
+  ['SPAWN', [B1, 'OMNI TEST', 'OMNI', '{"smoke":true}', 0n, 1]],
   ['SPAWN', [PAD, '', '', '', U256_MAX, 3]],
   // >32-byte strings exercise multi-word tails; unicode exercises UTF-8 length vs char count
-  ['SPAWN', [AMAX, 'a name that is much longer than thirty-two bytes, yes indeed', '🔥🚀', 'x'.repeat(95), 5n * E18, 0]],
-  ['BUY', [TOK, A1, 5n * E18]],
-  ['BUY', [A0, AMAX, 1n]],
+  ['SPAWN', [BMAX, 'a name that is much longer than thirty-two bytes, yes indeed', '🔥🚀', 'x'.repeat(95), 5n * E18, 0]],
+  ['SPAWN', [SOL1, 'SOLANA BORN', 'SOL', '{"home":"devnet"}', 2n * E18, 2], true],
+  ['BUY', [TOK, B1, 5n * E18]],
+  ['BUY', [B0, BMAX, 1n]],
+  ['BUY', [TOK, SOL1, 7n * E18], true],
   ['SELL', [TOK, PAD, 884495291384607698648615n]],
-  ['SELL', [A1, A1, 0n]],
-  ['CLAIM', [TOK, A1]],
-  ['CLAIM', [A0, A0]],
+  ['SELL', [B1, B1, 0n]],
+  ['SELL', [TOK, SOLMAX, 42n * E18], true],
+  ['CLAIM', [TOK, B1]],
+  ['CLAIM', [B0, B0]],
+  ['CLAIM', [TOK, SOL1], true],
   ['SYNC_TOKEN', [TOK, 'OMNI TEST', 'OMNI']],
-  ['SYNC_TOKEN', [A1, 'thirty-two bytes exactly roight!', 'S']],
-  ['SYNC_TOKEN', [AMAX, '', '']],
-  ['DELIVER', [TOK, A1, 884495291384607698648615n, 0n]],
-  ['DELIVER', [TOK, AMAX, U256_MAX, 123456789n * E18]],
-  ['DELIVER', [A0, A0, 1n, 1n]],
-  ['PAYOUT', [A1, 4n * E18 + 999_999_999_999n]],
-  ['PAYOUT', [AMAX, U256_MAX]],
+  ['SYNC_TOKEN', [B1, 'thirty-two bytes exactly roight!', 'S']],
+  ['SYNC_TOKEN', [BMAX, '', '']],
+  ['DELIVER', [TOK, B1, 884495291384607698648615n, 0n]],
+  ['DELIVER', [TOK, BMAX, U256_MAX, 123456789n * E18]],
+  ['DELIVER', [B0, B0, 1n, 1n]],
+  ['DELIVER', [TOK, SOL1, 1_000_000n * E18, 5n * E18], true],
+  ['PAYOUT', [B1, 4n * E18 + 999_999_999_999n]],
+  ['PAYOUT', [BMAX, U256_MAX]],
+  ['PAYOUT', [SOLMAX, 9n * E18], true],
   ['FEE_DROP', [TOK, 2n * E18]],
-  ['FEE_DROP', [A0, 0n]],
+  ['FEE_DROP', [B0, 0n]],
 ]
 
-const vectors = CASES.map(([name, values], i) => {
+const vectors = CASES.map(([name, values, wide], i) => {
   const { op, types } = OPS[name]
   return {
     idx: i,
     name,
     op,
+    wide: !!wide,
     inner: values.map((v, j) =>
       types[j] === 'uint256' ? '0x' + v.toString(16).padStart(64, '0') : typeof v === 'bigint' ? v.toString() : v,
     ),
