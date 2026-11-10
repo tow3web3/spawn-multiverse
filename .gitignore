@@ -6,3 +6,6 @@ contracts/artifacts
 contracts/cache
 deployments/local-run
 contracts/.env.drip
+
+# Local Netlify folder
+.netlify
