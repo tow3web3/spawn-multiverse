@@ -11,6 +11,8 @@ const { ethers } = require('ethers')
 const SPOKES = [
   { name: 'Optimism Sepolia', rpc: 'https://sepolia.optimism.io' },
   { name: 'Arbitrum Sepolia', rpc: 'https://sepolia-rollup.arbitrum.io/rpc' },
+  { name: 'Ethereum Sepolia', rpc: 'https://ethereum-sepolia-rpc.publicnode.com' },
+  { name: 'BNB Testnet     ', rpc: 'https://bsc-testnet-rpc.publicnode.com' },
 ]
 
 function keyFrom(file, name) {

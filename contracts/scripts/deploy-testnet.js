@@ -17,7 +17,8 @@ const { ethers, network } = require('hardhat')
 // LayerZero V2 EndpointV2 — same address on these testnets (verified on-chain).
 const ENDPOINT = '0x6EDCE65403992e310A62460808c4b910D972f10f'
 
-// Our chain labels (see lib-deploy CHAINS): 5 = arbitrum, 6 = optimism.
+// Our chain labels (see lib-deploy CHAINS): 2 = ethereum, 4 = bnb,
+// 5 = arbitrum, 6 = optimism. (1 = solana is not an EVM leg.)
 const NETS = {
   baseSepolia: { eid: 40245, role: 'hub', chainId: 84532, rpc: 'https://sepolia.base.org' },
   optimismSepolia: {
@@ -28,15 +29,24 @@ const NETS = {
     eid: 40231, role: 'spoke', label: 5, id: 'arbitrum',
     chainId: 421614, rpc: 'https://sepolia-rollup.arbitrum.io/rpc',
   },
+  ethereumSepolia: {
+    eid: 40161, role: 'spoke', label: 2, id: 'ethereum',
+    chainId: 11155111, rpc: 'https://ethereum-sepolia-rpc.publicnode.com',
+  },
+  bnbTestnet: {
+    eid: 40102, role: 'spoke', label: 4, id: 'bnb',
+    chainId: 97, rpc: 'https://bsc-testnet-rpc.publicnode.com',
+  },
 }
 
 const FILE = path.join(__dirname, '..', 'deployments', 'testnet.json')
 const b32 = (addr) => ethers.zeroPadValue(addr, 32)
-// LZ type-3 options: pay the executor for 500k gas of lzReceive on the
-// destination (replica deploys during SYNC_TOKEN are the heavy case).
+// LZ type-3 options: pay the executor for 4M gas of lzReceive on the
+// destination — hub-side _spawn deploys a full ERC20, 500k was not enough
+// (first live OP_SPAWN failed in executor simulation until raised to 4M).
 const OPTIONS = ethers.solidityPacked(
   ['uint16', 'uint8', 'uint16', 'uint8', 'uint128'],
-  [3, 1, 17, 1, 500_000n],
+  [3, 1, 17, 1, 4_000_000n],
 )
 
 function load() {

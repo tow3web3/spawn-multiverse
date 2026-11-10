@@ -44,6 +44,16 @@ module.exports = {
       chainId: 421614,
       accounts: deployerAccounts(),
     },
+    ethereumSepolia: {
+      url: 'https://ethereum-sepolia-rpc.publicnode.com',
+      chainId: 11155111,
+      accounts: deployerAccounts(),
+    },
+    bnbTestnet: {
+      url: 'https://bsc-testnet-rpc.publicnode.com',
+      chainId: 97,
+      accounts: deployerAccounts(),
+    },
   },
   mocha: { timeout: 120_000 },
 }

@@ -10,6 +10,8 @@ const ALREADY_WET = parseEther('0.0002')
 const CHAINS = [
   { id: 11155420, name: 'optimism-sepolia', rpc: 'https://sepolia.optimism.io' },
   { id: 421614, name: 'arbitrum-sepolia', rpc: 'https://sepolia-rollup.arbitrum.io/rpc' },
+  { id: 11155111, name: 'ethereum-sepolia', rpc: 'https://ethereum-sepolia-rpc.publicnode.com' },
+  { id: 97, name: 'bnb-testnet', rpc: 'https://bsc-testnet-rpc.publicnode.com', symbol: 'tBNB' },
 ]
 
 export default async (req) => {
@@ -31,7 +33,7 @@ export default async (req) => {
     const chain = {
       id: c.id,
       name: c.name,
-      nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+      nativeCurrency: { name: 'Ether', symbol: c.symbol ?? 'ETH', decimals: 18 },
       rpcUrls: { default: { http: [c.rpc] } },
     }
     try {
