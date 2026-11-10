@@ -1,0 +1,316 @@
+# SPAWN! protocol specification (v5)
+
+Audience: a security auditor opening this repo cold. Everything below is
+written from the code at the commit that introduced it, with
+`file:function` citations; where reality falls short of intent, it says so.
+Companion docs: [ONCHAIN.md](ONCHAIN.md) (narrative architecture),
+[MAINNET.md](MAINNET.md) (what is testnet-only and what the mainnet plan
+changes), [LITEPAPER.md](LITEPAPER.md) (public pitch),
+[../solana/NOTES.md](../solana/NOTES.md) (Solana leg engineering log).
+
+## 1. What the protocol is
+
+One meme token = one global supply (1B) = one price on every chain. A single
+market per token lives on a **hub** chain (`SpawnPad`); every user-facing
+chain runs a **gateway** that forwards spawns, buys, sells and claims to the
+hub as cross-chain messages and receives tokens/payouts back. Supply moves
+by burn-on-source / mint-on-destination, so the sum of per-chain supplies is
+the global supply by construction (`SpawnToken.sol` header note).
+
+Protocol version v5: all cross-chain account riders are `bytes32` ("wide"),
+actors stay wide end-to-end on the hub, and the transport envelope is
+bytes32-addressed on both seats — this is what lets a Solana pubkey use the
+same wire as EVM addresses.
+
+## 2. Actors and trust model
+
+| Actor | Powers | Where |
+|---|---|---|
+| **admin (deployer EOA)** | one-time wiring: `setVenue`, `setDistributor`, `setGateway` (pad); `setDistributor` (gateway); `setAgent`/`exclude` (distributor); `setAgent` (OmniUSD); `register`/`setRoute`/`setOptions`/`recover` (LZ adapter) | `SpawnPad.sol:132-152`, `SpawnGateway.sol:50`, `FeeDistributor.sol:54-66`, `OmniUSD.sol:22`, `lz/LayerZeroOmniMessenger.sol:58-78` |
+| **token creator ("dev")** | locks the fee mode at launch; claims the dev fee share from any chain | `SpawnGateway.sol:spawnToken`, `SpawnPad.sol:_claim` |
+| **trader / holder** | buy, sell, claim holder dividends — all on their own chain | `SpawnGateway.sol:buyToken/sellToken`, `FeeDistributor.sol:claim` |
+| **LayerZero endpoint + DVN/executor** | message verification & delivery between adapters | `lz/LayerZeroOmniMessenger.sol` |
+
+**Honesty section.** Today every admin surface is a single EOA (the testnet
+deployer). There is no multisig, no timelock, no pause switch, no rate
+limit, and the wiring functions are one-shot (`require(x == 0, "… set")`)
+but not renounceable. The mainnet plan (MAINNET.md Phase 1) moves admin
+behind a Safe + timelock and adds circuit breakers; **audit should assume
+admin is malicious-until-proven-benign and enumerate what a hostile admin
+could do pre- and post-wiring.**
+
+Trust chain for an inbound message (production transport):
+1. endpoint authenticity — `lzReceive` requires `msg.sender == endpoint`
+   (`LayerZeroOmniMessenger.sol:111`);
+2. peer authenticity — packet's `origin.sender` must equal the configured
+   peer adapter for that srcEid (`:112`);
+3. source chain label derives from `origin.srcEid` via `labelOf`, never from
+   message content (`:121`);
+4. envelope authentication — receiver checks the protocol-level sender:
+   pad requires `gateways[srcChain] == srcSender` (`SpawnPad.sol:227`),
+   gateway requires the pad (`SpawnGateway.sol:113`), Solana store requires
+   `env.src_sender == store.hub_pad` and `env.dst_addr == store`
+   (`solana …/lz_receive.rs:77-79`);
+5. sender gating on the way out — adapters only accept registered local
+   protocol contracts (`LayerZeroOmniMessenger.sol:83`), the Solana program
+   only sends from its own store PDA.
+
+## 3. Transport and envelope
+
+Protocol contracts speak `IOmniMessenger.send(dstChain, bytes32 dstAddr,
+payload)` / receive `onOmniMessage(srcChain, bytes32 srcSender, payload)`
+(`OmniMessenger.sol:15-21`). Transports are swappable:
+
+- `LocalOmniMessenger` — synchronous, all-EVM dev transport
+  (`OmniMessenger.sol:23`).
+- `MockLZEndpointV2` + `LayerZeroOmniMessenger` — async queue for tests.
+- `LayerZeroOmniMessenger` — production adapter, one per chain. Gas-tank
+  funded (`receive()`), admin-recoverable (`recover`), quotes and pays the
+  LZ fee per send so users never attach value (`send`, `:82-100`).
+
+**Envelope (v5).** Between adapters every LZ message body is
+`abi.encode(bytes32 srcSender, bytes32 dstAddr, bytes payload)`
+(`LayerZeroOmniMessenger.sol:90-94`). The receiving EVM adapter downcasts
+only the local target (`"LZM: bad target"`, `:119`) and passes `srcSender`
+wide; the Solana program encodes/decodes the identical layout
+(`msg_codec.rs::Envelope`, cross-proven by the `envelopes` section of
+`solana/tests/codec-vectors.json`).
+
+Delivery is **unordered** (`nextNonce` returns 0, `:133-135`); every
+message must therefore be self-contained. See Finding F-2 for the one
+ordering race this leaves.
+
+## 4. Message catalog — the single source of truth
+
+Envelope payload = `abi.encode(uint8 op, bytes data)`; `data` per op below.
+All tuples use canonical ABI encoding; every account rider is `bytes32`.
+"wide ok" = the value may be a non-EVM identity and is never downcast on
+that path; "downcast" = checked 20-byte downcast, top-12-bytes-zero or
+revert (`SpawnPad.sol:_addr` → `"PAD: bad recipient"`,
+`SpawnGateway.sol:_addr` → `"GW: bad recipient"`).
+
+| Op | Name | Direction | Wire tuple (`data`) | Trigger | Effect on receive |
+|---|---|---|---|---|---|
+| 1 | OP_SPAWN | gateway → pad | `(bytes32 creator [wide ok], string name, string symbol, string metaURI, uint256 devBuyUsd, uint8 feeMode)` | `SpawnGateway.spawnToken` (burns dev-buy oUSD first) | `SpawnPad._spawn`: deploy hub `SpawnToken` (premint 1B to pad), store `Meta` (creator stays wide), `venue.openMarket`, emit `Spawned`, send OP_SYNC_TOKEN to **every** registered chain, then optional dev-buy via `_buy` |
+| 2 | OP_BUY | gateway → pad | `(bytes32 token [downcast], bytes32 buyer [wide ok], uint256 usdIn)` | `SpawnGateway.buyToken` (burns buyer's oUSD) | `SpawnPad._buy`: mint oUSD to pad, 1% fee, `venue.execBuy`, burn hub tokens, `supplyByChain[src] += out`, burn refund, send OP_DELIVER, emit `Trade`, `_accrueFee` |
+| 3 | OP_SELL | gateway → pad | `(bytes32 token [downcast], bytes32 seller [wide ok], uint256 tokensIn)` | `SpawnGateway.sellToken` (burns seller's replica) | `SpawnPad._sell`: mint tokens back to pad custody, `supplyByChain[src] -= tokensIn`, `venue.execSell`, 1% fee, burn net oUSD, send OP_PAYOUT, emit `Trade`, `_accrueFee` |
+| 4 | OP_CLAIM | gateway → pad | `(bytes32 token [downcast], bytes32 claimer [wide ok])` | `SpawnGateway.claimFees` | `SpawnPad._claim`: `require(metas[token].creator == claimer)` (wide comparison), pay `dev − devClaimed` via OP_PAYOUT to the claim chain, emit `DevClaimed` |
+| 10 | OP_SYNC_TOKEN | pad → gateway | `(bytes32 token [downcast on EVM spokes; raw 32-byte seed on Solana], string name, string symbol)` | inside `_spawn`, one per registered chain | EVM: deploy replica (`SpawnToken` premint 0, controller = gateway), record `replicaOf` (`SpawnGateway.sol:115-131`). Solana: create Replica PDA + SPL mint, decimals 6, authority = store (`lz_receive.rs::handle_sync_token`) |
+| 11 | OP_DELIVER | pad → gateway | `(bytes32 token [downcast/seed], bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 tokens, uint256 refund)` | inside `_buy` | EVM: `replica.bridgeMint(to, tokens)`, mint oUSD refund (`SpawnGateway.sol:132-138`). Solana: mint `tokens / 1e12` to recipient's ATA (+ scaled refund) |
+| 12 | OP_PAYOUT | pad → gateway | `(bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 usdOut)` | `_sell` net proceeds, `_claim` dev share | mint oUSD to `to` on that chain |
+| 13 | OP_FEE_DROP | pad → gateway | `(bytes32 token [downcast/seed], uint256 amount)` | `_distributeHolders` when the holders pot ≥ DIST_TRIGGER | EVM: mint oUSD into the chain's `FeeDistributor`, `drop(replica, amount)` (`SpawnGateway.sol:142-149`). Solana: mint into the store's vault ATA, parked pending the phase-3 distributor |
+
+Unknown ops revert (`"PAD: bad op"` / `"GW: bad op"`); the Solana codec
+rejects unknown ops, dirty envelope padding and bad offsets
+(`msg_codec.rs` tests).
+
+## 5. Identity model — the downcast is a security boundary
+
+The rule (`SpawnPad.sol:209-219` comment block): **actors stay wide
+end-to-end; only hub-local settlement downcasts.**
+
+- The hub never pays an actor by local transfer — it pays by message — so a
+  Solana creator/trader flows through storage (`Meta.creator: bytes32`),
+  events (`Spawned/Trade/DevClaimed` emit `bytes32 indexed` actors) and auth
+  (`_claim`'s wide comparison) untouched.
+- Token ids always downcast on the hub (every token is an EVM contract
+  deployed there) — a wide token id is corruption and reverts.
+- An EVM **spoke** downcasts delivery recipients (`"GW: bad recipient"`),
+  which yields a positive guarantee: **a wide identity's payout can only be
+  cashed on its own chain** — a message mis-routed to an EVM spoke with a
+  Solana recipient bounces instead of minting to a truncated address.
+- `pad.gateways` is `mapping(uint32 => bytes32)` so a Solana OApp store
+  pubkey can be a gateway (`SpawnPad.sol:87`, `setGateway`).
+
+Audit focus: every `_addr` call site is classified in code comments
+(passthrough vs local settlement); verify none of the passthrough paths can
+reach an EVM `address` consumer un-checked.
+
+## 6. Supply accounting and invariants
+
+Let `T = TOTAL_SUPPLY = 1e9 · 1e18` (`SpawnPad.sol:24`).
+
+- Hub premint: token constructor mints `T` to the pad
+  (`SpawnPad._spawn` → `SpawnToken` constructor).
+- Outbound: `_buy` burns `out` from pad custody and credits
+  `supplyByChain[token][srcChain] += out`; the spoke mints the same `out`.
+- Inbound: `_sell` mints `tokensIn` back to custody and debits
+  `supplyByChain[token][srcChain] -= tokensIn`; the spoke burned it first.
+- Buyback&burn (`_accrueFee`, burn mode): buys from the curve **inside pad
+  custody** and burns immediately — `supplyByChain` is untouched, which is
+  correct because that supply never circulated.
+
+Invariants an auditor should try to break:
+
+- **S1 (conservation):** Σ over all chains of `token.totalSupply()`
+  `= T − feesOf[token].burnedTokens`.
+- **S2 (ledger ≡ reality):** for every spoke chain `c`,
+  `supplyByChain[token][c] =` that chain's replica `totalSupply()`
+  — up to the Solana dust noted in Finding F-4.
+- **S3:** `supplyByChain[token][HUB_CHAIN] == 0` today (no hub-local trading
+  entry point exists); the `_distributeHolders` hub branch
+  (`SpawnPad.sol:405-410`) is therefore currently dead code.
+- **S4 (no spoke-to-spoke path):** replicas cannot move between spokes
+  except through a hub sell + re-buy, so `_sell`'s unchecked-looking
+  subtraction cannot underflow while S2 holds.
+
+## 7. Value (oUSD) accounting and invariants
+
+`OmniUSD` is the testnet settlement mock: one instance per chain, burn/mint
+driven by that chain's agent (pad on hub, gateway on spokes), **plus an
+open faucet capped at 100k per call (`OmniUSD.sol:29`) — testnet-only, the
+reason no value invariant means anything economically until USDC/CCTP
+replaces it.** The mechanical invariants still matter because mainnet keeps
+the same shapes:
+
+- **V1 (pad solvency):** hub oUSD balance of the pad
+  `= Σ_tokens [curve real reserves (vBase − V_BASE_0 pre-ascension; vBase
+  post-ascension) + (dev − devClaimed) + (holders − holdersPaid) + burnPot]`.
+  Every outbound payment burns hub-side before minting on the spoke
+  (`_sell`, `_claim`, `_distributeHolders` spoke branch); the only local
+  transfer is the hub-distributor share (`SpawnPad.sol:407`).
+- **V2 (fee caps):** `devClaimed ≤ dev`, `holdersPaid ≤ holders`,
+  enforced by monotone accounting in `_accrueFee`/`_claim`/
+  `_distributeHolders`; rounding dust stays in the pot
+  (`holdersPaid += paid`, `SpawnPad.sol:422`).
+- **V3 (distributor solvency):** each `FeeDistributor`'s oUSD balance
+  `≥ Σ withdrawable` across holders — drops transfer/mint funds in before
+  `drop()` is called (`SpawnGateway.sol:148`, `SpawnPad.sol:407`), claims
+  pay out `withdrawable` exactly once (`FeeDistributor.sol:claim`).
+
+## 8. Fee state machine
+
+1% (`FEE_BPS = 100`) of every trade (`SpawnPad.sol:28`), computed off the
+top on buys — with the fee recomputed down if the curve caps the buy
+(`_buy`, `SpawnPad.sol:309-313`) — and off the proceeds on sells. Routed per
+the launch-locked mode (`FeeState.mode`, set once in `_spawn`):
+
+| Mode | Routing | Payout path |
+|---|---|---|
+| 0 FEE_HOLDERS | 100% → `holders` pot | distributed at `DIST_TRIGGER = 2e18` (`_distributeHolders`) |
+| 1 FEE_SPLIT | 50% `holders`, 50% `dev` | both paths below |
+| 2 FEE_DEV | 100% → `dev` pot | creator claims from any chain (OP_CLAIM → OP_PAYOUT) |
+| 3 FEE_BURN | 100% → `burnPot` | at `BURN_TRIGGER = 4e18`: real `venue.execBuy` with the pot (moves the price), tokens burned on the spot, `Trade` emitted with the pad as buyer (`_accrueFee`, `SpawnPad.sol:366-381`) |
+
+Holder distribution (`_distributeHolders`): pot = `holders − holdersPaid`,
+split pro-rata to `supplyByChain`; each spoke slice burns hub-side and
+re-materializes in that chain's `FeeDistributor` via OP_FEE_DROP. Claims
+are pure local transactions.
+
+`FeeDistributor` is the classic magnified-dividends-per-share pattern
+(`MAG = 2^128`, `FeeDistributor.sol:23`): a transfer hook on every
+`SpawnToken` (`SpawnToken.sol:_update`) mirrors balances into shares;
+protocol accounts (agent, venue, the distributor itself) are excluded and
+earn nothing; drops landing with zero holders park in `pendingOf` and fold
+in when the first holder appears. Known edge, in audit scope: the
+`magDPS · shares` product can overflow int256 only on absurd
+drop-over-dust-supply ratios — standard for this pattern, flagged when it
+was built; quantify the bound.
+State keyed by the calling token contract, so a rogue token can only corrupt
+its own key and can never make `claim` pay more than its own dropped funds
+(`FeeDistributor.sol:33-35` comment, `handleTransfer`).
+
+## 9. Curve math (InternalCurveVenue)
+
+Constant-product with virtual reserves (`InternalCurveVenue.sol`):
+`V_BASE_0 = 6_000e18`, `V_TOKENS_0 = 1_073_000_000e18`,
+`CURVE_SUPPLY = 800M·1e18` of the 1B sold on the curve.
+
+- Buy: `out = vTokens − k/(vBase + usdIn)`; if the buy overshoots the
+  remaining curve supply it is capped and charged only what the remainder
+  costs, `+1` rounding against the buyer (`execBuy`, `:52-71`); the pad
+  refunds the unspent remainder to the buyer's chain.
+- **Ascension:** when `sold ≥ CURVE_SUPPLY`, `vBase −= V_BASE_0` (the
+  virtual part evaporates; what remains is real raised USD) and
+  `vTokens = 200M` — the reserved supply seeds the "omnipool" and trading
+  continues on the same storage slot (`:65-71`).
+- Sell: inverse CP; pre-ascension `sold` decreases (floored at 0).
+- The venue is **pure accounting** — the pad keeps custody of all tokens
+  and oUSD (`InternalCurveVenue.sol` header); `onlyPad` on every mutator.
+  This is what makes the venue swappable (`ICurveVenue`) for a Raydium
+  LaunchLab / Meteora DBC adapter on a production Solana hub without
+  touching settlement. The adapter itself does not exist yet — OUT OF
+  SCOPE until written.
+
+## 10. Solana leg (spawn_gateway program)
+
+Status: built and proven locally against the real devnet LayerZero binaries
+(endpoint, ULN302, executor, price feed, DVN — snapshotted by
+`solana/tests/fetch-fixtures.sh`); not yet deployed to devnet. Details and
+the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
+
+- **Accounts:** Store PDA (`["Store"]`) is the OApp identity the hub routes
+  to as bytes32; PeerConfig per remote eid holds the hub **adapter** as LZ
+  peer, while `Store.hub_pad` holds the hub **pad** as protocol peer — the
+  same two-level trust chain as the EVM adapters (`state.rs`).
+- **Receive:** `lz_receive` burns the nonce via the endpoint `clear()` CPI
+  **before any state change** (`lz_receive.rs:48-69`), then unwraps and
+  authenticates the envelope, then dispatches. The executor resolves the
+  account list through `lz_receive_types_v2` (Solana has no dynamic account
+  access).
+- **Decimal bridge:** SPL mints use 6 decimals; hub 1e18 amounts divide by
+  `1e12` on receive (floor) and multiply back on send; overflow errors,
+  never wraps (`constants.rs:30-35`). See Finding F-4 for the dust ledger
+  skew.
+- **GasTank:** `["GasTank"]`, a zero-data system-owned PDA anyone can fund;
+  each send self-quotes and reimburses the payer from it, so users send for
+  ~free (~0.001 SOL/message at current devnet config) — the mirror of the
+  EVM adapters' tank (`constants.rs:19-25`, `send_to_hub.rs`).
+- **Codec:** hand-rolled canonical ABI codec, byte-exact against vectors
+  generated by ethers' AbiCoder (`contracts/scripts/gen-codec-vectors.js`
+  → `solana/tests/codec-vectors.json`: 25 op vectors + 3 envelope vectors).
+
+## 11. Known gaps and testnet shortcuts
+
+| Item | Status |
+|---|---|
+| OmniUSD open faucet & agent burn/mint instead of real USDC/CCTP | OUT OF SCOPE (testnet-only money; mainnet swaps in USDC + CCTP, same burn/mint shape) |
+| Admin = single EOA, no multisig/timelock | AUDIT SCOPE as a threat model (hostile admin), fix planned pre-mainnet |
+| No pause switch, no per-token or global rate limits on messages | AUDIT SCOPE (absence is the finding; mainnet adds them) |
+| Unordered delivery + LZ retry as the only ordering backstop | AUDIT SCOPE (see F-2) |
+| `FeeDistributor` 2^128 magnitude edge | AUDIT SCOPE (quantify) |
+| Hub-chain local trading absent (S3 dead branch) | AUDIT SCOPE (dead code is attack surface) |
+| Frontend indexing by raw `eth_getLogs` scans | OUT OF SCOPE (ops; mainnet gets an indexer) |
+| LayerZero DVN/executor selection left at defaults | AUDIT SCOPE for mainnet config review |
+| Raydium/Meteora venue adapter | does not exist yet; OUT OF SCOPE until written |
+| Solana devnet deploy + live delivery | pending; everything local is test-proven |
+
+## 12. Findings while specifying
+
+Observations made while writing this spec from the code — none silently
+papered over:
+
+- **F-1 — `gatewayChain` is write-only.** `SpawnPad.setGateway` populates
+  `gatewayChain[gw]` (`SpawnPad.sol:150`) but no contract, script, test or
+  frontend code reads it. Either remove it or document the intended
+  consumer; unused reverse-mappings invite drift.
+- **F-2 — SYNC/DELIVER ordering race on spawn with dev-buy.** `_spawn`
+  sends OP_SYNC_TOKEN to every chain and then `_buy` immediately sends
+  OP_DELIVER to the creator's chain. Delivery is unordered
+  (`nextNonce = 0`), so the DELIVER can land first, hit
+  `replicaOf[token] == address(0)` and revert; recovery relies on
+  LayerZero's failed-message retry until the SYNC lands. Works, but is an
+  implicit liveness dependency worth an explicit code comment and a test —
+  and on Solana the equivalent path must be checked (`lz_receive_types_v2`
+  resolves the replica PDA; a missing replica fails account resolution
+  rather than execution).
+- **F-3 — stale seed-width comments in `constants.rs`.** Comments say
+  `hub_token(20)` for `REPLICA_SEED`/`MINT_SEED` but the code seeds PDAs
+  with the full 32-byte wire id (`lz_receive.rs:134,154`). Comment-only
+  staleness from the v4 widening; fix the comments before an auditor trips
+  on them.
+- **F-4 — Solana dust skews ledger S2.** DELIVER floors `tokens/1e12` when
+  minting SPL units while the hub credits the full 1e18 amount to
+  `supplyByChain[token][1]`; the sub-1e-6 dust is un-sellable phantom
+  supply that also weighs (negligibly) in holder-distribution pro-rata.
+  Bound it (≤ 1e12−1 wei per delivery) and decide whether the hub should
+  floor identically.
+- **F-5 — curve-capped buys round the fee in the buyer's favor by design.**
+  When the curve caps a buy, the fee is recomputed as 1% of the actual
+  spend (`SpawnPad.sol:312`) — the refund includes the fee difference.
+  Intentional, but assert it in tests so a refactor doesn't flip it.
+- **F-6 — `FeeDistributor.exclude` is assumed wire-up-only.** Excluding an
+  account that already holds shares leaves its shares counted
+  (`handleTransfer` clamps decreases but never retro-syncs). The code
+  comment states the assumption (`FeeDistributor.sol:61-62`); the admin
+  threat model in §2 should cover a late `exclude` call.

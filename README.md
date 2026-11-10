@@ -9,10 +9,14 @@ A launchpad prototype where every meme token launches on **all six chains at onc
 - **One price** — every chain reads the same global price reference, so the token
   costs the same everywhere, always.
 
-Two modes, same UI (toggle in the nav):
+Three modes, same UI (toggle in the nav):
 
 - **SIM** — in-browser market engine, zero setup.
-- **⛓ ONCHAIN** — a real Solidity deployment on a local chain: every buy,
+- **⛓ TESTNET** — the LIVE public beta at
+  [spawn-multiverse.netlify.app](https://spawn-multiverse.netlify.app): the
+  hub on Base Sepolia, spokes on Optimism + Arbitrum Sepolia, real LayerZero
+  V2 messages, a gas drip for visitors, MetaMask or an instant burner wallet.
+- **LOCAL** — the same Solidity protocol on a hardhat chain: every buy,
   sell and spawn is a transaction against the hub-and-spoke protocol in
   [contracts/](contracts/). Price discovery is a pluggable **venue module**
   (`ICurveVenue`): the internal genesis curve locally, a Raydium LaunchLab /
@@ -20,6 +24,11 @@ Two modes, same UI (toggle in the nav):
   chart on Axiom/Dexscreener from the first second. See
   [docs/ONCHAIN.md](docs/ONCHAIN.md) for the architecture and the path to
   testnet/mainnet.
+
+**Docs:** [LITEPAPER.md](docs/LITEPAPER.md) (the pitch, honest version) ·
+[ONCHAIN.md](docs/ONCHAIN.md) (architecture) · [SPEC.md](docs/SPEC.md)
+(auditor-grade protocol spec) · [MAINNET.md](docs/MAINNET.md) (the road to
+mainnet) · [solana/NOTES.md](solana/NOTES.md) (Solana leg log).
 
 ```bash
 npm run chain          # terminal 1 — local node

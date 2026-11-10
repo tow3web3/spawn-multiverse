@@ -41,7 +41,7 @@ The testnet cuts corners that mainnet cannot:
 
 | Step | Cost (order of magnitude) | Notes |
 |---|---|---|
-| Internal review freeze + spec doc | free | Claude writes the spec auditors need |
+| Internal review freeze + spec doc | free | ✅ done — [SPEC.md](SPEC.md) (message catalog, invariants, trust model, findings) |
 | Audit contest (Code4rena / Sherlock / Cantina) | $15k–40k | wide coverage, finds the weird stuff |
 | Solo auditor or boutique firm pass | $10k–50k | deep pass on bridge + curve math |
 | Public bug bounty (Immunefi) | % of TVL at risk | live before meaningful funds arrive |
