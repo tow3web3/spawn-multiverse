@@ -1,0 +1,21 @@
+[toolchain]
+package_manager = "npm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+spawn_gateway = "3mypQvfiLtRHQhWStYyQ6cUu6YC4hqUFBXcNNme3H95g"
+
+[programs.devnet]
+spawn_gateway = "3mypQvfiLtRHQhWStYyQ6cUu6YC4hqUFBXcNNme3H95g"
+
+[provider]
+cluster = "devnet"
+wallet = ".keys/devnet.json"
+
+[scripts]
+test = "cargo test"
+
+[hooks]
