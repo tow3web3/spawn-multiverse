@@ -399,6 +399,10 @@ export interface StoreValue {
     walletSource?: WalletSource
     /** Forget the session (keeps the burner key for later). */
     disconnect?: () => void
+    /** Unclaimed holder fee rewards (USD) per creature num, summed across live chains. */
+    holderRewards?: Record<number, number>
+    /** Claim this creature's holder rewards on every chain holding any; returns USD claimed. */
+    claimHolderRewards?: (num: number) => Promise<number>
   }
 }
 

@@ -18,6 +18,7 @@ import {
   defineChain,
   formatEther,
   http,
+  parseAbi,
   parseEther,
   parseEventLogs,
   type Address,
@@ -42,10 +43,14 @@ import {
   type Side,
   type Trade,
 } from '../engine/market'
-import { FEE_MODE_INDEX, gatewayAbi, padAbi, tokenAbi, usdAbi, type Manifest } from './abi'
+import { FEE_MODE_INDEX, distributorAbi, gatewayAbi, padAbi, tokenAbi, usdAbi, type Manifest } from './abi'
 import type { FaceId } from '../components/Faces'
 
 const FEE_MODE_NAME: readonly FeeMode[] = ['holders', 'split', 'dev', 'burn']
+// Fallback for protocol-v2 pads, whose FeeState has no holdersPaid yet.
+const feesOfV2Abi = parseAbi([
+  'function feesOf(address token) view returns (uint8 mode, uint256 total, uint256 holders, uint256 dev, uint256 devClaimed, uint256 burnPot, uint256 burnedUsd, uint256 burnedTokens)',
+])
 const PALETTE = ['#b5e95b', '#f7a8ce', '#9ccbf5', '#a78bf0', '#f7be7b', '#8be0d4']
 const AIRDROP_PER_CHAIN = 1337
 const ZERO = '0x0000000000000000000000000000000000000000'
@@ -218,6 +223,11 @@ export function OnchainProvider({
   const usdByChainRef = useRef<Record<string, bigint>>({})
   const gasByChainRef = useRef<Record<string, bigint>>({})
   const tokensByChainRef = useRef<Map<number, Record<string, bigint>>>(new Map())
+  /** Per-chain FeeDistributor (protocol v3); null = probed, none there (v2). */
+  const distByChainRef = useRef<Record<string, Address | null>>({})
+  /** Unclaimed holder rewards: creature num -> chain id -> wei. */
+  const rewardsByChainRef = useRef<Map<number, Record<string, bigint>>>(new Map())
+  const rewardsRef = useRef<Record<number, number>>({})
   const lastBlockRef = useRef(0n)
   const connectedRef = useRef(false)
   const costsRef = useRef<Record<number, number>>({})
@@ -346,13 +356,25 @@ export function OnchainProvider({
         sold: ef(sold),
       }
 
-      const [fm, fTotal, fHolders, fDev, fDevClaimed, fBurnPot, fBurnedUsd, fBurnedTokens] =
-        (await hub.readContract({
+      let fRow: readonly [number, bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint]
+      try {
+        fRow = (await hub.readContract({
           address: m.pad,
           abi: padAbi,
           functionName: 'feesOf',
           args: [token],
-        })) as [number, bigint, bigint, bigint, bigint, bigint, bigint, bigint]
+        })) as typeof fRow
+      } catch {
+        // a v2 pad answers with one field fewer — read it that way
+        const v2 = (await hub.readContract({
+          address: m.pad,
+          abi: feesOfV2Abi,
+          functionName: 'feesOf',
+          args: [token],
+        })) as readonly [number, bigint, bigint, bigint, bigint, bigint, bigint, bigint]
+        fRow = [...v2, 0n]
+      }
+      const [fm, fTotal, fHolders, fDev, fDevClaimed, fBurnPot, fBurnedUsd, fBurnedTokens, fHoldersPaid] = fRow
       const feeMode = FEE_MODE_NAME[fm] ?? 'holders'
       entry.meta.feeMode = feeMode
       entry.market.fees = {
@@ -364,6 +386,7 @@ export function OnchainProvider({
         burnPot: ef(fBurnPot),
         burnedUsd: ef(fBurnedUsd),
         burnedTokens: ef(fBurnedTokens),
+        holdersPaid: ef(fHoldersPaid),
       }
     }
 
@@ -445,9 +468,12 @@ export function OnchainProvider({
       usdByChainRef.current = usdByChain
       gasByChainRef.current = gasByChain
       const positions: Wallet['positions'] = {}
+      const rewards: Record<number, number> = {}
       for (const [num, entry] of entriesRef.current) {
         const perChain: Record<string, bigint> = {}
+        const rewardPerChain: Record<string, bigint> = {}
         let sum = 0n
+        let unclaimed = 0n
         for (const c of iosRef.current) {
           try {
             const rep = await replicaAddr(c.id, entry.token)
@@ -460,13 +486,31 @@ export function OnchainProvider({
             })) as bigint
             perChain[c.id] = bal
             sum += bal
+            // protocol v3: this chain's distributor may owe the wallet a
+            // slice of the holder fee stream
+            const dist = distByChainRef.current[c.id]
+            if (dist) {
+              const w = (await c.client.readContract({
+                address: dist,
+                abi: distributorAbi,
+                functionName: 'withdrawable',
+                args: [rep, addr],
+              })) as bigint
+              if (w > 0n) {
+                rewardPerChain[c.id] = w
+                unclaimed += w
+              }
+            }
           } catch {
             /* spoke briefly unreachable — keep going */
           }
         }
         tokensByChainRef.current.set(num, perChain)
+        rewardsByChainRef.current.set(num, rewardPerChain)
+        if (unclaimed > 0n) rewards[num] = ef(unclaimed)
         if (sum > 0n) positions[num] = { tokens: ef(sum), cost: costsRef.current[num] ?? 0 }
       }
+      rewardsRef.current = rewards
       const totalUsd = Object.values(usdByChain).reduce((a, b) => a + b, 0n)
       setWallet({ address: addr, balance: ef(totalUsd), positions })
     }
@@ -514,6 +558,20 @@ export function OnchainProvider({
               : createPublicClient({ chain, transport: http(rpc, { batch: true }) }),
           }
         })
+
+        // probe each gateway for its FeeDistributor (absent on v2 deployments)
+        for (const c of iosRef.current) {
+          try {
+            const d = (await c.client.readContract({
+              address: c.gateway,
+              abi: gatewayAbi,
+              functionName: 'distributor',
+            })) as Address
+            distByChainRef.current[c.id] = d === ZERO ? null : d
+          } catch {
+            distByChainRef.current[c.id] = null
+          }
+        }
 
         burnerRef.current = loadBurner()
         costsRef.current = loadCosts(burnerRef.current.address)
@@ -1016,6 +1074,44 @@ export function OnchainProvider({
     [poll],
   )
 
+  /** Protocol v3: claim the wallet's holder fee rewards for one creature, on
+   * every chain holding any — each claim is a pure local tx on that chain. */
+  const claimHolderRewards = useCallback(
+    async (num: number): Promise<number> => {
+      const addr = activeAddr()
+      const entry = entriesRef.current.get(num)
+      if (!addr || !entry) return 0
+      const perChain = rewardsByChainRef.current.get(num) ?? {}
+      let claimed = 0
+      for (const c of iosRef.current) {
+        const amount = perChain[c.id] ?? 0n
+        const dist = distByChainRef.current[c.id]
+        if (!dist || amount === 0n) continue
+        if (!isLocalRef.current && (gasByChainRef.current[c.id] ?? 0n) < parseEther('0.00002'))
+          continue
+        try {
+          const rep = await replicaAddr(c.id, entry.token)
+          if (rep === ZERO) continue
+          const hash = await (await wcFor(c)).writeContract({
+            address: dist,
+            abi: distributorAbi,
+            functionName: 'claim',
+            args: [rep],
+            chain: c.chain,
+            account: activeAccount(),
+          })
+          await c.client.waitForTransactionReceipt({ hash })
+          claimed += ef(amount)
+        } catch {
+          /* chain unreachable or rejected in the wallet — claim the rest */
+        }
+      }
+      await poll()
+      return claimed
+    },
+    [poll, replicaAddr],
+  )
+
   const creatures = useMemo(() => {
     void version
     const now = Date.now()
@@ -1040,9 +1136,11 @@ export function OnchainProvider({
         chains: manifestRef.current?.chains.map((c) => c.id),
         walletSource,
         disconnect,
+        holderRewards: rewardsRef.current,
+        claimHolderRewards,
       },
     }),
-    [creatures, wallet, connect, spawn, trade, claimFees, getQuote, getMarket, justSpawned, status, airdrop, walletSource, disconnect],
+    [creatures, wallet, connect, spawn, trade, claimFees, getQuote, getMarket, justSpawned, status, airdrop, walletSource, disconnect, claimHolderRewards],
   )
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>

@@ -12,8 +12,11 @@ export function PortfolioPage({
   onOpenToken: (num: number) => void
   onBack: () => void
 }) {
-  const { creatures, wallet, connect } = useStore()
+  const { creatures, wallet, connect, onchain } = useStore()
   const [busy, setBusy] = useState(false)
+
+  // protocol v3: unclaimed holder fee rewards, summed across tokens + chains
+  const feeRewards = Object.values(onchain?.holderRewards ?? {}).reduce((a, b) => a + b, 0)
 
   const rows = wallet
     ? Object.entries(wallet.positions)
@@ -69,7 +72,7 @@ export function PortfolioPage({
       ) : (
         <>
           {/* totals */}
-          <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <div className={`mt-6 grid grid-cols-2 gap-2 ${feeRewards > 0.005 ? 'sm:grid-cols-4' : 'sm:grid-cols-3'}`}>
             {[
               ['CASH BALANCE', fmtUsd(wallet.balance), ''],
               ['HOLDINGS VALUE', fmtUsd(holdings), ''],
@@ -78,6 +81,9 @@ export function PortfolioPage({
                 `${totalPnl >= 0 ? '+' : ''}${fmtUsd(totalPnl).replace('$-', '-$')}`,
                 totalPnl >= 0 ? 'text-up' : 'text-down',
               ],
+              ...(feeRewards > 0.005
+                ? [['FEE REWARDS — CLAIM ON EACH TOKEN PAGE', fmtUsd(feeRewards), 'text-up'] as const]
+                : []),
             ].map(([l, v, cls]) => (
               <div key={l} className="rounded-xl border-3 border-ink bg-white px-4 py-3 shadow-brutal-sm">
                 <p className={label}>{l}</p>

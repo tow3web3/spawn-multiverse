@@ -5,7 +5,8 @@ export const padAbi = parseAbi([
   'function allTokens(uint256) view returns (address)',
   'function spotPrice(address token) view returns (uint256)',
   'function getToken(uint256 i) view returns (address token, string name, string symbol, string metaURI, address creator, uint64 spawnedAt, uint32 homeChain, uint256 vBase, uint256 vTokens, uint256 sold, bool ascended, uint256 price)',
-  'function feesOf(address token) view returns (uint8 mode, uint256 total, uint256 holders, uint256 dev, uint256 devClaimed, uint256 burnPot, uint256 burnedUsd, uint256 burnedTokens)',
+  'function feesOf(address token) view returns (uint8 mode, uint256 total, uint256 holders, uint256 dev, uint256 devClaimed, uint256 burnPot, uint256 burnedUsd, uint256 burnedTokens, uint256 holdersPaid)',
+  'function distributor() view returns (address)',
   'event Spawned(address indexed token, address indexed creator, uint32 homeChain, string name, string symbol, string metaURI)',
   'event Trade(address indexed token, uint32 indexed chain, address indexed trader, bool isBuy, uint256 usd, uint256 tokens, uint256 priceAfter, uint64 ts)',
   'event Ascended(address indexed token, uint256 raisedUsd, uint64 ts)',
@@ -17,6 +18,14 @@ export const gatewayAbi = parseAbi([
   'function sellToken(address hubToken, uint256 tokens)',
   'function claimFees(address hubToken)',
   'function replicaOf(address hubToken) view returns (address)',
+  'function distributor() view returns (address)',
+])
+
+/** Per-chain holder-dividend pool (protocol v3). Keyed by the LOCAL token:
+ * the replica on a spoke, the hub token on the hub. */
+export const distributorAbi = parseAbi([
+  'function withdrawable(address token, address account) view returns (uint256)',
+  'function claim(address token) returns (uint256)',
 ])
 
 /** Launch-time fee routing — indices must match SpawnPad's constants. */

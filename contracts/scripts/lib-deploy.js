@@ -27,6 +27,11 @@ async function deployWorld() {
   await (await pad.setVenue(venue.target)).wait()
   await (await hubUsd.setAgent(pad.target)).wait()
   await (await messenger.register(pad.target, 0)).wait()
+  // Holder dividends: one FeeDistributor per chain, the hub's wired to the pad.
+  const hubDist = await ethers.deployContract('FeeDistributor', [hubUsd.target])
+  await (await hubDist.setAgent(pad.target)).wait()
+  await (await hubDist.exclude(venue.target)).wait()
+  await (await pad.setDistributor(hubDist.target)).wait()
 
   const chains = []
   for (const c of CHAINS) {
@@ -40,10 +45,13 @@ async function deployWorld() {
     await (await usd.setAgent(gateway.target)).wait()
     await (await messenger.register(gateway.target, c.label)).wait()
     await (await pad.setGateway(c.label, gateway.target)).wait()
-    chains.push({ ...c, usd, gateway })
+    const dist = await ethers.deployContract('FeeDistributor', [usd.target])
+    await (await dist.setAgent(gateway.target)).wait()
+    await (await gateway.setDistributor(dist.target)).wait()
+    chains.push({ ...c, usd, gateway, dist })
   }
 
-  return { messenger, hubUsd, pad, venue, chains }
+  return { messenger, hubUsd, pad, venue, hubDist, chains }
 }
 
 /**
@@ -71,6 +79,10 @@ async function deployWorldAsync() {
   await (await pad.setVenue(venue.target)).wait()
   await (await hubUsd.setAgent(pad.target)).wait()
   await (await hubMessenger.register(pad.target)).wait()
+  const hubDist = await ethers.deployContract('FeeDistributor', [hubUsd.target])
+  await (await hubDist.setAgent(pad.target)).wait()
+  await (await hubDist.exclude(venue.target)).wait()
+  await (await pad.setDistributor(hubDist.target)).wait()
 
   const chains = []
   for (const c of CHAINS) {
@@ -88,18 +100,21 @@ async function deployWorldAsync() {
     await (await usd.setAgent(gateway.target)).wait()
     await (await messenger.register(gateway.target)).wait()
     await (await pad.setGateway(c.label, gateway.target)).wait()
+    const dist = await ethers.deployContract('FeeDistributor', [usd.target])
+    await (await dist.setAgent(gateway.target)).wait()
+    await (await gateway.setDistributor(dist.target)).wait()
 
     // spoke <-> hub routes (spokes never talk to each other; the pad relays)
     await (await messenger.setRoute(0, EID(0), b32(hubMessenger.target))).wait()
     await (await hubMessenger.setRoute(c.label, EID(c.label), b32(messenger.target))).wait()
-    chains.push({ ...c, usd, gateway, messenger })
+    chains.push({ ...c, usd, gateway, messenger, dist })
   }
 
   async function deliverAll() {
     while ((await endpoint.pending()) > 0n) await (await endpoint.deliverAll(32)).wait()
   }
 
-  return { endpoint, hubMessenger, hubUsd, pad, venue, chains, deliverAll }
+  return { endpoint, hubMessenger, hubUsd, pad, venue, hubDist, chains, deliverAll }
 }
 
 module.exports = { deployWorld, deployWorldAsync, CHAINS }

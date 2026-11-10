@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {IOmniMessenger, IOmniReceiver} from "./OmniMessenger.sol";
 import {OmniUSD} from "./OmniUSD.sol";
 import {SpawnToken} from "./SpawnToken.sol";
+import {FeeDistributor} from "./FeeDistributor.sol";
 
 /// @title SpawnGateway — one per user-facing chain.
 /// @notice The gateway is the local face of the protocol: users spawn, buy and
@@ -22,11 +23,16 @@ contract SpawnGateway is IOmniReceiver {
     uint8 internal constant OP_SYNC_TOKEN = 10;
     uint8 internal constant OP_DELIVER = 11;
     uint8 internal constant OP_PAYOUT = 12;
+    uint8 internal constant OP_FEE_DROP = 13;
 
     IOmniMessenger public immutable messenger;
     OmniUSD public immutable usd; // this chain's instance
     uint32 public immutable chainLabel;
     address public immutable pad;
+    address public immutable admin;
+    /// This chain's holder-dividend pool; replicas report transfers to it and
+    /// the hub drops fee slices into it.
+    FeeDistributor public distributor;
 
     /// hub token address -> native replica on this chain
     mapping(address => SpawnToken) public replicaOf;
@@ -38,6 +44,13 @@ contract SpawnGateway is IOmniReceiver {
         usd = _usd;
         chainLabel = _chainLabel;
         pad = _pad;
+        admin = msg.sender;
+    }
+
+    function setDistributor(FeeDistributor d) external {
+        require(msg.sender == admin, "GW: not admin");
+        require(address(distributor) == address(0), "GW: distributor set");
+        distributor = d;
     }
 
     /* ------------------------- user actions ------------------------- */
@@ -87,7 +100,15 @@ contract SpawnGateway is IOmniReceiver {
                 data,
                 (address, string, string)
             );
-            SpawnToken rep = new SpawnToken(name, symbol, address(this), false, 0, address(0));
+            SpawnToken rep = new SpawnToken(
+                name,
+                symbol,
+                address(this),
+                false,
+                0,
+                address(0),
+                address(distributor)
+            );
             replicaOf[hubToken] = rep;
             emit ReplicaDeployed(hubToken, address(rep), name, symbol);
         } else if (op == OP_DELIVER) {
@@ -100,6 +121,14 @@ contract SpawnGateway is IOmniReceiver {
         } else if (op == OP_PAYOUT) {
             (address to, uint256 usdOut) = abi.decode(data, (address, uint256));
             usd.bridgeMint(to, usdOut);
+        } else if (op == OP_FEE_DROP) {
+            (address hubToken, uint256 amount) = abi.decode(data, (address, uint256));
+            SpawnToken rep = replicaOf[hubToken];
+            require(address(rep) != address(0), "GW: no replica");
+            // the hub burned this slice of the holders pot; it re-materializes
+            // in the local distributor, keyed by this chain's replica
+            usd.bridgeMint(address(distributor), amount);
+            distributor.drop(address(rep), amount);
         } else {
             revert("GW: bad op");
         }

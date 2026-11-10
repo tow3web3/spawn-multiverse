@@ -33,6 +33,8 @@ export interface Fees {
   burnPot: number
   burnedUsd: number
   burnedTokens: number
+  /** Holder modes: slice of `holders` already dropped to the per-chain distributors. */
+  holdersPaid: number
 }
 
 export interface Trade {
@@ -77,7 +79,7 @@ export const BURNER = 'SPAWN·BURNER'
 let tradeId = 1
 
 export function emptyFees(mode: FeeMode): Fees {
-  return { mode, total: 0, holders: 0, dev: 0, devClaimed: 0, burnPot: 0, burnedUsd: 0, burnedTokens: 0 }
+  return { mode, total: 0, holders: 0, dev: 0, devClaimed: 0, burnPot: 0, burnedUsd: 0, burnedTokens: 0, holdersPaid: 0 }
 }
 
 export function createMarket(spawnTs: number, feeMode: FeeMode = 'holders'): Market {

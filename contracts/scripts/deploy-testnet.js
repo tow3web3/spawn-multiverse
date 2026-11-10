@@ -127,6 +127,23 @@ async function main() {
       await (await adapter.setOptions(OPTIONS)).wait()
       console.log('  adapter.setOptions ✓')
     }
+    // v3 holder distribution: a v2 pad has no distributor slot — probe first
+    // so re-runs against a live v2 hub stay no-ops instead of crashing.
+    const v3 = await pad.distributor().then(() => true).catch(() => false)
+    if (v3) {
+      const dist = await deployOnce(state, 'dist', 'FeeDistributor', [usd.target])
+      if ((await dist.agent()) === ethers.ZeroAddress) {
+        await (await dist.setAgent(pad.target)).wait()
+        await (await dist.exclude(venue.target)).wait()
+        console.log('  dist.setAgent(pad) ✓')
+      }
+      if ((await pad.distributor()) === ethers.ZeroAddress) {
+        await (await pad.setDistributor(dist.target)).wait()
+        console.log('  pad.setDistributor ✓')
+      }
+    } else {
+      console.log('  (v2 pad — holder distribution not wired)')
+    }
     await topUpTank(adapter.target, deployer)
 
     // Wire every spoke that exists in the manifest but isn't routed yet.
@@ -168,6 +185,21 @@ async function main() {
     if ((await adapter.eidOf(0)) === 0n) {
       await (await adapter.setRoute(0, NETS.baseSepolia.eid, b32(hub.adapter))).wait()
       console.log('  route spoke -> hub ✓')
+    }
+    // v3 holder distribution (see the hub branch for the v2 probe rationale)
+    const v3 = await gateway.distributor().then(() => true).catch(() => false)
+    if (v3) {
+      const dist = await deployOnce(state, 'dist', 'FeeDistributor', [usd.target])
+      if ((await dist.agent()) === ethers.ZeroAddress) {
+        await (await dist.setAgent(gateway.target)).wait()
+        console.log('  dist.setAgent(gateway) ✓')
+      }
+      if ((await gateway.distributor()) === ethers.ZeroAddress) {
+        await (await gateway.setDistributor(dist.target)).wait()
+        console.log('  gateway.setDistributor ✓')
+      }
+    } else {
+      console.log('  (v2 gateway — holder distribution not wired)')
     }
     await topUpTank(adapter.target, deployer)
     console.log('  ➜ relance le script sur baseSepolia pour câbler hub -> spoke')

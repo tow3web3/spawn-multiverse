@@ -5,6 +5,7 @@ import {IOmniMessenger, IOmniReceiver} from "./OmniMessenger.sol";
 import {OmniUSD} from "./OmniUSD.sol";
 import {SpawnToken} from "./SpawnToken.sol";
 import {ICurveVenue} from "./ICurveVenue.sol";
+import {FeeDistributor} from "./FeeDistributor.sol";
 
 /// @title SpawnPad — the hub of the multiverse.
 /// @notice One global market per token lives HERE, on the hub chain. The six
@@ -27,6 +28,8 @@ contract SpawnPad is IOmniReceiver {
     uint256 public constant FEE_BPS = 100;
     /// Burn mode buys back in chunks, not dust.
     uint256 public constant BURN_TRIGGER = 4e18;
+    /// Holder modes distribute in chunks too — cross-chain drops aren't free.
+    uint256 public constant DIST_TRIGGER = 2e18;
 
     // Fee modes (locked at launch, forever)
     uint8 public constant FEE_HOLDERS = 0; // 100% streams to holders
@@ -43,6 +46,7 @@ contract SpawnPad is IOmniReceiver {
     uint8 internal constant OP_SYNC_TOKEN = 10;
     uint8 internal constant OP_DELIVER = 11;
     uint8 internal constant OP_PAYOUT = 12;
+    uint8 internal constant OP_FEE_DROP = 13;
 
     struct Meta {
         string name;
@@ -65,12 +69,14 @@ contract SpawnPad is IOmniReceiver {
         uint256 burnPot;
         uint256 burnedUsd;
         uint256 burnedTokens;
+        uint256 holdersPaid;
     }
 
     IOmniMessenger public immutable messenger;
     OmniUSD public immutable usd; // hub instance
     address public immutable admin;
     ICurveVenue public venue;
+    FeeDistributor public distributor; // hub-chain instance
 
     uint32[] public chainLabels;
     mapping(uint32 => address) public gateways;
@@ -79,6 +85,11 @@ contract SpawnPad is IOmniReceiver {
     address[] public allTokens;
     mapping(address => Meta) public metas;
     mapping(address => FeeState) public feesOf;
+    /// Where each token's circulating supply lives, maintained at every
+    /// mint/burn the hub orchestrates. The pad's own custody (curve
+    /// inventory) is not circulating, so Σ over labels ≡ supply sold out of
+    /// the curve and still alive.
+    mapping(address => mapping(uint32 => uint256)) public supplyByChain;
 
     event Spawned(
         address indexed token,
@@ -102,6 +113,7 @@ contract SpawnPad is IOmniReceiver {
     event FeeAccrued(address indexed token, uint8 mode, uint256 amount);
     event BuybackBurn(address indexed token, uint256 usd, uint256 tokens);
     event DevClaimed(address indexed token, address indexed dev, uint256 amount);
+    event HoldersDistributed(address indexed token, uint256 amount);
 
     constructor(IOmniMessenger _messenger, OmniUSD _usd) {
         messenger = _messenger;
@@ -113,6 +125,12 @@ contract SpawnPad is IOmniReceiver {
         require(msg.sender == admin, "PAD: not admin");
         require(address(venue) == address(0), "PAD: venue set");
         venue = v;
+    }
+
+    function setDistributor(FeeDistributor d) external {
+        require(msg.sender == admin, "PAD: not admin");
+        require(address(distributor) == address(0), "PAD: distributor set");
+        distributor = d;
     }
 
     function setGateway(uint32 chain, address gw) external {
@@ -224,7 +242,15 @@ contract SpawnPad is IOmniReceiver {
         uint8 feeMode
     ) internal {
         require(feeMode <= FEE_BURN, "PAD: bad fee mode");
-        SpawnToken token = new SpawnToken(name, symbol, address(this), true, TOTAL_SUPPLY, address(this));
+        SpawnToken token = new SpawnToken(
+            name,
+            symbol,
+            address(this),
+            true,
+            TOTAL_SUPPLY,
+            address(this),
+            address(distributor)
+        );
         allTokens.push(address(token));
         metas[address(token)] = Meta(name, symbol, metaURI, creator, uint64(block.timestamp), srcChain);
         feesOf[address(token)].mode = feeMode;
@@ -260,6 +286,7 @@ contract SpawnPad is IOmniReceiver {
 
         // Ship the creature to the buyer's chain (burn hub-side, mint spoke-side).
         SpawnToken(token).bridgeBurn(address(this), out);
+        supplyByChain[token][srcChain] += out;
         if (refund > 0) usd.bridgeBurn(address(this), refund);
         messenger.send(
             srcChain,
@@ -274,6 +301,7 @@ contract SpawnPad is IOmniReceiver {
     function _sell(uint32 srcChain, address token, address seller, uint256 tokensIn) internal {
         // The spoke burned the seller's replicas; they re-materialize in inventory.
         SpawnToken(token).bridgeMint(address(this), tokensIn);
+        supplyByChain[token][srcChain] -= tokensIn;
 
         uint256 usdOut = venue.execSell(token, tokensIn);
         uint256 fee = (usdOut * FEE_BPS) / 10_000;
@@ -319,7 +347,46 @@ contract SpawnPad is IOmniReceiver {
                 emit Trade(token, HUB_CHAIN, address(this), true, spent, out, venue.spotPrice(token), uint64(block.timestamp));
             }
         }
+        if (
+            (f.mode == FEE_HOLDERS || f.mode == FEE_SPLIT) &&
+            f.holders - f.holdersPaid >= DIST_TRIGGER
+        ) {
+            _distributeHolders(token, f);
+        }
         emit FeeAccrued(token, f.mode, fee);
+    }
+
+    /// Splits the accrued holders pot pro-rata to where the supply lives and
+    /// drops each chain's slice into that chain's FeeDistributor. Holders
+    /// then claim with a pure local tx on their own chain — the dividend
+    /// stream follows balances automatically from there.
+    function _distributeHolders(address token, FeeState storage f) internal {
+        uint256 pot = f.holders - f.holdersPaid;
+        uint256 circ = supplyByChain[token][HUB_CHAIN];
+        for (uint256 i = 0; i < chainLabels.length; i++) {
+            circ += supplyByChain[token][chainLabels[i]];
+        }
+        if (circ == 0) return; // nobody holds yet — the pot keeps growing
+
+        uint256 paid;
+        uint256 hubShare = (pot * supplyByChain[token][HUB_CHAIN]) / circ;
+        if (hubShare > 0) {
+            usd.transfer(address(distributor), hubShare);
+            distributor.drop(token, hubShare);
+            paid += hubShare;
+        }
+        for (uint256 i = 0; i < chainLabels.length; i++) {
+            uint32 ch = chainLabels[i];
+            uint256 share = (pot * supplyByChain[token][ch]) / circ;
+            if (share == 0) continue;
+            // The slice burns here and re-materializes in the spoke's
+            // distributor — the same burn/mint pattern as every payout.
+            usd.bridgeBurn(address(this), share);
+            messenger.send(ch, gateways[ch], abi.encode(OP_FEE_DROP, abi.encode(token, share)));
+            paid += share;
+        }
+        f.holdersPaid += paid; // rounding dust stays in the pot
+        emit HoldersDistributed(token, paid);
     }
 
     /// The dev claims their accrued share, paid out in oUSD on the chain

@@ -45,6 +45,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   const [pct, setPct] = useState(50)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [claimBusy, setClaimBusy] = useState(false)
+  const [claimedMsg, setClaimedMsg] = useState<string | null>(null)
 
   useEffect(() => {
     window.scrollTo(0, 0)
@@ -246,24 +248,59 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 </span>
               </div>
               {fees ? (
-                <div className="mt-3 grid grid-cols-2 gap-2 border-t-2 border-dashed border-ink/20 pt-3 sm:grid-cols-4">
-                  {[
-                    ['COLLECTED', fmtMoney(fees.total)],
-                    ['TO HOLDERS', fmtMoney(fees.holders)],
-                    ['TO DEV', fmtMoney(fees.dev)],
-                    [
-                      'BURNED',
-                      fees.burnedTokens > 0
-                        ? `${fmtTokens(fees.burnedTokens)} (${fmtMoney(fees.burnedUsd)})`
-                        : '—',
-                    ],
-                  ].map(([l, v]) => (
-                    <div key={l}>
-                      <p className="font-mono text-[8.5px] font-bold tracking-wide opacity-45">{l}</p>
-                      <p className="font-mono text-[13px] font-bold">{v}</p>
-                    </div>
-                  ))}
-                </div>
+                <>
+                  <div className="mt-3 grid grid-cols-2 gap-2 border-t-2 border-dashed border-ink/20 pt-3 sm:grid-cols-4">
+                    {[
+                      ['COLLECTED', fmtMoney(fees.total)],
+                      ['TO HOLDERS', fmtMoney(fees.holders)],
+                      ['TO DEV', fmtMoney(fees.dev)],
+                      [
+                        'BURNED',
+                        fees.burnedTokens > 0
+                          ? `${fmtTokens(fees.burnedTokens)} (${fmtMoney(fees.burnedUsd)})`
+                          : '—',
+                      ],
+                    ].map(([l, v]) => (
+                      <div key={l}>
+                        <p className="font-mono text-[8.5px] font-bold tracking-wide opacity-45">{l}</p>
+                        <p className="font-mono text-[13px] font-bold">{v}</p>
+                      </div>
+                    ))}
+                  </div>
+                  {/* protocol v3: the connected wallet's slice of the holder stream */}
+                  {onchain?.claimHolderRewards &&
+                    ((onchain.holderRewards?.[num] ?? 0) > 0.005 || claimedMsg) && (
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border-2 border-ink bg-lime/40 px-3 py-2">
+                        <div>
+                          <p className="font-mono text-[8.5px] font-bold tracking-wide opacity-55">
+                            YOUR HOLDER REWARDS — UNCLAIMED
+                          </p>
+                          <p className="font-mono text-[15px] font-bold">
+                            {claimedMsg ?? fmtUsd(onchain.holderRewards?.[num] ?? 0)}
+                          </p>
+                        </div>
+                        {(onchain.holderRewards?.[num] ?? 0) > 0.005 && (
+                          <button
+                            onClick={() => {
+                              if (claimBusy) return
+                              setClaimBusy(true)
+                              setClaimedMsg(null)
+                              void onchain
+                                .claimHolderRewards!(num)
+                                .then((got) =>
+                                  setClaimedMsg(got > 0 ? `CLAIMED ${fmtUsd(got)} ✓` : null),
+                                )
+                                .finally(() => setClaimBusy(false))
+                            }}
+                            disabled={claimBusy}
+                            className="rounded-xl border-3 border-ink bg-lime px-5 py-2.5 font-mono text-[11px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {claimBusy ? '✳ CLAIMING…' : 'CLAIM ↓'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                </>
               ) : (
                 <p className="mt-2 font-mono text-[10px] font-bold tracking-wide opacity-45">
                   FEE ROUTING IS RECORDED AT LAUNCH — ON-CHAIN ACCOUNTING LANDS WITH PROTOCOL V2.
