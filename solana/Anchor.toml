@@ -1,8 +1,14 @@
 [toolchain]
+# Pinned to match the LayerZero oapp crate (anchor-lang 0.31.1); see NOTES.md.
+anchor_version = "0.31.1"
 package_manager = "npm"
 
 [features]
-resolution = true
+# resolution=false matches LayerZero's oapp-solana example: Anchor's IDL
+# account-resolution pass cannot evaluate endpoint-interface's cross-account
+# seed expressions and fails the whole IDL build with it on.
+seeds = false
+resolution = false
 skip-lint = false
 
 [programs.localnet]
