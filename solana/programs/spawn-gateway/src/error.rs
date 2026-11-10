@@ -22,4 +22,14 @@ pub enum GatewayError {
     RecipientMismatch,
     #[msg("GW: string too long")]
     StringTooLong,
+    #[msg("GW: gas tank cannot cover the LayerZero fee")]
+    TankTooPoor,
+    #[msg("GW: peer has no enforced send options")]
+    NoSendOptions,
+    #[msg("GW: endpoint account list too short")]
+    BadSendAccounts,
+    #[msg("GW: bad fee mode")]
+    BadFeeMode,
+    #[msg("GW: zero amount")]
+    ZeroAmount,
 }

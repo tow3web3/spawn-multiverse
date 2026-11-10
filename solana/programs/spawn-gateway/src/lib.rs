@@ -23,8 +23,11 @@ declare_id!("3mypQvfiLtRHQhWStYyQ6cUu6YC4hqUFBXcNNme3H95g");
 ///
 /// Phase 2a: Store/Peer OApp pattern, the byte-exact SPAWN! codec, and the
 /// hub→solana receive path (SYNC_TOKEN replicas as SPL mints, DELIVER,
-/// PAYOUT, FEE_DROP). The send path (spawn/buy/sell/claim toward the hub)
-/// and devnet wiring are phase 2b — see solana/NOTES.md.
+/// PAYOUT, FEE_DROP). Phase 2b (local half): the send path — spawn / buy /
+/// sell / claim toward the hub, self-quoting through the endpoint with the
+/// gas-tank PDA footing the LayerZero fee — proven against the REAL devnet
+/// endpoint/ULN/executor/pricefeed/DVN binaries under LiteSVM. Devnet
+/// deploy + hub wiring remain — see solana/NOTES.md.
 #[program]
 pub mod spawn_gateway {
     use super::*;
@@ -63,5 +66,33 @@ pub mod spawn_gateway {
         params: LzReceiveParams,
     ) -> Result<(u8, LzReceiveTypesV2Accounts)> {
         LzReceiveTypesInfo::apply(&ctx, &params)
+    }
+
+    pub fn spawn_token<'info>(
+        mut ctx: Context<'_, '_, 'info, 'info, SpawnToken<'info>>,
+        params: SpawnTokenParams,
+    ) -> Result<()> {
+        SpawnToken::apply(&mut ctx, &params)
+    }
+
+    pub fn buy_token<'info>(
+        mut ctx: Context<'_, '_, 'info, 'info, BuyToken<'info>>,
+        params: BuyTokenParams,
+    ) -> Result<()> {
+        BuyToken::apply(&mut ctx, &params)
+    }
+
+    pub fn sell_token<'info>(
+        mut ctx: Context<'_, '_, 'info, 'info, SellToken<'info>>,
+        params: SellTokenParams,
+    ) -> Result<()> {
+        SellToken::apply(&mut ctx, &params)
+    }
+
+    pub fn claim_fees<'info>(
+        mut ctx: Context<'_, '_, 'info, 'info, ClaimFees<'info>>,
+        params: ClaimFeesParams,
+    ) -> Result<()> {
+        ClaimFees::apply(&mut ctx, &params)
     }
 }

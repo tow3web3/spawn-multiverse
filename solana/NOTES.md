@@ -1,11 +1,13 @@
-# Solana leg — phase 1 + 2a notes
+# Solana leg — phase 1 + 2a + 2b-local notes
 
 Phase 1 shipped the toolchain and a deployable skeleton. **Phase 2a (done)
 turned it into a real LayerZero OApp skeleton**: the Store/Peer OApp
 pattern with endpoint registration, the byte-exact SPAWN! codec proven
 against EVM-generated cross vectors, and the full hub→solana receive path
 (SYNC_TOKEN → SPL replica mints, DELIVER, PAYOUT, FEE_DROP), LiteSVM-tested.
-Phase 2b wires it to the devnet endpoint and adds the send path.
+**Phase 2b-local (done) added the send path and ran it against the REAL
+devnet LayerZero stack loaded locally** — see "Phase 2b-local" below.
+What remains is purely devnet: the funded deploy and the live wiring.
 
 ## Dependency matrix that builds (phase 2a — don't drift)
 
@@ -119,44 +121,67 @@ Deploy wallet: `solana/.keys/devnet.json` (gitignored), address
 - Meteora's manual migrator works on devnet too — useful to rehearse the
   curve→AMM ascension on Solana rails.
 
-## Phase 2b plan — wire it live
+## Phase 2b-local — DONE (send path + the real stack, locally)
 
-Done in 2a: oapp crate integration (✔ compat proven), Store/Peer refactor,
-register path, byte-exact codec + vectors, receive path + types_v2.
-Done since (protocol v4): **bytes32 riders on every route** — EVM contracts,
-vectors (25, incl. wide Solana-shaped riders), Rust codec/handlers/types_v2
-all updated and green; see the resolved gap note above. The v4 wire needs a
-hub+spokes testnet redeploy (archive pattern) before a live Solana smoke.
-Still to do, in order:
+The five devnet binaries (endpoint, ULN 302, executor, price feed, LZ DVN)
+and their nine state accounts are snapshotted by
+`tests/fetch-fixtures.sh` (+ `tests/fetch-state.cjs`) into
+`tests/fixtures/` (gitignored, ~5.4MB — re-run the script after a clone)
+and loaded into LiteSVM. Against that REAL stack,
+`programs/spawn-gateway/tests/test_live_endpoint.rs` proves:
 
-1. **Send path**: `spawn`/`buy`/`sell`/`claim` instructions — burn/escrow
-   SPL payment, build the envelope with the codec, quote + CPI
-   `endpoint_cpi::send` with type-3 options naming 4M EVM gas (same as the
-   EVM adapters); fee paid in SOL by the caller (payer account = our "gas
-   tank" equivalent).
-2. **Devnet deploy + registration**: fund `.keys/devnet.json` (~4.5 SOL for
-   ~480KB), `anchor deploy`, `init_store` with the REAL endpoint
-   (`76y77prsiCMvXMjuoZ5VRrhG5qYBrUMYTE5WgHqgjEn6` — verify on-chain again
-   at deploy time), `init_usd_mint`, `set_peer_config(40245, hub adapter)`.
-3. **Hub side**: `setRoute(1, 40168, <store PDA bytes32>)` on the Base
-   Sepolia adapter (label 1 = solana in lib-deploy CHAINS), and
-   `pad.setGateway(1, …)` once the hub can address a Solana gateway.
-4. **Smoke**: hub → devnet SYNC_TOKEN + DELIVER observed via LayerZero Scan
-   testnet, then the reverse (spawn from Solana). Replaces the stale
-   `app/smoke.cjs`.
+- `init_store`'s `register_oapp` CPI succeeds on the real endpoint and the
+  OAppRegistry PDA carries our admin as delegate;
+- the delegate runs the real wiring dance directly against the endpoint:
+  `init_send_library`, `init_receive_library`, `init_nonce` — the same
+  three calls the devnet deploy will make;
+- **send works end-to-end for all four ops** (`spawn_token`, `buy_token`,
+  `sell_token`, `claim_fees`): the endpoint CPIs ULN → executor → price
+  feed → DVN, quotes a real fee (~0.00099 SOL per message with today's
+  devnet configs), the gas-tank PDA reimburses the payer, the ULN collects
+  worker fees, the outbound nonce increments and the emitted packet embeds
+  our codec's bytes verbatim (asserted via the event CPI);
+- an underfunded tank refuses the send (`GW: gas tank cannot cover…`).
 
-**Risk points, resized after 2a**
-- ~~oapp ↔ anchor compat~~ — resolved (matrix above).
-- Executor + `lz_receive_types_v2` behavior against the REAL devnet
-  executor remains the big unknown; the account lists mirror the handlers
-  exactly, but only a live delivery proves the dance. Budget days.
-- ~~bytes32-recipient evolution~~ — done (protocol v4, all stacks green);
-  only the testnet redeploy of the v4 contracts remains, via the archive
-  pattern.
-- Rent on executor-driven account creation is paid by the executor's payer;
-  enforced-options gas/value sizing on the Solana side needs measuring.
-- Devnet airdrops stay rationed; the collector script drips toward the
-  ~4.5 SOL target.
+Send-path surface (`src/instructions/send_to_hub.rs`):
+- Four instructions, each burning its SPL leg first (oUSD for buy/spawn
+  dev-buy, the replica for sell) then self-quoting and sending — no
+  client-side quote needed. The endpoint account list rides in
+  remaining_accounts, OFT-style; the exact 18+4×(1+N dvns) layout is
+  documented at the top of the file.
+- **Gas tank**: `[b"GasTank"]`, a zero-data system-owned PDA. Anyone funds
+  it with a plain transfer (the EVM adapters' `receive()` mirror); each
+  send moves the quoted fee tank→payer, then the ULN debits the payer — so
+  users pay ~nothing while the tank lasts.
+- Enforced options come from the Peer PDA (type-3, 4M gas — bit-identical
+  to the EVM OPTIONS constant), set at wiring time via `set_peer_config`.
+- Clients must attach a compute budget: the quote+send cascade runs ~200k+
+  CUs through five programs (tests set 1.4M).
+- Quote demotion gotcha: the endpoint REFUSES writable accounts on quote,
+  while send needs several of them writable — `send_to_hub` re-passes
+  read-only clones for the quote CPI.
+
+**Devnet-only checklist (all that's left):**
+1. Fund `.keys/devnet.json` — budget **~4.6 SOL** (~480KB program ≈ 4.5 +
+   wiring rent) **plus the gas tank** (~0.001 SOL per outbound message).
+2. `anchor deploy --provider.cluster devnet`, then exactly the local
+   sequence: `init_store` (real endpoint id), `set_peer_config` ×2 (hub
+   adapter + 4M options), `init_usd_mint`, the three endpoint wiring calls,
+   fund the tank.
+3. Hub side: `setRoute(1, 40168, <store PDA bytes32>)` on the Base Sepolia
+   adapter and `pad.setGateway(1, …)`.
+4. Live smoke both directions, watched on LayerZero Scan testnet — the only
+   thing no local test can prove: the REAL executor/DVN noticing and
+   delivering (plus `lz_receive_types_v2` driven by the real executor), and
+   the hub-side acceptance of Solana-origin identities (see below).
+5. Replaces the stale `app/smoke.cjs`.
+
+**Hub identity gap (flagged in 2a, still open, EVM-side):** the hub
+STORES creators/traders as `address`; a Solana-origin spawn/buy carries a
+wide 32-byte identity which the v4 hub rejects on the downcast. The hub
+needs bytes32 identities in `metas`/positions before Solana-origin flows
+land. EVM contracts work — outside this leg's scope, tracked for the
+parent.
 
 ## Sources
 

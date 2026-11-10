@@ -16,6 +16,13 @@ pub const MINT_SEED: &[u8] = b"Mint";
 /// The chain's oUSD stand-in mint PDA (testnet money, like the EVM OmniUSD).
 #[constant]
 pub const USD_MINT_SEED: &[u8] = b"UsdMint";
+/// The gas tank: a zero-data, system-owned PDA holding SOL for LayerZero
+/// fees — the analog of the EVM adapters' `receive()` tank. Anyone funds it
+/// with a plain transfer; each send reimburses the tx payer the quoted fee
+/// from it (the payer then pays the ULN), so users send for free while the
+/// tank lasts.
+#[constant]
+pub const GAS_TANK_SEED: &[u8] = b"GasTank";
 
 /// SPAWN! chain label of the Solana leg (lib-deploy CHAINS: 1 = solana).
 pub const CHAIN_LABEL: u32 = 1;
