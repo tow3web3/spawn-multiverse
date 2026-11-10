@@ -55,6 +55,13 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver {
     /// The gas tank: anyone may top the adapter up with native currency.
     receive() external payable {}
 
+    /// Tank recovery: lets the admin drain the gas tank when this adapter is
+    /// retired (an incompatible upgrade must never strand testnet ETH again).
+    function recover(address payable to) external onlyAdmin {
+        (bool ok, ) = to.call{value: address(this).balance}("");
+        require(ok, "LZM: recover failed");
+    }
+
     function register(address sender_) external onlyAdmin {
         senders[sender_] = true;
     }

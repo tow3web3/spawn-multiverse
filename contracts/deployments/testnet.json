@@ -6,23 +6,23 @@
     "venue": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5"
   },
   "baseSepolia": {
-    "adapter": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
-    "usd": "0xDfAa7d564e9219b9e207B0feCD500076687b8fEA",
-    "pad": "0x580623D2155eA41fA27e7A59Aee09014f1d0bbE0",
-    "venue": "0x6ca105Caf5c697f809e197efeE1A20375D5f7caA",
-    "dist": "0x90a1271b5659982989Df4AEec3dd8ca42b48e575"
+    "adapter": "0x7206107e3B1EA11af9143F3cADEa288Ff9De76f9",
+    "usd": "0x9E9433B78Ab015d7F797c8df91d78F52B416eE4c",
+    "pad": "0x7ABb22F75FE7c092439Cb751DE6e3AE3a688E7D7",
+    "venue": "0xFDf332794da0d35c4C2C8518DB475548433CA41F",
+    "dist": "0x7d090B96D8A8c8d326dbE1E080254318cFd33fCE"
   },
   "optimismSepolia": {
-    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
-    "usd": "0x2303175117D3cC2D0AdfF497dD05cEa1150D8827",
-    "gateway": "0x5f39C4A84193c41e921d7b208F92Efab58d8c4a5",
-    "dist": "0xB97f56a5f1f15a671c665b33b0C51c04179B9C3c"
+    "adapter": "0xDfAa7d564e9219b9e207B0feCD500076687b8fEA",
+    "usd": "0x580623D2155eA41fA27e7A59Aee09014f1d0bbE0",
+    "gateway": "0x6ca105Caf5c697f809e197efeE1A20375D5f7caA",
+    "dist": "0xeF16Cf45909Bf0d41Eb6620a1a39d055A0B75F4A"
   },
   "arbitrumSepolia": {
-    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
-    "usd": "0xada6ceaEA64EA685a3CbA8e8F94A1690B29904C2",
-    "gateway": "0x41EF79573dC463FD08aAD0f6e40Bd78Dea955B4D",
-    "dist": "0x6CD3Bf8a614d694e97538FC3FeA75Fcf3a7fBB38"
+    "adapter": "0x2303175117D3cC2D0AdfF497dD05cEa1150D8827",
+    "usd": "0x5f39C4A84193c41e921d7b208F92Efab58d8c4a5",
+    "gateway": "0x6a09d237967Ee7c6f148Bd847FFDB8E464B023D6",
+    "dist": "0x94CcE3088442AEa2509663Dc4eF76DDEd43ec56d"
   },
   "baseSepolia_v2_predist": {
     "adapter": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
@@ -58,5 +58,24 @@
     "usd": "0xcA6b51B8760EC432070cE356345c3ea9489f61Bd",
     "gateway": "0x7121282DcadFf97eA401bF61564B68e0aA8A3091",
     "dist": "0xA705C9Fc0511e105F523b5CD5551b473Bbd700cE"
+  },
+  "baseSepolia_v4_preenv": {
+    "adapter": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
+    "usd": "0xDfAa7d564e9219b9e207B0feCD500076687b8fEA",
+    "pad": "0x580623D2155eA41fA27e7A59Aee09014f1d0bbE0",
+    "venue": "0x6ca105Caf5c697f809e197efeE1A20375D5f7caA",
+    "dist": "0x90a1271b5659982989Df4AEec3dd8ca42b48e575"
+  },
+  "optimismSepolia_v4_preenv": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "usd": "0x2303175117D3cC2D0AdfF497dD05cEa1150D8827",
+    "gateway": "0x5f39C4A84193c41e921d7b208F92Efab58d8c4a5",
+    "dist": "0xB97f56a5f1f15a671c665b33b0C51c04179B9C3c"
+  },
+  "arbitrumSepolia_v4_preenv": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "usd": "0xada6ceaEA64EA685a3CbA8e8F94A1690B29904C2",
+    "gateway": "0x41EF79573dC463FD08aAD0f6e40Bd78Dea955B4D",
+    "dist": "0x6CD3Bf8a614d694e97538FC3FeA75Fcf3a7fBB38"
   }
 }
