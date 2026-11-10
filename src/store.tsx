@@ -372,11 +372,16 @@ export type TradeResult =
   | { ok: true; usd: number; tokens: number; price: number; ascended: boolean }
   | { ok: false; reason: string }
 
+/** How the person signs in on-chain: a throwaway burner key held by the
+ * browser, or an injected wallet extension (MetaMask & friends). */
+export type WalletSource = 'burner' | 'injected'
+
 export interface StoreValue {
   mode: 'sim' | 'chain'
   creatures: Creature[]
   wallet: Wallet | null
-  connect: () => Promise<Wallet>
+  /** Connect. On-chain mode accepts a source; sim ignores it. */
+  connect: (source?: WalletSource) => Promise<Wallet>
   spawn: (input: SpawnInput) => Promise<CreatureMeta>
   trade: (num: number, side: Side, amount: number, chain: string) => Promise<TradeResult>
   getQuote: (num: number, side: Side, amount: number) => Quote | null
@@ -390,6 +395,10 @@ export interface StoreValue {
     airdrop: () => Promise<void>
     /** Chain ids actually live on this deployment (testnet has fewer than 6). */
     chains?: string[]
+    /** Which signer is active right now. */
+    walletSource?: WalletSource
+    /** Forget the session (keeps the burner key for later). */
+    disconnect?: () => void
   }
 }
 

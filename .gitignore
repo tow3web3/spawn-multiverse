@@ -9,3 +9,4 @@ contracts/.env.drip
 
 # Local Netlify folder
 .netlify
+tsconfig.tsbuildinfo

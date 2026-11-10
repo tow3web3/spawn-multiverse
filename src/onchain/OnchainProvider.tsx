@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import {
   createPublicClient,
   createWalletClient,
+  custom,
   defineChain,
   formatEther,
   http,
@@ -128,6 +129,51 @@ function loadBurner(): PrivateKeyAccount {
   return privateKeyToAccount(pk as `0x${string}`)
 }
 
+type WalletSource = 'burner' | 'injected'
+const LS_SOURCE = 'spawn.wallet.source'
+
+interface Eip1193Provider {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
+  on?: (event: string, handler: (...args: unknown[]) => void) => void
+  removeListener?: (event: string, handler: (...args: unknown[]) => void) => void
+}
+
+function injectedProvider(): Eip1193Provider | undefined {
+  return (window as { ethereum?: Eip1193Provider }).ethereum
+}
+
+/** Puts an injected wallet on `chain`, offering to add it first if the wallet
+ * doesn't know it (params come from the manifest's chainId/rpc). */
+async function ensureInjectedChain(provider: Eip1193Provider, chain: Chain) {
+  const hexId = `0x${chain.id.toString(16)}`
+  const current = (await provider.request({ method: 'eth_chainId' }).catch(() => null)) as
+    | string
+    | null
+  if (current && parseInt(current, 16) === chain.id) return
+  try {
+    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexId }] })
+  } catch (e) {
+    const code = (e as { code?: number }).code
+    if (code !== 4902 && !/4902|unrecognized|not been added/i.test(String((e as Error).message ?? e)))
+      throw e
+    await provider.request({
+      method: 'wallet_addEthereumChain',
+      params: [
+        {
+          chainId: hexId,
+          chainName: chain.name,
+          nativeCurrency: chain.nativeCurrency,
+          rpcUrls: chain.rpcUrls.default.http,
+        },
+      ],
+    })
+    // some wallets add the chain without switching to it
+    await provider
+      .request({ method: 'wallet_switchEthereumChain', params: [{ chainId: hexId }] })
+      .catch(() => undefined)
+  }
+}
+
 function loadCosts(addr: string): Record<number, number> {
   try {
     return JSON.parse(localStorage.getItem(`spawn.cost.${addr}`) ?? '{}')
@@ -175,20 +221,42 @@ export function OnchainProvider({
   const lastBlockRef = useRef(0n)
   const connectedRef = useRef(false)
   const costsRef = useRef<Record<number, number>>({})
+  const sourceRef = useRef<WalletSource>('burner')
+  const injectedRef = useRef<Address | null>(null)
+  const [walletSource, setWalletSource] = useState<WalletSource>('burner')
 
   const io = (chainId: string) => iosRef.current.find((c) => c.id === chainId)
-  const wcFor = (c: ChainIO) =>
-    createWalletClient({
+  /** Address of whichever signer is active (burner or injected wallet). */
+  const activeAddr = (): Address | null =>
+    sourceRef.current === 'injected' ? injectedRef.current : (burnerRef.current?.address ?? null)
+  /** Account value passed to viem tx calls (an Address for injected wallets). */
+  const activeAccount = () =>
+    sourceRef.current === 'injected' ? injectedRef.current! : burnerRef.current!
+  /** Wallet client for the active signer on chain `c`. The burner signs over
+   * plain RPC; an injected wallet is switched to the target chain first. */
+  const wcFor = async (c: ChainIO) => {
+    if (sourceRef.current === 'injected') {
+      const provider = injectedProvider()
+      if (!provider || !injectedRef.current) throw new Error('Injected wallet unavailable.')
+      await ensureInjectedChain(provider, c.chain)
+      return createWalletClient({
+        account: injectedRef.current,
+        chain: c.chain,
+        transport: custom(provider),
+      })
+    }
+    return createWalletClient({
       account: burnerRef.current!,
       chain: c.chain,
       transport: http(c.chain.rpcUrls.default.http[0]),
     })
+  }
 
   const saveCosts = () => {
-    const b = burnerRef.current
-    if (!b) return
+    const addr = activeAddr()
+    if (!addr) return
     try {
-      localStorage.setItem(`spawn.cost.${b.address}`, JSON.stringify(costsRef.current))
+      localStorage.setItem(`spawn.cost.${addr}`, JSON.stringify(costsRef.current))
     } catch {
       /* no storage */
     }
@@ -356,9 +424,9 @@ export function OnchainProvider({
       }
     }
 
-    // 3. burner balances: oUSD + gas + token positions, per spoke network
-    const burner = burnerRef.current
-    if (burner && connectedRef.current) {
+    // 3. active wallet balances: oUSD + gas + token positions, per spoke network
+    const addr = activeAddr()
+    if (addr && connectedRef.current) {
       const usdByChain: Record<string, bigint> = {}
       const gasByChain: Record<string, bigint> = {}
       for (const c of iosRef.current) {
@@ -367,9 +435,9 @@ export function OnchainProvider({
             address: c.usd,
             abi: usdAbi,
             functionName: 'balanceOf',
-            args: [burner.address],
+            args: [addr],
           })) as bigint
-          gasByChain[c.id] = await c.client.getBalance({ address: burner.address })
+          gasByChain[c.id] = await c.client.getBalance({ address: addr })
         } catch {
           usdByChain[c.id] = usdByChainRef.current[c.id] ?? 0n
         }
@@ -388,7 +456,7 @@ export function OnchainProvider({
               address: rep,
               abi: tokenAbi,
               functionName: 'balanceOf',
-              args: [burner.address],
+              args: [addr],
             })) as bigint
             perChain[c.id] = bal
             sum += bal
@@ -400,7 +468,7 @@ export function OnchainProvider({
         if (sum > 0n) positions[num] = { tokens: ef(sum), cost: costsRef.current[num] ?? 0 }
       }
       const totalUsd = Object.values(usdByChain).reduce((a, b) => a + b, 0n)
-      setWallet({ address: burner.address, balance: ef(totalUsd), positions })
+      setWallet({ address: addr, balance: ef(totalUsd), positions })
     }
 
     bump()
@@ -457,6 +525,25 @@ export function OnchainProvider({
             break
           }
         }
+        // if an injected wallet was connected last time and is still
+        // authorized for this site, resume it silently (no popup)
+        try {
+          if (localStorage.getItem(LS_SOURCE) === 'injected') {
+            const provider = injectedProvider()
+            const accounts = provider
+              ? ((await provider.request({ method: 'eth_accounts' })) as string[])
+              : []
+            if (accounts?.[0]) {
+              injectedRef.current = accounts[0] as Address
+              sourceRef.current = 'injected'
+              setWalletSource('injected')
+              costsRef.current = loadCosts(accounts[0])
+              connectedRef.current = true
+            }
+          }
+        } catch {
+          /* wallet locked or gone — the burner stays the fallback */
+        }
         if (stopped) return
         setStatus('ready')
         await poll()
@@ -473,22 +560,56 @@ export function OnchainProvider({
     }
   }, [poll, manifestUrl])
 
-  /** Faucets oUSD on every spoke where the burner can pay for gas. */
+  // follow the injected wallet: an account switch re-keys the session,
+  // a lock/disconnect in the wallet falls back to the disconnected state
+  useEffect(() => {
+    const provider = injectedProvider()
+    if (!provider?.on) return
+    const onAccounts = (...args: unknown[]) => {
+      if (sourceRef.current !== 'injected') return
+      const accounts = (args[0] as string[]) ?? []
+      if (!accounts[0]) {
+        injectedRef.current = null
+        sourceRef.current = 'burner'
+        connectedRef.current = false
+        setWalletSource('burner')
+        setWallet(null)
+        try {
+          localStorage.removeItem(LS_SOURCE)
+        } catch {
+          /* no storage */
+        }
+      } else {
+        injectedRef.current = accounts[0] as Address
+        costsRef.current = loadCosts(accounts[0])
+        void poll().catch(() => undefined)
+      }
+    }
+    const onChain = () => void poll().catch(() => undefined)
+    provider.on('accountsChanged', onAccounts)
+    provider.on('chainChanged', onChain)
+    return () => {
+      provider.removeListener?.('accountsChanged', onAccounts)
+      provider.removeListener?.('chainChanged', onChain)
+    }
+  }, [poll])
+
+  /** Faucets oUSD on every spoke where the active wallet can pay for gas. */
   const airdrop = useCallback(async () => {
-    const burner = burnerRef.current
-    if (!burner) throw new Error('chain offline')
+    const addr = activeAddr()
+    if (!addr) throw new Error('chain offline')
     let done = 0
     for (const c of iosRef.current) {
       try {
-        const gas = await c.client.getBalance({ address: burner.address })
+        const gas = await c.client.getBalance({ address: addr })
         if (gas === 0n) continue
-        const hash = await wcFor(c).writeContract({
+        const hash = await (await wcFor(c)).writeContract({
           address: c.usd,
           abi: usdAbi,
           functionName: 'faucet',
-          args: [burner.address, parseEther(String(AIRDROP_PER_CHAIN))],
+          args: [addr, parseEther(String(AIRDROP_PER_CHAIN))],
           chain: c.chain,
-          account: burner,
+          account: activeAccount(),
         })
         await c.client.waitForTransactionReceipt({ hash })
         done++
@@ -497,13 +618,53 @@ export function OnchainProvider({
       }
     }
     await poll()
-    if (done === 0) throw new Error('no gas on any chain — the burner needs testnet ETH first')
+    if (done === 0) throw new Error('no gas on any chain — the wallet needs testnet ETH first')
   }, [poll])
 
-  const connect = useCallback(async (): Promise<Wallet> => {
+  const connect = useCallback(async (source?: WalletSource): Promise<Wallet> => {
     const m = manifestRef.current
-    const burner = burnerRef.current
-    if (!m || !burner) throw new Error('chain offline')
+    if (!m || !burnerRef.current) throw new Error('chain offline')
+
+    // no explicit choice → resume whatever source was used last time
+    let src: WalletSource = source ?? 'burner'
+    if (!source) {
+      try {
+        if (localStorage.getItem(LS_SOURCE) === 'injected' && injectedProvider()) src = 'injected'
+      } catch {
+        /* no storage */
+      }
+    }
+    if (src === 'injected') {
+      const provider = injectedProvider()
+      if (!provider) throw new Error('No wallet extension found — use the burner instead.')
+      let accounts: string[] = []
+      try {
+        accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[]
+      } catch (e) {
+        throw new Error(
+          (e as { code?: number }).code === 4001
+            ? 'Connection request rejected in the wallet.'
+            : 'Wallet connection failed.',
+        )
+      }
+      if (!accounts?.[0]) throw new Error('The wallet returned no account.')
+      injectedRef.current = accounts[0] as Address
+      sourceRef.current = 'injected'
+      setWalletSource('injected')
+    } else {
+      sourceRef.current = 'burner'
+      injectedRef.current = null
+      setWalletSource('burner')
+    }
+    try {
+      if (src === 'injected') localStorage.setItem(LS_SOURCE, 'injected')
+      else localStorage.removeItem(LS_SOURCE)
+    } catch {
+      /* no storage */
+    }
+    // the body below funds/drips whichever signer is now active
+    const burner = { address: activeAddr()! }
+    costsRef.current = loadCosts(burner.address)
 
     if (isLocalRef.current) {
       // local devnet: gas comes from hardhat's dev faucet account
@@ -551,6 +712,21 @@ export function OnchainProvider({
       positions: wallet?.positions ?? {},
     }
   }, [airdrop, wallet])
+
+  /** Back to the disconnected state. The burner key stays in storage, so
+   * reconnecting as burner later resumes the same address and bags. */
+  const disconnect = useCallback(() => {
+    sourceRef.current = 'burner'
+    injectedRef.current = null
+    connectedRef.current = false
+    setWalletSource('burner')
+    setWallet(null)
+    try {
+      localStorage.removeItem(LS_SOURCE)
+    } catch {
+      /* no storage */
+    }
+  }, [])
 
   /** Testnet: wait for the hub to receive this trader's Trade via LayerZero. */
   const waitHubTrade = useCallback(
@@ -602,9 +778,9 @@ export function OnchainProvider({
 
   const trade = useCallback(
     async (num: number, side: Side, amount: number, chainId: string): Promise<TradeResult> => {
-      const burner = burnerRef.current
+      const addr = activeAddr()
       const entry = entriesRef.current.get(num)
-      if (!burner || !hubClientRef.current) return { ok: false, reason: 'Chain offline.' }
+      if (!addr || !hubClientRef.current) return { ok: false, reason: 'Chain offline.' }
       if (!connectedRef.current) return { ok: false, reason: 'Connect a wallet first.' }
       if (!entry) return { ok: false, reason: 'Unknown creature.' }
       if (!(amount > 0)) return { ok: false, reason: 'Enter an amount.' }
@@ -614,11 +790,11 @@ export function OnchainProvider({
         return { ok: false, reason: `${chainId.toUpperCase()} isn't live on this deployment yet — try ${have}.` }
       }
       if (!isLocalRef.current) {
-        const gas = gasByChainRef.current[chainId] ?? (await c.client.getBalance({ address: burner.address }))
+        const gas = gasByChainRef.current[chainId] ?? (await c.client.getBalance({ address: addr }))
         if (gas < parseEther('0.00002')) {
           return {
             ok: false,
-            reason: `No gas on ${chainId.toUpperCase()} — send a drop of testnet ETH to your burner ${burner.address.slice(0, 8)}…`,
+            reason: `No gas on ${chainId.toUpperCase()} — send a drop of testnet ETH to your wallet ${addr.slice(0, 8)}…`,
           }
         }
       }
@@ -635,13 +811,13 @@ export function OnchainProvider({
               reason: `Only $${Number(formatEther(have)).toFixed(2)} oUSD on ${chainId.toUpperCase()} — hit AIRDROP or pick another chain.`,
             }
           }
-          hash = await wcFor(c).writeContract({
+          hash = await (await wcFor(c)).writeContract({
             address: c.gateway,
             abi: gatewayAbi,
             functionName: 'buyToken',
             args: [entry.token, usdWei],
             chain: c.chain,
-            account: burner,
+            account: activeAccount(),
           })
         } else {
           const perChain = tokensByChainRef.current.get(num) ?? {}
@@ -659,13 +835,13 @@ export function OnchainProvider({
           }
           let tokensWei = parseEther(amount.toFixed(18))
           if (tokensWei > have) tokensWei = have
-          hash = await wcFor(c).writeContract({
+          hash = await (await wcFor(c)).writeContract({
             address: c.gateway,
             abi: gatewayAbi,
             functionName: 'sellToken',
             args: [entry.token, tokensWei],
             chain: c.chain,
-            account: burner,
+            account: activeAccount(),
           })
         }
 
@@ -685,7 +861,7 @@ export function OnchainProvider({
           price = t ? ef(t.args.priceAfter as bigint) : 0
         } else {
           // live LayerZero: the trade lands on the hub in a minute or three
-          const got = await waitHubTrade(entry.token, burner.address, hubMark, 240_000)
+          const got = await waitHubTrade(entry.token, addr, hubMark, 240_000)
           if (got) {
             usd = got.usd
             tokens = got.tokens
@@ -719,11 +895,11 @@ export function OnchainProvider({
 
   const spawn = useCallback(
     async (input: SpawnInput): Promise<CreatureMeta> => {
-      const burner = burnerRef.current
       const hub = hubClientRef.current
       const m = manifestRef.current
-      if (!burner || !hub || !m || iosRef.current.length === 0) throw new Error('chain offline')
+      if (!activeAddr() || !hub || !m || iosRef.current.length === 0) throw new Error('chain offline')
       if (!connectedRef.current) await connect()
+      const addr = activeAddr()!
 
       // metaURI stays small on purpose: in production the image goes to IPFS
       // and the URI points at it; on dev/test deployments the image lives in
@@ -733,7 +909,7 @@ export function OnchainProvider({
       const before = Number(
         await hub.readContract({ address: m.pad, abi: padAbi, functionName: 'tokensLength' }),
       )
-      const hash = await wcFor(c).writeContract({
+      const hash = await (await wcFor(c)).writeContract({
         address: c.gateway,
         abi: gatewayAbi,
         functionName: 'spawnToken',
@@ -745,7 +921,7 @@ export function OnchainProvider({
           FEE_MODE_INDEX[input.feeMode ?? 'holders'],
         ],
         chain: c.chain,
-        account: burner,
+        account: activeAccount(),
       })
       const receipt = await c.client.waitForTransactionReceipt({ hash })
 
@@ -765,13 +941,13 @@ export function OnchainProvider({
               await hub.readContract({ address: m.pad, abi: padAbi, functionName: 'tokensLength' }),
             )
             for (let i = before; i < len; i++) {
-              const [addr, , , , creator] = (await hub.readContract({
+              const [tokenAddr, , , , creator] = (await hub.readContract({
                 address: m.pad,
                 abi: padAbi,
                 functionName: 'getToken',
                 args: [BigInt(i)],
               })) as unknown as [Address, string, string, string, Address]
-              if (creator.toLowerCase() === burner.address.toLowerCase()) token = addr
+              if (creator.toLowerCase() === addr.toLowerCase()) token = tokenAddr
             }
           } catch {
             /* transient */
@@ -811,9 +987,9 @@ export function OnchainProvider({
    * oUSD on that chain; polling picks the balance up. */
   const claimFees = useCallback(
     async (num: number): Promise<number> => {
-      const burner = burnerRef.current
+      const addr = activeAddr()
       const entry = entriesRef.current.get(num)
-      if (!burner || !entry || iosRef.current.length === 0) return 0
+      if (!addr || !entry || iosRef.current.length === 0) return 0
       const f = entry.market.fees
       const claimable = f ? Math.max(0, f.dev - f.devClaimed) : 0
       if (claimable <= 0.005) return 0
@@ -825,13 +1001,13 @@ export function OnchainProvider({
           break
         }
       }
-      const hash = await wcFor(c).writeContract({
+      const hash = await (await wcFor(c)).writeContract({
         address: c.gateway,
         abi: gatewayAbi,
         functionName: 'claimFees',
         args: [entry.token],
         chain: c.chain,
-        account: burner,
+        account: activeAccount(),
       })
       await c.client.waitForTransactionReceipt({ hash })
       await poll()
@@ -862,9 +1038,11 @@ export function OnchainProvider({
         status,
         airdrop,
         chains: manifestRef.current?.chains.map((c) => c.id),
+        walletSource,
+        disconnect,
       },
     }),
-    [creatures, wallet, connect, spawn, trade, claimFees, getQuote, getMarket, justSpawned, status, airdrop],
+    [creatures, wallet, connect, spawn, trade, claimFees, getQuote, getMarket, justSpawned, status, airdrop, walletSource, disconnect],
   )
 
   return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>

@@ -1,4 +1,5 @@
-import { useStore, shortAddr } from '../store'
+import { useState } from 'react'
+import { useStore, shortAddr, type WalletSource } from '../store'
 import { fmtUsd } from '../lib/format'
 import { PUBLIC_DEMO, type AppMode } from '../App'
 
@@ -44,7 +45,7 @@ export function Nav({
   onFreshSpawns: () => void
   onHome: () => void
 }) {
-  const { wallet, connect, onchain } = useStore()
+  const { wallet, onchain } = useStore()
 
   const link =
     'hidden lg:inline-block font-mono text-[12px] font-bold tracking-wide hover:underline decoration-[3px] decoration-lime underline-offset-4 cursor-pointer'
@@ -125,19 +126,7 @@ export function Nav({
           </button>
         )}
 
-        <button
-          onClick={() => void connect()}
-          className="rounded-xl border-3 border-ink bg-ink px-4 py-2.5 font-mono text-[11px] font-bold tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
-        >
-          {wallet ? (
-            <>
-              ● {shortAddr(wallet.address)}{' '}
-              <span className="text-lime">{fmtUsd(wallet.balance)}</span>
-            </>
-          ) : (
-            '◉ CONNECT WALLET'
-          )}
-        </button>
+        <ConnectButton />
       </div>
 
       {onchain && onchain.status !== 'ready' && (
@@ -150,5 +139,114 @@ export function Nav({
         </div>
       )}
     </header>
+  )
+}
+
+/** Connect pill + its dropdown. In on-chain mode with a wallet extension
+ * present, connecting offers MetaMask vs the instant burner; once connected
+ * the pill opens a small menu showing the source and a DISCONNECT. */
+function ConnectButton() {
+  const { wallet, connect, onchain } = useStore()
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState<WalletSource | 'any' | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const hasInjected =
+    typeof window !== 'undefined' && !!(window as { ethereum?: unknown }).ethereum
+  const onchainMode = !!onchain
+
+  const doConnect = async (source?: WalletSource) => {
+    if (busy) return
+    setBusy(source ?? 'any')
+    setErr(null)
+    try {
+      await connect(source)
+      setOpen(false)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message.split('\n')[0].slice(0, 90) : 'Connection failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const onPillClick = () => {
+    setErr(null)
+    if (onchainMode && (wallet || hasInjected)) {
+      setOpen((o) => !o)
+      return
+    }
+    void doConnect()
+  }
+
+  const option =
+    'w-full rounded-lg border-2 border-ink px-3 py-2.5 text-left font-mono text-[11px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:opacity-60'
+
+  return (
+    <div className="relative">
+      <button
+        onClick={onPillClick}
+        className="rounded-xl border-3 border-ink bg-ink px-4 py-2.5 font-mono text-[11px] font-bold tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
+      >
+        {wallet ? (
+          <>
+            {onchain?.walletSource === 'injected' ? '🦊' : '●'} {shortAddr(wallet.address)}{' '}
+            <span className="text-lime">{fmtUsd(wallet.balance)}</span>
+          </>
+        ) : busy ? (
+          '✳ CONNECTING…'
+        ) : (
+          '◉ CONNECT WALLET'
+        )}
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-full z-50 mt-2 w-60 rounded-xl border-3 border-ink bg-cream p-2 shadow-brutal">
+          {wallet ? (
+            <>
+              <p className="px-1 pb-2 pt-1 font-mono text-[10px] font-bold opacity-60">
+                {onchain?.walletSource === 'injected' ? '🦊 METAMASK' : '⚡ BURNER WALLET'} ·{' '}
+                {shortAddr(wallet.address)}
+              </p>
+              <button
+                className={`${option} bg-white hover:bg-hotpink`}
+                onClick={() => {
+                  onchain?.disconnect?.()
+                  setOpen(false)
+                }}
+              >
+                ✕ DISCONNECT
+              </button>
+            </>
+          ) : (
+            <div className="flex flex-col gap-2">
+              <button
+                className={`${option} bg-lime`}
+                disabled={busy !== null}
+                onClick={() => void doConnect('injected')}
+              >
+                {busy === 'injected' ? '✳ CHECK YOUR WALLET…' : '🦊 METAMASK'}
+                <span className="block font-body text-[10px] font-normal opacity-70">
+                  your own wallet extension
+                </span>
+              </button>
+              <button
+                className={`${option} bg-white`}
+                disabled={busy !== null}
+                onClick={() => void doConnect('burner')}
+              >
+                {busy === 'burner' ? '✳ SPAWNING…' : '⚡ BURNER (INSTANT)'}
+                <span className="block font-body text-[10px] font-normal opacity-70">
+                  throwaway wallet, zero setup
+                </span>
+              </button>
+            </div>
+          )}
+          {err && (
+            <p className="mt-2 rounded-lg border-2 border-ink bg-hotpink px-2 py-1.5 font-mono text-[10px] font-bold">
+              {err}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
