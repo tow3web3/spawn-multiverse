@@ -64,8 +64,16 @@ per-chain reconciliation:
 - **Buyback & burn** — once the pot passes $4 the pad executes a REAL buy on
   the curve (it moves the price) and burns the tokens on the spot, shrinking
   global supply for every chain at once (`BuybackBurn` event, tested).
-- **Holder stream** — accrues in the pot today; pro-rata distribution (a
-  snapshot/merkle claim across chain-native balances) is the v3 piece.
+- **Holder stream (v3, live)** — the pot accrues per token; once it passes
+  `DIST_TRIGGER` ($2) the pad splits it pro-rata to where the supply actually
+  lives (it tracks `supplyByChain` at every mint/burn it orchestrates) and
+  drops each slice into that chain's **FeeDistributor** — the hub share
+  locally, spoke shares as `OP_FEE_DROP` burn/mints. Each distributor runs
+  the classic magnified-dividends-per-share accounting, fed by a transfer
+  hook on every SpawnToken, with protocol accounts (pad, venue, gateways)
+  excluded. Holders claim with a **pure local transaction** on their own
+  chain — no cross-chain hop, no snapshot ceremony, and dividends already
+  earned stay claimable after a sell.
 
 Run the invariants suite (`npm run chain:test`): genesis on six chains, single
 global curve, supply conservation (including under burns), value conservation,

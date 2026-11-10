@@ -11,8 +11,8 @@ the honest path, in order. Nothing here is optional; the order is the point.
 |---|---|---|
 | Hub + Optimism + Arbitrum legs live, visitor flow end-to-end | done | ✅ |
 | Ethereum Sepolia + BNB testnet legs (auto-deploy armed, waiting on faucet fuel) | user: 2 faucet claims | ⏳ |
-| Real wallet support (MetaMask/injected) next to the burner | Claude | 🔨 in progress |
-| Holder fee distribution (snapshot + merkle claim) — advertised, must exist | Claude | ⏳ |
+| Real wallet support (MetaMask/injected) next to the burner | Claude | ✅ |
+| Holder fee distribution (per-chain dividend pools, local claims) | Claude | ✅ v3 deployed |
 | Solana leg (Rust/Anchor program against the LayerZero Solana endpoint) | Claude, multi-day | ⏳ |
 
 ## Phase 1 — make the protocol mainnet-shaped (code, free)
