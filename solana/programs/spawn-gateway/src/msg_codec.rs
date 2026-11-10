@@ -283,6 +283,38 @@ impl SpawnMsg {
     }
 }
 
+/* ------------------------------ envelope ------------------------------ */
+
+/// The inter-transport envelope (v5): `abi.encode(bytes32 srcSender,
+/// bytes32 dstAddr, bytes payload)` — wide on both seats, so a Solana OApp
+/// store can be the sender or the target. EVM adapters produce and consume
+/// this exact layout; we wrap every send and unwrap every receive with it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Envelope {
+    pub src_sender: WireAddr,
+    pub dst_addr: WireAddr,
+    pub payload: Vec<u8>,
+}
+
+impl Envelope {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = AbiWriter::default();
+        w.address(&self.src_sender);
+        w.address(&self.dst_addr);
+        w.bytes_like(&self.payload);
+        w.finish()
+    }
+
+    pub fn decode(message: &[u8]) -> Result<Self> {
+        let r = AbiReader::new(message);
+        Ok(Self {
+            src_sender: r.address_at(0)?,
+            dst_addr: r.address_at(1)?,
+            payload: r.bytes_at(2)?.to_vec(),
+        })
+    }
+}
+
 /* ------------------------------- reader ------------------------------- */
 
 /// Strict reader for canonical abi.encode output: offsets must land in
@@ -375,11 +407,12 @@ mod tests {
     #[test]
     fn cross_vectors_round_trip() {
         let raw = include_str!("../../../tests/codec-vectors.json");
-        let vectors: Vec<serde_json::Value> = serde_json::from_str(raw).unwrap();
+        let file: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let vectors = file["ops"].as_array().unwrap();
         assert!(vectors.len() >= 25, "vector file looks truncated");
         // the file must exercise wide (Solana-shaped) riders too
         assert!(vectors.iter().any(|v| v["wide"].as_bool() == Some(true)));
-        for v in &vectors {
+        for v in vectors {
             let bytes = unhex(v["hex"].as_str().unwrap());
             let i = &v["inner"];
             let expected = match v["name"].as_str().unwrap() {
@@ -435,6 +468,30 @@ mod tests {
         let mut bytes = msg.encode();
         bytes[33] = 1; // inside the envelope offset word's high padding
         assert!(SpawnMsg::decode(&bytes).is_err());
+    }
+
+    /// The envelope vectors come from the same ethers coder the EVM
+    /// adapters compile against — both directions, byte-exact.
+    #[test]
+    fn envelope_vectors_round_trip() {
+        let raw = include_str!("../../../tests/codec-vectors.json");
+        let file: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let envs = file["envelopes"].as_array().unwrap();
+        assert!(envs.len() >= 3, "envelope vectors missing");
+        for v in envs {
+            let bytes = unhex(v["hex"].as_str().unwrap());
+            let expected = Envelope {
+                src_sender: addr(&v["src"]),
+                dst_addr: addr(&v["dst"]),
+                payload: unhex(v["payload"].as_str().unwrap()),
+            };
+            let decoded = Envelope::decode(&bytes)
+                .unwrap_or_else(|e| panic!("envelope {} failed to decode: {e}", v["name"]));
+            assert_eq!(decoded, expected, "envelope {} decoded wrong", v["name"]);
+            assert_eq!(decoded.encode(), bytes, "envelope {} re-encoded differently", v["name"]);
+            // and the payload inside is itself a decodable op
+            assert!(SpawnMsg::decode(&decoded.payload).is_ok());
+        }
     }
 
     /// The point of the bytes32 evolution: a full Solana pubkey rides the

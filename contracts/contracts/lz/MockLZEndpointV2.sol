@@ -70,6 +70,12 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
         return queue.length;
     }
 
+    /// Test hook: inspect a queued packet without delivering it — the way to
+    /// assert what rides the wire toward a chain that cannot receive locally.
+    function peek(uint256 i) external view returns (Packet memory) {
+        return queue[i];
+    }
+
     /// Lands the oldest packet on its destination adapter — a separate tx,
     /// like the real executor.
     function deliverNext() public {

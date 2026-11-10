@@ -78,7 +78,7 @@ contract SpawnGateway is IOmniReceiver {
         if (devBuyUsd > 0) usd.bridgeBurn(msg.sender, devBuyUsd);
         messenger.send(
             HUB_CHAIN,
-            pad,
+            _b32(pad),
             // creator rides as bytes32; the hub consumes it as an address
             abi.encode(OP_SPAWN, abi.encode(_b32(msg.sender), name, symbol, metaURI, devBuyUsd, feeMode))
         );
@@ -87,14 +87,14 @@ contract SpawnGateway is IOmniReceiver {
     /// The dev claims their accrued fee share; the pad pays out on THIS chain.
     function claimFees(address hubToken) external {
         // token id + claimer ride as bytes32 (wire convention)
-        messenger.send(HUB_CHAIN, pad, abi.encode(OP_CLAIM, abi.encode(_b32(hubToken), _b32(msg.sender))));
+        messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_CLAIM, abi.encode(_b32(hubToken), _b32(msg.sender))));
     }
 
     function buyToken(address hubToken, uint256 usdIn) external {
         require(usdIn > 0, "GW: zero");
         usd.bridgeBurn(msg.sender, usdIn);
         // token id + buyer ride as bytes32 (wire convention)
-        messenger.send(HUB_CHAIN, pad, abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn)));
+        messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn)));
     }
 
     function sellToken(address hubToken, uint256 tokens) external {
@@ -103,14 +103,14 @@ contract SpawnGateway is IOmniReceiver {
         require(address(rep) != address(0), "GW: no replica");
         rep.bridgeBurn(msg.sender, tokens);
         // token id + seller ride as bytes32 (wire convention)
-        messenger.send(HUB_CHAIN, pad, abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens)));
+        messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens)));
     }
 
     /* -------------------------- messaging -------------------------- */
 
-    function onOmniMessage(uint32 srcChain, address srcSender, bytes calldata payload) external {
+    function onOmniMessage(uint32 srcChain, bytes32 srcSender, bytes calldata payload) external {
         require(msg.sender == address(messenger), "GW: not messenger");
-        require(srcChain == HUB_CHAIN && srcSender == pad, "GW: not the pad");
+        require(srcChain == HUB_CHAIN && srcSender == _b32(pad), "GW: not the pad");
         (uint8 op, bytes memory data) = abi.decode(payload, (uint8, bytes));
         if (op == OP_SYNC_TOKEN) {
             (bytes32 hubTokenB, string memory name, string memory symbol) = abi.decode(

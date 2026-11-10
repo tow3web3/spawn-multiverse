@@ -4,11 +4,13 @@ export const padAbi = parseAbi([
   'function tokensLength() view returns (uint256)',
   'function allTokens(uint256) view returns (address)',
   'function spotPrice(address token) view returns (uint256)',
-  'function getToken(uint256 i) view returns (address token, string name, string symbol, string metaURI, address creator, uint64 spawnedAt, uint32 homeChain, uint256 vBase, uint256 vTokens, uint256 sold, bool ascended, uint256 price)',
+  // v5: actors (creator / trader) are bytes32 wire identities — an EVM
+  // address rides left-padded, a Solana pubkey rides raw.
+  'function getToken(uint256 i) view returns (address token, string name, string symbol, string metaURI, bytes32 creator, uint64 spawnedAt, uint32 homeChain, uint256 vBase, uint256 vTokens, uint256 sold, bool ascended, uint256 price)',
   'function feesOf(address token) view returns (uint8 mode, uint256 total, uint256 holders, uint256 dev, uint256 devClaimed, uint256 burnPot, uint256 burnedUsd, uint256 burnedTokens, uint256 holdersPaid)',
   'function distributor() view returns (address)',
-  'event Spawned(address indexed token, address indexed creator, uint32 homeChain, string name, string symbol, string metaURI)',
-  'event Trade(address indexed token, uint32 indexed chain, address indexed trader, bool isBuy, uint256 usd, uint256 tokens, uint256 priceAfter, uint64 ts)',
+  'event Spawned(address indexed token, bytes32 indexed creator, uint32 homeChain, string name, string symbol, string metaURI)',
+  'event Trade(address indexed token, uint32 indexed chain, bytes32 indexed trader, bool isBuy, uint256 usd, uint256 tokens, uint256 priceAfter, uint64 ts)',
   'event Ascended(address indexed token, uint256 raisedUsd, uint64 ts)',
 ])
 

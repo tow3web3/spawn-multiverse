@@ -104,12 +104,68 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
     await (await rogue.register(user.address)).wait()
     await (await user.sendTransaction({ to: rogue.target, value: E(1) })).wait()
     const payload = ethers.AbiCoder.defaultAbiCoder().encode(['uint8', 'bytes'], [2, '0x'])
-    await (await rogue.connect(user).send(0, world.pad.target, payload)).wait()
+    await (await rogue.connect(user).send(0, ethers.zeroPadValue(world.pad.target, 32), payload)).wait()
     await expect(world.endpoint.deliverNext()).to.be.revertedWith('LZM: not a peer')
 
     // and only registered protocol contracts may send at all
-    await expect(world.hubMessenger.connect(user).send(1, user.address, '0x')).to.be.revertedWith(
-      'LZM: unknown sender',
+    await expect(
+      world.hubMessenger.connect(user).send(1, ethers.zeroPadValue(user.address, 32), '0x'),
+    ).to.be.revertedWith('LZM: unknown sender')
+  })
+
+  it('a wide identity rides the whole wire intact — and only its own chain can cash it', async () => {
+    // v5: a Solana-style 32-byte creator spawns, earns dev fees from EVM
+    // traders, and claims. We assert the OP_PAYOUT packet queued toward its
+    // chain carries the wide identity byte-for-byte, then prove an EVM spoke
+    // refuses to mint to it.
+    const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
+    const b32 = (a) => ethers.zeroPadValue(a, 32)
+    const coder = ethers.AbiCoder.defaultAbiCoder()
+    const sol = world.chains[0] // label 1
+
+    await impersonateAccount(world.hubMessenger.target)
+    await setBalance(world.hubMessenger.target, E(1))
+    const msgr = await ethers.getSigner(world.hubMessenger.target)
+    const srcId = b32(sol.gateway.target)
+    const wideCreator = '0x33' + 'ef'.repeat(31)
+
+    // spawn (fee mode 2: 100% dev) injected as if from the Solana gateway
+    const spawn = coder.encode(
+      ['uint8', 'bytes'],
+      [1, coder.encode(['bytes32', 'string', 'string', 'string', 'uint256', 'uint8'], [wideCreator, 'SOL GLOOP', 'SGLP', '{}', 0, 2])],
     )
+    await (await world.pad.connect(msgr).onOmniMessage(1, srcId, spawn)).wait()
+    const token = await world.pad.allTokens(0)
+    expect((await world.pad.metas(token)).creator).to.equal(wideCreator)
+    await world.deliverAll() // SYNC_TOKEN fan-out
+
+    // EVM users trade; the wide dev's pot fills
+    const base = world.chains[2]
+    await (await base.usd.faucet(user, E(1_000))).wait()
+    await (await base.gateway.connect(user).buyToken(token, E(500))).wait()
+    await world.deliverAll()
+    expect((await world.pad.feesOf(token)).dev).to.equal(E(5))
+
+    // the wide creator claims from its chain; the payout packet queues
+    const claim = coder.encode(
+      ['uint8', 'bytes'],
+      [4, coder.encode(['bytes32', 'bytes32'], [b32(token), wideCreator])],
+    )
+    await (await world.pad.connect(msgr).onOmniMessage(1, srcId, claim)).wait()
+    expect(await world.endpoint.pending()).to.equal(1n)
+
+    // inspect the packet WITHOUT delivering: envelope + payload, byte-exact
+    const pkt = await world.endpoint.peek(0)
+    const [envSender, envTarget, envPayload] = coder.decode(['bytes32', 'bytes32', 'bytes'], pkt.message)
+    expect(envSender).to.equal(b32(world.pad.target))
+    expect(envTarget).to.equal(srcId)
+    const [op, inner] = coder.decode(['uint8', 'bytes'], envPayload)
+    expect(op).to.equal(12n) // OP_PAYOUT
+    const [recipient, amount] = coder.decode(['bytes32', 'uint256'], inner)
+    expect(recipient).to.equal(wideCreator) // intact, byte-for-byte
+    expect(amount).to.equal(E(5))
+
+    // an EVM spoke cannot cash a wide identity: the local mint refuses
+    await expect(world.endpoint.deliverNext()).to.be.revertedWith('GW: bad recipient')
   })
 })

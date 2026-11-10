@@ -64,7 +64,15 @@ pub(crate) fn send_to_hub<'info>(
     let options = peer.enforced_options.send.clone();
     require!(!options.is_empty(), GatewayError::NoSendOptions);
 
-    let message = msg.encode();
+    // Wrap in the inter-transport envelope (v5): we are the protocol sender
+    // (the store's own key, raw 32 bytes), the hub pad is the target. The
+    // hub adapter unwraps this exact layout and routes to the pad.
+    let message = msg_codec::Envelope {
+        src_sender: msg_codec::WireAddr(store.key().to_bytes()),
+        dst_addr: msg_codec::WireAddr(store.hub_pad),
+        payload: msg.encode(),
+    }
+    .encode();
 
     // 1. quote — same accounts, minus payer/treasury/event rows. The
     // endpoint refuses WRITABLE accounts on quote (it is pure), while send

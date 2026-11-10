@@ -17,6 +17,7 @@ import {
   custom,
   defineChain,
   formatEther,
+  getAddress,
   http,
   parseAbi,
   parseEther,
@@ -25,6 +26,7 @@ import {
   type Chain,
   type PublicClient,
 } from 'viem'
+import { narrowActor } from '../lib/format'
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import {
   StoreCtx,
@@ -52,6 +54,13 @@ const feesOfV2Abi = parseAbi([
   'function feesOf(address token) view returns (uint8 mode, uint256 total, uint256 holders, uint256 dev, uint256 devClaimed, uint256 burnPot, uint256 burnedUsd, uint256 burnedTokens)',
 ])
 const PALETTE = ['#b5e95b', '#f7a8ce', '#9ccbf5', '#a78bf0', '#f7be7b', '#8be0d4']
+/** v5 wire identities are bytes32. Narrow EVM-shaped ones back to their
+ * checksummed address so every comparison with wallet addresses keeps
+ * working; a wide (Solana) identity stays full-width lowercase. */
+const toActor = (b32: string): string => {
+  const n = narrowActor(b32)
+  return n.length === 42 ? getAddress(n) : n
+}
 const AIRDROP_PER_CHAIN = 1337
 const ZERO = '0x0000000000000000000000000000000000000000'
 // Hardhat's well-known dev account #0 — funds burner wallets with gas on the
@@ -334,7 +343,7 @@ export function OnchainProvider({
             // every on-chain token was launched by someone; `creator` gates
             // the dev dashboard to the launches of the connected wallet
             custom: true,
-            creator,
+            creator: toActor(creator),
             feeMode: parsed.feeMode,
           },
           market: {
@@ -423,7 +432,7 @@ export function OnchainProvider({
             usd: ef(a.usd as bigint),
             tokens: ef(a.tokens as bigint),
             price: ef(a.priceAfter as bigint),
-            trader: (a.trader as string).toLowerCase(),
+            trader: toActor(a.trader as string).toLowerCase(),
           }
           const mk = entry.market
           mk.trades.unshift(trade)
@@ -808,7 +817,7 @@ export function OnchainProvider({
               (e) =>
                 e.eventName === 'Trade' &&
                 (e.args.token as string).toLowerCase() === token.toLowerCase() &&
-                (e.args.trader as string).toLowerCase() === trader.toLowerCase(),
+                narrowActor(e.args.trader as string) === trader.toLowerCase(),
             )
             if (t) {
               const a = t.args as { usd: bigint; tokens: bigint; priceAfter: bigint }
@@ -1005,7 +1014,7 @@ export function OnchainProvider({
                 functionName: 'getToken',
                 args: [BigInt(i)],
               })) as unknown as [Address, string, string, string, Address]
-              if (creator.toLowerCase() === addr.toLowerCase()) token = tokenAddr
+              if (narrowActor(creator) === addr.toLowerCase()) token = tokenAddr
             }
           } catch {
             /* transient */

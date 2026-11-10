@@ -4,6 +4,7 @@ import { CHAINS } from '../lib/chains'
 import { LINK_META, linkHref } from '../lib/links'
 import {
   creatureNum,
+  fmtActor,
   fmtChange,
   fmtMoney,
   fmtNum,
@@ -342,6 +343,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   const ch = CHAINS.find((x) => x.id === t.chain)
                   const you = wallet && t.trader === wallet.address
                   const burner = t.trader === BURNER
+                  // a 32-byte identity means a non-EVM (Solana) trader
+                  const wide = t.trader.startsWith('0x') && t.trader.length > 42
                   return (
                     <div
                       key={t.id}
@@ -369,6 +372,11 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                       )}
                       {you && (
                         <span className="rounded border border-ink bg-lime px-1 text-[8px]">YOU</span>
+                      )}
+                      {wide && (
+                        <span className="rounded border border-ink bg-white px-1 text-[8px]">
+                          {fmtActor(t.trader)}
+                        </span>
                       )}
                     </div>
                   )

@@ -21,7 +21,7 @@ use {
         signature::{Keypair, Signer},
         transaction::VersionedTransaction,
     },
-    spawn_gateway::msg_codec::{WireAddr, SpawnMsg, U256},
+    spawn_gateway::msg_codec::{Envelope, SpawnMsg, U256, WireAddr},
 };
 
 const TOKEN_PROGRAM: Pubkey = anchor_lang::solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -29,6 +29,12 @@ const ATA_PROGRAM: Pubkey = anchor_lang::solana_program::pubkey!("ATokenGPvbdGVx
 const SYSTEM: Pubkey = anchor_lang::solana_program::pubkey!("11111111111111111111111111111111");
 
 const HUB_EID: u32 = 40245;
+/// The hub pad's wide identity (an EVM address left-padded), as the store
+/// learns it at init and the envelope carries it.
+const HUB_PAD: [u8; 32] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc3, 0x63, 0x0f, 0xa4, 0x9b, 0x56, 0x40, 0x31, 0x66,
+    0x9a, 0x0c, 0x14, 0x75, 0x09, 0x62, 0x0a, 0xe2, 0xfb, 0x1c, 0x77,
+];
 // Deliberately a WIDE token id (every byte set): the Solana side treats wire
 // token ids as opaque 32-byte seeds and must not impose any padding rule.
 const HUB_TOKEN: [u8; 32] = [0x8b; 32];
@@ -78,7 +84,13 @@ impl World {
             sender: peer_bytes32(),
             nonce: 1,
             guid: [0u8; 32],
-            message: msg.encode(),
+            // wrapped in the v5 inter-transport envelope, as the hub adapter sends it
+            message: Envelope {
+                src_sender: WireAddr(HUB_PAD),
+                dst_addr: WireAddr(self.store.to_bytes()),
+                payload: msg.encode(),
+            }
+            .encode(),
             extra_data: vec![],
         };
         let mut metas = spawn_gateway::accounts::LzReceive {
@@ -127,6 +139,7 @@ fn setup() -> World {
                 admin: w.payer.pubkey(),
                 endpoint: Pubkey::default(),
                 hub_eid: HUB_EID,
+                hub_pad: HUB_PAD,
             },
         }
         .data(),

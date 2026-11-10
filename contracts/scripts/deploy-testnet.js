@@ -153,8 +153,9 @@ async function main() {
         await (await adapter.setRoute(c.label, c.eid, b32(all[net].adapter))).wait()
         console.log(`  route hub -> ${net} ✓`)
       }
-      if ((await pad.gateways(c.label)) === ethers.ZeroAddress) {
-        await (await pad.setGateway(c.label, all[net].gateway)).wait()
+      if ((await pad.gateways(c.label)) === ethers.ZeroHash) {
+        // gateway ids are wide (v5): EVM gateways ride left-padded
+        await (await pad.setGateway(c.label, b32(all[net].gateway))).wait()
         console.log(`  pad.setGateway(${c.label}, ${net}) ✓`)
       }
     }

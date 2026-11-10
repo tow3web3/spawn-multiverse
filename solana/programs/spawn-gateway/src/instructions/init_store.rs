@@ -36,6 +36,7 @@ impl InitStore<'_> {
         store.bump = ctx.bumps.store;
         store.endpoint_program = params.endpoint;
         store.hub_eid = params.hub_eid;
+        store.hub_pad = params.hub_pad;
         store.usd_mint = Pubkey::default(); // set by init_usd_mint
 
         let t = &mut ctx.accounts.lz_receive_types_accounts;
@@ -63,4 +64,6 @@ pub struct InitStoreParams {
     pub admin: Pubkey,
     pub endpoint: Pubkey,
     pub hub_eid: u32,
+    /// The hub pad's wide identity (EVM address left-padded).
+    pub hub_pad: [u8; 32],
 }

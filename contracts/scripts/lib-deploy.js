@@ -1,5 +1,8 @@
 const { ethers } = require('hardhat')
 
+/** Gateway ids on the pad are wide (v5): EVM addresses ride left-padded. */
+const b32 = (addr) => ethers.zeroPadValue(addr, 32)
+
 /** The six user-facing chains. Label 0 is the hub (protocol-only). */
 const CHAINS = [
   { label: 1, id: 'solana' },
@@ -44,7 +47,7 @@ async function deployWorld() {
     ])
     await (await usd.setAgent(gateway.target)).wait()
     await (await messenger.register(gateway.target, c.label)).wait()
-    await (await pad.setGateway(c.label, gateway.target)).wait()
+    await (await pad.setGateway(c.label, b32(gateway.target))).wait()
     const dist = await ethers.deployContract('FeeDistributor', [usd.target])
     await (await dist.setAgent(gateway.target)).wait()
     await (await gateway.setDistributor(dist.target)).wait()
@@ -64,7 +67,6 @@ async function deployWorld() {
 async function deployWorldAsync() {
   const FEE = ethers.parseEther('0.001')
   const EID = (label) => 30_000 + label
-  const b32 = (addr) => ethers.zeroPadValue(addr, 32)
   const [funder] = await ethers.getSigners()
 
   const endpoint = await ethers.deployContract('MockLZEndpointV2', [FEE])
@@ -99,7 +101,7 @@ async function deployWorldAsync() {
     ])
     await (await usd.setAgent(gateway.target)).wait()
     await (await messenger.register(gateway.target)).wait()
-    await (await pad.setGateway(c.label, gateway.target)).wait()
+    await (await pad.setGateway(c.label, b32(gateway.target))).wait()
     const dist = await ethers.deployContract('FeeDistributor', [usd.target])
     await (await dist.setAgent(gateway.target)).wait()
     await (await gateway.setDistributor(dist.target)).wait()

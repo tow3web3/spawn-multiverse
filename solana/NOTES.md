@@ -140,7 +140,8 @@ and loaded into LiteSVM. Against that REAL stack,
   feed → DVN, quotes a real fee (~0.00099 SOL per message with today's
   devnet configs), the gas-tank PDA reimburses the payer, the ULN collects
   worker fees, the outbound nonce increments and the emitted packet embeds
-  our codec's bytes verbatim (asserted via the event CPI);
+  our codec's bytes verbatim (asserted via the event CPI) — since v5 the
+  ENVELOPED bytes, see below;
 - an underfunded tank refuses the send (`GW: gas tank cannot cover…`).
 
 Send-path surface (`src/instructions/send_to_hub.rs`):
@@ -161,11 +162,23 @@ Send-path surface (`src/instructions/send_to_hub.rs`):
   while send needs several of them writable — `send_to_hub` re-passes
   read-only clones for the quote CPI.
 
+**Envelope (v5):** between transports every LZ message is
+`abi.encode(bytes32 srcSender, bytes32 dstAddr, bytes payload)` — both
+seats wide, so this store can be sender or target. The program wraps every
+send (`src = store key, dst = store.hub_pad`) and unwraps + authenticates
+every receive (`src_sender == store.hub_pad`, `dst_addr == store key`)
+before the op decode; the EVM adapters produce and consume the exact same
+layout (cross-proven by the `envelopes` section of codec-vectors.json).
+`Store` gained `hub_pad` (the hub PAD's padded address — the protocol-level
+identity; the hub ADAPTER stays the LZ-level peer in PeerConfig), set via
+`init_store`'s new `hub_pad` param.
+
 **Devnet-only checklist (all that's left):**
 1. Fund `.keys/devnet.json` — budget **~4.6 SOL** (~480KB program ≈ 4.5 +
    wiring rent) **plus the gas tank** (~0.001 SOL per outbound message).
 2. `anchor deploy --provider.cluster devnet`, then exactly the local
-   sequence: `init_store` (real endpoint id), `set_peer_config` ×2 (hub
+   sequence: `init_store` (real endpoint id **+ hub_pad = the live pad,
+   left-padded**), `set_peer_config` ×2 (hub
    adapter + 4M options), `init_usd_mint`, the three endpoint wiring calls,
    fund the tank.
 3. Hub side: `setRoute(1, 40168, <store PDA bytes32>)` on the Base Sepolia
@@ -173,15 +186,19 @@ Send-path surface (`src/instructions/send_to_hub.rs`):
 4. Live smoke both directions, watched on LayerZero Scan testnet — the only
    thing no local test can prove: the REAL executor/DVN noticing and
    delivering (plus `lz_receive_types_v2` driven by the real executor), and
-   the hub-side acceptance of Solana-origin identities (see below).
+   (hub-side acceptance of Solana-origin identities is now in place — v5).
 5. Replaces the stale `app/smoke.cjs`.
 
-**Hub identity gap (flagged in 2a, still open, EVM-side):** the hub
-STORES creators/traders as `address`; a Solana-origin spawn/buy carries a
-wide 32-byte identity which the v4 hub rejects on the downcast. The hub
-needs bytes32 identities in `metas`/positions before Solana-origin flows
-land. EVM contracts work — outside this leg's scope, tracked for the
-parent.
+**Hub identity gap — RESOLVED EVM-side (protocol v5):** the hub now
+stores and authenticates ACTORS as `bytes32` end-to-end (Meta.creator,
+Trade/Spawned/DevClaimed events, claim auth), `pad.gateways` is
+`mapping(uint32 => bytes32)` so `setGateway(1, <store PDA>)` is now
+possible, and the only hub downcasts left are TOKEN ids (always hub EVM
+contracts). An EVM spoke still refuses to mint to a wide recipient
+("GW: bad recipient") — a wide identity can only cash out on its own
+chain. Proven in the hardhat suite (27 tests, incl. a wide creator
+spawning, earning and claiming with the payout packet inspected
+byte-for-byte).
 
 ## Sources
 

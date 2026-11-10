@@ -54,3 +54,20 @@ export function timeAgo(ts: number): string {
 export function creatureNum(n: number): string {
   return `#${String(n).padStart(3, '0')}`
 }
+
+/** Narrow a bytes32 actor (protocol v5 wire identity) to its EVM address
+ * when it is EVM-shaped (top 12 bytes zero); a wide Solana-style identity
+ * keeps all 32 bytes. Lowercase either way. */
+export function narrowActor(b: string): string {
+  const h = b.toLowerCase()
+  if (h.length === 66 && h.startsWith('0x' + '0'.repeat(24))) return '0x' + h.slice(26)
+  return h
+}
+
+/** Display an actor from either world: EVM addresses shorten the usual way,
+ * wide (Solana-style) identities wear a 🟣 marker. */
+export function fmtActor(a: string): string {
+  const n = narrowActor(a)
+  if (n.length <= 42) return `${n.slice(0, 6)}…${n.slice(-4)}`
+  return `🟣 ${n.slice(2, 6)}…${n.slice(-4)}`
+}

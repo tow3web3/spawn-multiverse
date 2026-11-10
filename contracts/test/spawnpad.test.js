@@ -235,39 +235,110 @@ describe('SPAWN! omnichain protocol', () => {
   })
 
   it('rejects messages that do not come from the protocol', async () => {
+    const b32 = (a) => ethers.zeroPadValue(a, 32)
     const token = await spawnVia(world.chains[0])
     const payload = ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint8', 'bytes'],
-      [2, ethers.AbiCoder.defaultAbiCoder().encode(['address', 'address', 'uint256'], [token, user.address, E(100)])],
+      [2, ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'bytes32', 'uint256'], [b32(token), b32(user.address), E(100)])],
     )
-    await expect(world.pad.connect(user).onOmniMessage(1, user.address, payload)).to.be.revertedWith(
+    await expect(world.pad.connect(user).onOmniMessage(1, b32(user.address), payload)).to.be.revertedWith(
       'PAD: not messenger',
     )
     await expect(
-      world.chains[0].gateway.connect(user).onOmniMessage(0, user.address, payload),
+      world.chains[0].gateway.connect(user).onOmniMessage(0, b32(user.address), payload),
     ).to.be.revertedWith('GW: not messenger')
-    await expect(world.messenger.connect(user).send(0, world.pad.target, payload)).to.be.revertedWith(
+    await expect(world.messenger.connect(user).send(0, b32(world.pad.target), payload)).to.be.revertedWith(
       'LOM: unknown sender',
     )
   })
 
-  it('rejects wire recipients whose top 12 bytes are not zero', async () => {
-    // Wire riders are bytes32 so Solana pubkeys fit; a value consumed as an
-    // EVM address must be zero-padded — dirty high bytes must revert.
+  it('wide token ids revert; wide identities never reach an EVM-local mint', async () => {
+    // v5: ACTORS may be wide (Solana pubkeys) — but token ids are hub EVM
+    // contracts and must downcast, and an EVM spoke must refuse to mint to a
+    // wide recipient.
     const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
-    const token = await spawnVia(world.chains[0])
+    const b32 = (a) => ethers.zeroPadValue(a, 32)
     const coder = ethers.AbiCoder.defaultAbiCoder()
-    const dirtyBuyer = '0x01' + '00'.repeat(11) + user.address.slice(2)
-    const payload = coder.encode(
-      ['uint8', 'bytes'],
-      [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [ethers.zeroPadValue(token, 32), dirtyBuyer, E(100)])],
-    )
+    const token = await spawnVia(world.chains[0])
     await impersonateAccount(world.messenger.target)
     await setBalance(world.messenger.target, E(1))
     const msgr = await ethers.getSigner(world.messenger.target)
     const src = world.chains[0]
-    await expect(
-      world.pad.connect(msgr).onOmniMessage(await src.gateway.chainLabel(), src.gateway.target, payload),
-    ).to.be.revertedWith('PAD: bad recipient')
+    const srcId = b32(src.gateway.target)
+    const label = await src.gateway.chainLabel()
+
+    // a wide TOKEN id is corruption — the hub refuses it
+    const wideToken = '0x01' + '00'.repeat(11) + token.slice(2)
+    const badTokenBuy = coder.encode(
+      ['uint8', 'bytes'],
+      [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [wideToken, b32(user.address), E(100)])],
+    )
+    await expect(world.pad.connect(msgr).onOmniMessage(label, srcId, badTokenBuy)).to.be.revertedWith(
+      'PAD: bad recipient',
+    )
+
+    // a wide BUYER is legal on the hub — but this spoke is EVM, so when the
+    // hub's synchronous delivery tries to mint to it, the GATEWAY refuses:
+    // the wide identity never reaches a local ERC20 mint.
+    const wideBuyer = '0x11' + 'ab'.repeat(31)
+    const wideBuy = coder.encode(
+      ['uint8', 'bytes'],
+      [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [b32(token), wideBuyer, E(100)])],
+    )
+    await expect(world.pad.connect(msgr).onOmniMessage(label, srcId, wideBuy)).to.be.revertedWith(
+      'GW: bad recipient',
+    )
+  })
+
+  it('a wide (Solana-style) creator owns, earns and claims like anyone', async () => {
+    // Simulated label-1 gateway over the sync world: inject hub-bound
+    // messages as the messenger, with actors that no EVM address can hold.
+    const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
+    const b32 = (a) => ethers.zeroPadValue(a, 32)
+    const coder = ethers.AbiCoder.defaultAbiCoder()
+    await impersonateAccount(world.messenger.target)
+    await setBalance(world.messenger.target, E(1))
+    const msgr = await ethers.getSigner(world.messenger.target)
+    const src = world.chains[0] // label 1 = solana in the local world
+    const srcId = b32(src.gateway.target)
+    const wideCreator = '0x22' + 'cd'.repeat(31)
+
+    // spawn with a wide creator, fee mode 2 (100% dev)
+    const spawn = coder.encode(
+      ['uint8', 'bytes'],
+      [1, coder.encode(['bytes32', 'string', 'string', 'string', 'uint256', 'uint8'], [wideCreator, 'SOL GLOOP', 'SGLP', '{}', 0, 2])],
+    )
+    await (await world.pad.connect(msgr).onOmniMessage(1, srcId, spawn)).wait()
+    const token = await world.pad.allTokens(0)
+    expect((await world.pad.metas(token)).creator).to.equal(wideCreator)
+
+    // an ordinary EVM user trades; fees accrue to the wide dev
+    const base = world.chains[2]
+    await (await base.usd.faucet(user, E(1_000))).wait()
+    await (await base.gateway.connect(user).buyToken(token, E(500))).wait()
+    const fees = await world.pad.feesOf(token)
+    expect(fees.dev).to.equal(E(5))
+
+    // the wide creator claims; the OP_PAYOUT re-materializes the exact oUSD
+    // on their chain — delivery works because the sync world's label-1 spoke
+    // credits by message, and the wide identity rides the wire intact.
+    const claim = coder.encode(
+      ['uint8', 'bytes'],
+      [4, coder.encode(['bytes32', 'bytes32'], [b32(token), wideCreator])],
+    )
+    // the sync spoke is EVM, so the final local mint must refuse the wide
+    // recipient — proving the payout LEFT the hub with the identity intact
+    // and that no EVM account can intercept it.
+    await expect(world.pad.connect(msgr).onOmniMessage(1, srcId, claim)).to.be.revertedWith(
+      'GW: bad recipient',
+    )
+    // and an EVM impostor (padded) cannot claim the wide dev's fees
+    const impostor = coder.encode(
+      ['uint8', 'bytes'],
+      [4, coder.encode(['bytes32', 'bytes32'], [b32(token), b32(user.address)])],
+    )
+    await expect(world.pad.connect(msgr).onOmniMessage(1, srcId, impostor)).to.be.revertedWith(
+      'PAD: not the dev',
+    )
   })
 })

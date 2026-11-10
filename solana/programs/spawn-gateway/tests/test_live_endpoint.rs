@@ -29,7 +29,7 @@ use {
         signature::{Keypair, Signer},
         transaction::VersionedTransaction,
     },
-    spawn_gateway::msg_codec::{SpawnMsg, U256, WireAddr},
+    spawn_gateway::msg_codec::{Envelope, SpawnMsg, U256, WireAddr},
     std::path::Path,
 };
 
@@ -59,6 +59,23 @@ fn hub_peer() -> [u8; 32] {
     let mut p = [0u8; 32];
     p[12..].copy_from_slice(&HUB_ADAPTER);
     p
+}
+
+/// The hub pad's wide identity: an arbitrary EVM-shaped word for the test.
+const HUB_PAD: [u8; 32] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc3, 0x63, 0x0f, 0xa4, 0x9b, 0x56, 0x40, 0x31, 0x66,
+    0x9a, 0x0c, 0x14, 0x75, 0x09, 0x62, 0x0a, 0xe2, 0xfb, 0x1c, 0x77,
+];
+
+/// What the wire must carry (v5): the op payload inside the inter-transport
+/// envelope — the store as protocol sender, the hub pad as target.
+fn enveloped(store: &Pubkey, inner: Vec<u8>) -> Vec<u8> {
+    Envelope {
+        src_sender: WireAddr(store.to_bytes()),
+        dst_addr: WireAddr(HUB_PAD),
+        payload: inner,
+    }
+    .encode()
 }
 
 /// Type-3 options paying the executor for 4M gas of lzReceive — bit-for-bit
@@ -332,6 +349,7 @@ fn setup_live() -> Live {
                 admin: w.payer.pubkey(),
                 endpoint: ENDPOINT,
                 hub_eid: HUB_EID,
+                hub_pad: HUB_PAD,
             },
         }
         .data(),
@@ -523,6 +541,7 @@ fn spawn_quotes_pays_and_emits() {
         fee_mode: 1,
     }
     .encode();
+    let expected = enveloped(&w.store, expected);
     assert_packet_carries(&meta, &expected);
     // the $5 dev buy burned
     let bal = u64::from_le_bytes(
@@ -563,6 +582,7 @@ fn buy_sell_claim_round_the_nonce() {
         usd_in: U256::from_spl_amount(5_000_000),
     }
     .encode();
+    let expected = enveloped(&w.store, expected);
     assert_packet_carries(&meta, &expected);
 
     // --- sell: plant a synced replica + bag, burn it, ship OP_SELL
@@ -627,6 +647,7 @@ fn buy_sell_claim_round_the_nonce() {
         tokens_in: U256::from_spl_amount(123_456_789),
     }
     .encode();
+    let expected = enveloped(&w.store, expected);
     assert_packet_carries(&meta, &expected);
 
     // --- claim: pure message
@@ -650,6 +671,7 @@ fn buy_sell_claim_round_the_nonce() {
         claimer: WireAddr::from_pubkey(&w.payer.pubkey()),
     }
     .encode();
+    let expected = enveloped(&w.store, expected);
     assert_packet_carries(&meta, &expected);
 }
 

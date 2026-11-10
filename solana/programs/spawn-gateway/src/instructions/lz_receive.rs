@@ -69,7 +69,16 @@ impl<'info> LzReceive<'info> {
         }
 
         let rest = &ctx.remaining_accounts[clear_len..];
-        match SpawnMsg::decode(&params.message)? {
+
+        // Unwrap the inter-transport envelope (v5): the LZ-level peer is the
+        // hub ADAPTER (checked above via PeerConfig); the envelope names the
+        // PROTOCOL sender and target. Only the hub pad may speak to us, and
+        // only messages addressed to this store are ours.
+        let env = msg_codec::Envelope::decode(&params.message)?;
+        require!(env.src_sender.0 == ctx.accounts.store.hub_pad, GatewayError::NotPeer);
+        require!(env.dst_addr.pubkey() == store_key, GatewayError::NotPeer);
+
+        match SpawnMsg::decode(&env.payload)? {
             SpawnMsg::SyncToken { hub_token, name, symbol } => {
                 handle_sync_token(ctx, rest, hub_token, name, symbol)
             }

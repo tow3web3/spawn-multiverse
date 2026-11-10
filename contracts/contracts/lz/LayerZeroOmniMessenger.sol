@@ -72,12 +72,19 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver {
 
     /* ----------------------- IOmniMessenger ----------------------- */
 
-    function send(uint32 dstChain, address dstAddr, bytes calldata payload) external {
+    function send(uint32 dstChain, bytes32 dstAddr, bytes calldata payload) external {
         require(senders[msg.sender], "LZM: unknown sender");
         uint32 eid = eidOf[dstChain];
         require(eid != 0 && peers[eid] != bytes32(0), "LZM: no route");
 
-        bytes memory message = abi.encode(msg.sender, dstAddr, payload);
+        // The inter-adapter envelope is bytes32-addressed (v5): a Solana
+        // destination or sender does not fit in 20 bytes. Local senders are
+        // EVM contracts, so they ride left-padded.
+        bytes memory message = abi.encode(
+            bytes32(uint256(uint160(msg.sender))),
+            dstAddr,
+            payload
+        );
         MessagingParams memory p = MessagingParams(eid, peers[eid], message, defaultOptions, false);
         uint256 fee = endpoint.quote(p, address(this)).nativeFee;
         require(address(this).balance >= fee, "LZM: gas tank empty");
@@ -96,11 +103,18 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver {
     ) external payable {
         require(msg.sender == address(endpoint), "LZM: not endpoint");
         require(peers[origin.srcEid] == origin.sender, "LZM: not a peer");
-        (address srcSender, address dstAddr, bytes memory payload) = abi.decode(
+        (bytes32 srcSender, bytes32 dstAddr, bytes memory payload) = abi.decode(
             message,
-            (address, address, bytes)
+            (bytes32, bytes32, bytes)
         );
-        IOmniReceiver(dstAddr).onOmniMessage(labelOf[origin.srcEid], srcSender, payload);
+        // We are an EVM chain, so the local target must downcast; the source
+        // sender stays wide — the receiver authenticates it as bytes32.
+        require(uint256(dstAddr) >> 160 == 0, "LZM: bad target");
+        IOmniReceiver(address(uint160(uint256(dstAddr)))).onOmniMessage(
+            labelOf[origin.srcEid],
+            srcSender,
+            payload
+        );
     }
 
     function allowInitializePath(Origin calldata origin) external view returns (bool) {

@@ -15,6 +15,10 @@ pub struct Store {
     pub endpoint_program: Pubkey,
     /// The hub's LayerZero eid (Base Sepolia testnet: 40245).
     pub hub_eid: u32,
+    /// The hub PAD's wide identity (its EVM address left-padded): the
+    /// envelope-level sender we accept and the target we address. The LZ
+    /// peer (the hub ADAPTER) is a different hop and lives in PeerConfig.
+    pub hub_pad: [u8; 32],
     /// This chain's oUSD stand-in mint (created by `init_usd_mint`).
     pub usd_mint: Pubkey,
 }

@@ -89,7 +89,31 @@ const vectors = CASES.map(([name, values, wide], i) => {
   }
 })
 
+// ADAPTER ENVELOPE (v5): between transports every message rides as
+// abi.encode(bytes32 srcSender, bytes32 dstAddr, bytes payload) — wide on
+// both seats so a Solana OApp store can be sender or target. The Solana
+// program wraps sends and unwraps receives with this exact layout.
+const STORE = '0x' + '42'.repeat(32) // a Solana-shaped OApp store id
+const envelope = (src, dst, payload) =>
+  coder.encode(['bytes32', 'bytes32', 'bytes'], [src, dst, payload])
+const ENVELOPES = [
+  // hub pad -> Solana store: a DELIVER to a wide recipient
+  { name: 'ENV_PAD_TO_STORE', src: PAD, dst: STORE, payload: vectors.find((v) => v.name === 'DELIVER' && v.wide).hex },
+  // Solana store -> hub pad: a BUY from a wide buyer
+  { name: 'ENV_STORE_TO_PAD', src: STORE, dst: PAD, payload: vectors.find((v) => v.name === 'BUY' && v.wide).hex },
+  // EVM-to-EVM stays the same shape, just padded seats
+  { name: 'ENV_EVM_TO_EVM', src: PAD, dst: B1, payload: vectors[0].hex },
+]
+const envelopes = ENVELOPES.map((e, i) => ({
+  idx: i,
+  name: e.name,
+  src: e.src,
+  dst: e.dst,
+  payload: e.payload,
+  hex: envelope(e.src, e.dst, e.payload),
+}))
+
 const out = path.join(__dirname, '..', '..', 'solana', 'tests', 'codec-vectors.json')
 fs.mkdirSync(path.dirname(out), { recursive: true })
-fs.writeFileSync(out, JSON.stringify(vectors, null, 1))
-console.log(`${vectors.length} vectors → ${path.relative(process.cwd(), out)}`)
+fs.writeFileSync(out, JSON.stringify({ ops: vectors, envelopes }, null, 1))
+console.log(`${vectors.length} op vectors + ${envelopes.length} envelope vectors → ${path.relative(process.cwd(), out)}`)
