@@ -27,7 +27,7 @@ export const Scene2a: React.FC = () => (
 // Price labels in a row at the top of the frame, one above each grey copy.
 // Each ticks through its own prices (script.ts): green flash on an up-tick,
 // pink on a down-tick, cream otherwise. The chips never agree.
-const num = (p: string) => Number(p.replace('$', ''))
+const num = (p: string) => parseFloat(p.replace(/[^0-9.]/g, ''))
 
 const PriceChip: React.FC<{ prices: readonly string[]; x: number; at: number; i: number }> = ({ prices, x, at, i }) => {
   const frame = useCurrentFrame()
@@ -278,7 +278,7 @@ export const Scene5: React.FC = () => {
   const tickAt = idx >= 0 ? f(S5.trades[idx].at) : -999
   const sinceTick = frame - tickAt
   const prev = idx > 0 ? S5.trades[idx - 1].price : S5.startPrice
-  const up = idx >= 0 && price > prev
+  const up = idx >= 0 && num(price) > num(prev)
   const flashing = idx >= 0 && sinceTick < 8
   const bump = idx >= 0 ? interpolate(sinceTick, [0, 2, 8], [1.12, 1.06, 1], { extrapolateRight: 'clamp' }) : 1
   const box = useSlam(f(0.15), { from: 1.4 })
@@ -316,8 +316,29 @@ export const Scene5: React.FC = () => {
               borderRadius: B.radius,
               boxShadow: B.shadow(16),
               transform: `scale(${bump})`,
+              position: 'relative',
             }}
           >
+            {/* what the number is: a small ink tab riding the board's top-left corner (no layout shift) */}
+            <div
+              style={{
+                position: 'absolute',
+                left: 26,
+                top: -26,
+                background: C.ink,
+                color: C.cream,
+                fontFamily: FONT.mono,
+                fontWeight: 700,
+                fontSize: 28,
+                lineHeight: 1,
+                letterSpacing: '0.14em',
+                padding: '8px 14px',
+                borderRadius: 8,
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {S5.boardLabel}
+            </div>
             {price}
           </div>
           <div style={{ display: 'flex', gap: 14 }}>

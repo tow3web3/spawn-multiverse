@@ -133,9 +133,9 @@ export const S2b = {
    */
   tickEvery: 0.5,
   tags: [
-    { x: 0.2, at: 0.15, prices: ['$0.0041', '$0.0043', '$0.0042', '$0.0045', '$0.0044', '$0.0041', '$0.0043', '$0.0046'] },
-    { x: 0.5, at: 0.4, prices: ['$0.0039', '$0.0037', '$0.0038', '$0.0036', '$0.0039', '$0.0037', '$0.0035', '$0.0038'] },
-    { x: 0.8, at: 0.65, prices: ['$0.0052', '$0.0054', '$0.0051', '$0.0053', '$0.0050', '$0.0052', '$0.0055', '$0.0053'] },
+    { x: 0.2, at: 0.15, prices: ['$14.1K', '$14.3K', '$14.2K', '$14.5K', '$14.4K', '$14.1K', '$14.3K', '$14.6K'] },
+    { x: 0.5, at: 0.4, prices: ['$12.9K', '$12.7K', '$12.8K', '$12.6K', '$12.9K', '$12.7K', '$12.5K', '$12.8K'] },
+    { x: 0.8, at: 0.65, prices: ['$16.2K', '$16.4K', '$16.1K', '$16.3K', '$16.0K', '$16.2K', '$16.5K', '$16.3K'] },
   ],
   title: { text: 'WRAPPED. BRIDGED. DIFFERENT PRICES.', at: 1.0 },
 }
@@ -177,7 +177,9 @@ export const S5 = {
   // rate 0.8: the 5 s clip covers 6.3 s of the 6.43 s shot
   media: { clip: 's05', still: 'k07', rate: 0.8 } as Media,
   darken: 0.35,
-  startPrice: '$0.0000056',
+  /** the board shows the token's MARKET CAP in dollars (what meme traders read), not its unit price */
+  boardLabel: 'MARKET CAP',
+  startPrice: '$15.0K',
   /** a ticket starts sliding this many frames before it lands */
   landFrames: 7,
   /**
@@ -185,9 +187,9 @@ export const S5 = {
    * On the kicks 26.73 / 27.92 / 28.98. `from` = its pipe's side.
    */
   trades: [
-    { who: 'LINA', chain: 'base', chainLabel: 'BASE', side: 'BUYS', amount: '$50', from: 'left', at: rel('S5', 26.73), price: '$0.0000061' },
-    { who: 'KENJI', chain: 'arbitrum', chainLabel: 'ARBITRUM', side: 'BUYS', amount: '$20', from: 'top', at: rel('S5', 27.92), price: '$0.0000063' },
-    { who: 'ADA', chain: 'optimism', chainLabel: 'OPTIMISM', side: 'SELLS', amount: '$10', from: 'right', at: rel('S5', 28.98), price: '$0.0000062' },
+    { who: 'LINA', chain: 'base', chainLabel: 'BASE', side: 'BUYS', amount: '$200', from: 'left', at: rel('S5', 26.73), price: '$15.4K' },
+    { who: 'KENJI', chain: 'arbitrum', chainLabel: 'ARBITRUM', side: 'BUYS', amount: '$100', from: 'top', at: rel('S5', 27.92), price: '$15.6K' },
+    { who: 'ADA', chain: 'optimism', chainLabel: 'OPTIMISM', side: 'SELLS', amount: '$50', from: 'right', at: rel('S5', 28.98), price: '$15.5K' },
   ] as const,
   title: { text: 'EVERY TRADE, FROM ANY CHAIN, HITS ONE MARKET.', at: 0.3 },
   title2: { text: 'ONE PRICE. EVERYWHERE.', at: rel('S5', bar(6)) }, // 30.05
