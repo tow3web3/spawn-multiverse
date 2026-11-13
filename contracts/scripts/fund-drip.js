@@ -1,6 +1,7 @@
 /**
  * Tops up the gas-drip wallet (the Netlify function that wets visitors'
- * burners) from the deployer, on the spoke testnets. Run after bridging:
+ * burners) from the deployer, on every user-facing testnet — Base Sepolia
+ * included since v7 made the hub chain a trading chain. Run after bridging:
  *
  *   node scripts/fund-drip.js
  */
@@ -9,6 +10,7 @@ const path = require('path')
 const { ethers } = require('ethers')
 
 const SPOKES = [
+  { name: 'Base Sepolia    ', rpc: 'https://sepolia.base.org' },
   { name: 'Optimism Sepolia', rpc: 'https://sepolia.optimism.io' },
   { name: 'Arbitrum Sepolia', rpc: 'https://sepolia-rollup.arbitrum.io/rpc' },
   { name: 'Ethereum Sepolia', rpc: 'https://ethereum-sepolia-rpc.publicnode.com' },

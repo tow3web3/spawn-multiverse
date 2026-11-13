@@ -192,11 +192,22 @@ async function main() {
     return w > 0n ? w : undefined
   })
   await (await dist.claim(rep)).wait()
-  const usdcPre = await usdc.balanceOf(dev.address)
-  await (await usd.unwrap(await usd.balanceOf(dev.address))).wait()
+  // Read the amount from the receipt, not from a balance: a load-balanced
+  // public RPC (OP Sepolia) can serve a stale balance right after the tx.
+  const unwrapRc = await (await usd.unwrap(await usd.balanceOf(dev.address))).wait()
+  const unwrapped = unwrapRc.logs
+    .map((l) => {
+      try {
+        return usd.interface.parseLog(l)
+      } catch {
+        return null
+      }
+    })
+    .find((e) => e?.name === 'Unwrapped')
+  if (!unwrapped) throw new Error('unwrap emitted no Unwrapped event')
   console.log(
     `✓ holder fees: $${ethers.formatEther(owed)} claimed locally, ` +
-      `$${ethers.formatUnits((await usdc.balanceOf(dev.address)) - usdcPre, 6)} unwrapped to USDC`,
+      `$${ethers.formatUnits(unwrapped.args.usdcOut, 6)} unwrapped to USDC`,
   )
 
   console.log('hub spot price:', ethers.formatEther(await pad.spotPrice(token)))
