@@ -97,7 +97,7 @@
     "gateway": "0x6ca105Caf5c697f809e197efeE1A20375D5f7caA",
     "dist": "0xFbc2568F1BF7F5B7B91FfA7ad7Cc1e18F715478A"
   },
-  "baseSepolia": {
+  "baseSepolia_v70_pre71": {
     "adapter": "0x4B7cD60a771a9f37410a955723A43F85232E9b91",
     "transport": "v7",
     "usd": "0x2700701D47A28084689D11337C7D4a0085e323b0",
@@ -117,7 +117,7 @@
       "at": "2026-11-13T17:24:10.753Z"
     }
   },
-  "optimismSepolia": {
+  "optimismSepolia_v70_pre71": {
     "adapter": "0xAD2dfBCE4bcE6659Be0A73dA3975c1361F300835",
     "transport": "v7",
     "usdc": "0xE42d44911375F8dA6615d8949beE2227390E459b",
@@ -135,7 +135,7 @@
       "at": "2026-11-13T17:24:32.145Z"
     }
   },
-  "arbitrumSepolia": {
+  "arbitrumSepolia_v70_pre71": {
     "adapter": "0x7f640D441DbAE547Db3cf822bD06a0BDBdD48953",
     "transport": "v7",
     "usdc": "0x7206107e3B1EA11af9143F3cADEa288Ff9De76f9",
@@ -151,6 +151,62 @@
       "delay": 0,
       "timelock": "0x4B7cD60a771a9f37410a955723A43F85232E9b91",
       "at": "2026-11-13T17:25:25.281Z"
+    }
+  },
+  "baseSepolia": {
+    "adapter": "0x6F0F64BCC949e92cf8210dED9006496F24FaA3BF",
+    "transport": "v7.1",
+    "usd": "0x6e2a794642B7370e16a08FF7b6373319d6b781Ca",
+    "pad": "0x12572Ae0262401565629dB68293d0D2550530DEc",
+    "venue": "0x4A18DDFd43a753122eE27d68f3bB013935C02aB3",
+    "usdc": "0x261dB55a8C3ad80e94547E01357AAAF49324D985",
+    "localUsd": "0x97375e8F377C40bC8619EFcE1a27489024384716",
+    "gateway": "0x8711E7AF156769E2ff947F42075fa46C3dd77E96",
+    "localDist": "0xf97ACe8Cfba3Ce576Df6024fbd922BD66838F93a",
+    "timelock": "0xDF18EFa1e1b41DeeB2484398BDe5b31748D75D64",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 0,
+      "timelock": "0xDF18EFa1e1b41DeeB2484398BDe5b31748D75D64",
+      "at": "2026-11-13T20:38:01.934Z"
+    }
+  },
+  "optimismSepolia": {
+    "adapter": "0x08d503Cf70E5aF4395E20d392Ab4fbF7df7D06e4",
+    "transport": "v7.1",
+    "usdc": "0xe41852f6d9ed190031728727aE316b56cEbA04E1",
+    "usd": "0x439dD0D1bA9799BcB2646EeD419DA6c33791FCe6",
+    "gateway": "0x41bcBBc8A1ea91d1b11868200b0C9DD3f1d5CB54",
+    "dist": "0xd1D8d07948546b4Cd8e878778E3143a15900e5A5",
+    "ready": true,
+    "timelock": "0x6F0F64BCC949e92cf8210dED9006496F24FaA3BF",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 0,
+      "timelock": "0x6F0F64BCC949e92cf8210dED9006496F24FaA3BF",
+      "at": "2026-11-13T20:38:31.535Z"
+    }
+  },
+  "arbitrumSepolia": {
+    "adapter": "0x13aDa7713Fd5f07D139f2F57fC4E9A5004e08b1d",
+    "transport": "v7.1",
+    "usdc": "0x1Af7d7eb1C96d1c2F722B459Af785fE1B655436E",
+    "usd": "0xC852a74cD1db2e014122815bA2bD64cE5a3A39De",
+    "gateway": "0x125213ef1bB6312967c140599198752B00F14a40",
+    "dist": "0xf5ce2baa26ce156A2Dd68327FDABE8d2a7521828",
+    "ready": true,
+    "timelock": "0x439dD0D1bA9799BcB2646EeD419DA6c33791FCe6",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 0,
+      "timelock": "0x439dD0D1bA9799BcB2646EeD419DA6c33791FCe6",
+      "at": "2026-11-13T20:39:17.639Z"
     }
   }
 }
