@@ -1,0 +1,5 @@
+node_modules
+out
+# generated media: large, kept on this machine only (regenerable from the Higgsfield jobs)
+public/clips
+public/keyframes

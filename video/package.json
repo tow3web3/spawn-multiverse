@@ -1,0 +1,28 @@
+{
+  "name": "spawn-film",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "assets": "node scripts/assets.mjs",
+    "prestart": "node scripts/assets.mjs",
+    "start": "remotion studio",
+    "prerender": "node scripts/assets.mjs",
+    "render": "remotion render Film out/spawn-film-draft.mp4 --codec h264 --crf 18",
+    "prestill": "node scripts/assets.mjs",
+    "still": "remotion still Film",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.543",
+    "@remotion/google-fonts": "4.0.543",
+    "@remotion/media-utils": "4.0.543",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.543"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "typescript": "5.9.3"
+  }
+}
