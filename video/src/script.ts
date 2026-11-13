@@ -43,18 +43,23 @@ export type Media = {
 export const f = (s: number) => Math.round(s * FPS)
 
 /**
- * THE CHAINS — one table, read by every shot. Flip `status` to 'live' and the
- * chain's "SOON" tag disappears from the whole film.
+ * THE CHAINS — one table, read by every shot. A chain marked 'soon' gets a
+ * small "SOON" tag wherever it is named or shown; 'live' shows it plain.
+ *
+ * 2026-11-13: the owner asked for all six to be shown without any SOON tag
+ * ("ça marchera"). The film is therefore AHEAD of the product until BNB Chain,
+ * Ethereum and Solana are really live — put 'soon' back on a chain to tag it.
  */
 export type ChainStatus = 'live' | 'soon'
+const row = <I extends string>(id: I, label: string, status: ChainStatus) => ({ id, label, status })
 export const CHAINS = [
-  { id: 'base', label: 'BASE', status: 'live' },
-  { id: 'arbitrum', label: 'ARBITRUM', status: 'live' },
-  { id: 'optimism', label: 'OPTIMISM', status: 'live' },
-  { id: 'bnb', label: 'BNB CHAIN', status: 'soon' },
-  { id: 'ethereum', label: 'ETHEREUM', status: 'soon' },
-  { id: 'solana', label: 'SOLANA', status: 'soon' },
-] as const satisfies readonly { id: string; label: string; status: ChainStatus }[]
+  row('base', 'BASE', 'live'),
+  row('arbitrum', 'ARBITRUM', 'live'),
+  row('optimism', 'OPTIMISM', 'live'),
+  row('bnb', 'BNB CHAIN', 'live'),
+  row('ethereum', 'ETHEREUM', 'live'),
+  row('solana', 'SOLANA', 'live'),
+] as const
 export type ChainKey = (typeof CHAINS)[number]['id']
 export const chain = (id: ChainKey) => CHAINS.find((c) => c.id === id)!
 /** the one status marker in the film */
@@ -240,28 +245,26 @@ export const S7 = {
 }
 
 // ───────────────────────────── S7b THE DOORS
-// Six doors in a slight arc; the live chains' doors stand open. Each door gets
-// its chain's logo chip; a 'soon' chain gets a SOON tag on its blank sign.
+// Six OPEN doors on one rope, one per chain; each door gets its chain's logo
+// chip (a 'soon' chain would also get a SOON tag at `sign`).
 export const S7b = {
-  // s12 is a locked-off camera: no drift, overlays pinned to the doors.
-  // rate 0.6 uses only the first ~2.6 s: from ~3.0 s in the clip the yellow
-  // door starts to open, and doors carrying SOON must stay closed.
-  media: { clip: 's12', still: 'k12', clipIn: 0, rate: 0.6, drift: [1.0, 1.0] } as Media,
+  // s13 is a locked-off camera: no drift, overlays pinned to the doors.
+  media: { clip: 's13', still: 'k13', clipIn: 0, rate: 1, drift: [1.0, 1.0] } as Media,
   /** overlay layer scale over the shot, if the clip turns out to move */
   follow: { scale: [1.0, 1.0] as [number, number], origin: '50% 50%' },
   /** in the dark floor band, centred, clear of the creature (box ends y≈0.79) */
   title: { text: 'SIX CHAINS. ONE TOKEN. ONE PRICE.', at: 0 },
   /**
-   * Measured on s12 (fractions of the frame): door centre x, the y of the
+   * Measured on k13 / s13 (fractions of the frame): door centre x, the y of the
    * logo chip's top (the chips follow the arc of door tops), the blank sign.
    */
   doors: [
-    { chain: 'base', x: 0.094, chipY: 0.07, at: rel('S7b', 43.2) },
-    { chain: 'arbitrum', x: 0.25, chipY: 0.12, at: rel('S7b', 43.2) },
-    { chain: 'optimism', x: 0.41, chipY: 0.15, at: rel('S7b', 43.2) },
-    { chain: 'bnb', x: 0.586, chipY: 0.15, sign: { x: 0.585, y: 0.41 }, at: rel('S7b', 43.98) },
-    { chain: 'ethereum', x: 0.75, chipY: 0.12, sign: { x: 0.745, y: 0.41 }, at: rel('S7b', 45.05) },
-    { chain: 'solana', x: 0.914, chipY: 0.07, sign: { x: 0.908, y: 0.41 }, at: rel('S7b', 46.12) },
+    { chain: 'base', x: 0.104, chipY: 0.085, at: rel('S7b', 43.2) },
+    { chain: 'arbitrum', x: 0.27, chipY: 0.145, at: rel('S7b', 43.2) },
+    { chain: 'optimism', x: 0.423, chipY: 0.175, at: rel('S7b', 43.2) },
+    { chain: 'bnb', x: 0.577, chipY: 0.175, sign: { x: 0.577, y: 0.41 }, at: rel('S7b', 43.98) },
+    { chain: 'ethereum', x: 0.73, chipY: 0.145, sign: { x: 0.73, y: 0.41 }, at: rel('S7b', 45.05) },
+    { chain: 'solana', x: 0.894, chipY: 0.085, sign: { x: 0.894, y: 0.41 }, at: rel('S7b', 46.12) },
   ] as const,
 }
 

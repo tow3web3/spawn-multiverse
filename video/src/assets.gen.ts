@@ -17,8 +17,7 @@ export const STILLS: Record<string, string> = {
   "k08": "keyframes/k08.png",
   "k09": "keyframes/k09.png",
   "k10": "keyframes/k10.png",
-  "k11": "keyframes/k11.png",
-  "k12": "keyframes/k12.png"
+  "k13": "keyframes/k13.png"
 }
 export const CLIPS: Record<string, ClipInfo> = {
   "s01": {
@@ -105,14 +104,8 @@ export const CLIPS: Record<string, ClipInfo> = {
     "height": 1076,
     "durationInFrames": 150
   },
-  "s11": {
-    "src": "clips/s11.mp4",
-    "width": 1928,
-    "height": 1076,
-    "durationInFrames": 150
-  },
-  "s12": {
-    "src": "clips/s12.mp4",
+  "s13": {
+    "src": "clips/s13.mp4",
     "width": 1928,
     "height": 1076,
     "durationInFrames": 150
