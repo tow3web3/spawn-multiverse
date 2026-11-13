@@ -6,6 +6,10 @@ contracts/artifacts
 contracts/cache
 deployments/local-run
 contracts/.env.drip
+# the protocol owner's wallet (timelock proposer/executor) — never committed
+contracts/.env.owner
+contracts/deployments/logs
+.claude/worktrees
 
 # Local Netlify folder
 .netlify

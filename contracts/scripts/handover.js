@@ -8,6 +8,8 @@
  *
  * On mainnet it is DRY unless SPAWN_MAINNET_CONFIRM is set. An EOA owner is
  * allowed but warned about loudly. SPAWN_TIMELOCK_DELAY overrides the 48h.
+ * SPAWN_OPERATOR names a day-to-day operator other than OWNER (e.g. the hot
+ * ops key that runs tune-fees.js / keeper-pull.js); default: OWNER.
  */
 const { ethers, network } = require('hardhat')
 const { getProfile, netKeyOf } = require('../config/profiles')
@@ -22,6 +24,7 @@ async function main() {
     netKey: netKeyOf(network.name),
     signer,
     owner: process.env.SPAWN_OWNER,
+    operator: process.env.SPAWN_OPERATOR || undefined,
     guardian: process.env.SPAWN_GUARDIAN,
   })
 }

@@ -271,3 +271,70 @@ describe('deploy & ops tooling (profile-driven, in-process)', function () {
     expect((await status({ profile, providers, inflightUsdc: 30, log: quiet })).ok).to.equal(true)
   })
 })
+
+/**
+ * The hand-over with a named OPERATOR: custody and topology go behind the
+ * timelock owned by OWNER, while a hot key keeps the day-to-day tuning.
+ */
+describe('hand-over with a separate operator (hot ops key)', function () {
+  this.timeout(300_000)
+  const HUB = 'baseSepolia'
+
+  it('the deployer stays operator and nothing more: it can tune and unpause, never rewire', async () => {
+    const [deployer, , , owner, guardian] = await ethers.getSigners()
+    const endpoint = await ethers.deployContract('MockLZEndpointV2', [E('0.001')])
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-operator-'))
+    const t = PROFILES.testnet
+    const profile = {
+      ...t,
+      nets: { [HUB]: { ...t.nets[HUB] } },
+      endpoint: endpoint.target,
+      stateFile: path.join(dir, 'state.json'),
+      manifestFile: path.join(dir, 'manifest.json'),
+      sponsored: false,
+      gasToHub: 6_000_000n,
+      tank: { mode: 'fixed', hub: E('0.01'), spoke: 0n },
+      timelockDelay: 48 * 3600,
+    }
+    const providers = { [HUB]: ethers.provider }
+    const run = (extra = {}) =>
+      deployNet({ profile, netKey: HUB, signer: deployer, dry: false, preflight: false, providers, log: quiet, ...extra })
+    expect((await run()).check.ok).to.equal(true)
+
+    const res = await handover({
+      profile, netKey: HUB, signer: deployer, owner: owner.address, operator: deployer.address, guardian: guardian.address, log: quiet,
+    })
+    const s = loadState(profile.stateFile)[HUB]
+    expect(s.handover.operator).to.equal(deployer.address)
+    expect(s.handover.owner).to.equal(owner.address)
+
+    const pad = await ethers.getContractAt('SpawnPad', s.pad)
+    const adapter = await ethers.getContractAt('LayerZeroOmniMessenger', s.adapter)
+    const vault = await ethers.getContractAt('OmniUSD', s.localUsd)
+    for (const c of [pad, adapter, vault]) {
+      expect(await c.admin()).to.equal(res.timelock.target)
+      expect(await c.operator()).to.equal(deployer.address)
+      expect(await c.guardian()).to.equal(guardian.address)
+    }
+    // the timelock answers to OWNER alone
+    expect(await res.timelock.hasRole(await res.timelock.PROPOSER_ROLE(), owner.address)).to.equal(true)
+    expect(await res.timelock.hasRole(await res.timelock.PROPOSER_ROLE(), deployer.address)).to.equal(false)
+    expect(await res.timelock.hasRole(await res.timelock.DEFAULT_ADMIN_ROLE(), deployer.address)).to.equal(false)
+
+    // operator powers still work from the hot key…
+    await (await pad.connect(guardian).pause()).wait()
+    await (await pad.unpause()).wait()
+    await (await vault.setDepositCap(U(100))).wait()
+    // …admin powers do not
+    await expect(pad.setAutoDrop(6, true)).to.be.revertedWith('ROLES: not admin')
+    await expect(adapter.recover(deployer.address)).to.be.revertedWith('ROLES: not admin')
+    await expect(vault.setPeer(6, 2, b32(deployer.address))).to.be.revertedWith('ROLES: not admin')
+    await expect(pad.setOperator(owner.address)).to.be.revertedWith('ROLES: not admin')
+
+    // the deploy script re-runs clean and does not try to move the operator
+    const again = await run()
+    expect(again.blocked).to.deep.equal([])
+    expect(again.check.ok).to.equal(true)
+    expect(await pad.operator()).to.equal(deployer.address)
+  })
+})

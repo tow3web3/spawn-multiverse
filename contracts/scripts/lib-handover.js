@@ -28,6 +28,11 @@ async function handover(opts) {
   const provider = signer.provider
   const owner = opts.owner && ethers.getAddress(opts.owner)
   const guardian = opts.guardian && ethers.getAddress(opts.guardian)
+  // The operator is OWNER unless named otherwise. Naming a hot key keeps
+  // day-to-day tuning (reply budgets, legs, caps, rebalancing between the
+  // protocol's own vaults, unpause) scriptable; it can never move funds out
+  // of the protocol or change topology — those stay behind the timelock.
+  const operator = opts.operator ? ethers.getAddress(opts.operator) : owner
   if (!owner || owner === ethers.ZeroAddress) throw new Error('OWNER is required (SPAWN_OWNER=0x…) and cannot be zero')
   if (!guardian || guardian === ethers.ZeroAddress) throw new Error('GUARDIAN is required (SPAWN_GUARDIAN=0x…)')
   if (same(owner, signer.address)) throw new Error('OWNER is the deployer — handing over to yourself is not a hand-over')
@@ -40,7 +45,12 @@ async function handover(opts) {
 
   log(`hand-over — ${profile.name}/${netKey} — deployer ${signer.address}${dry ? ' — DRY RUN' : ''}`)
   log(`  OWNER    ${owner}`)
+  log(`  OPERATOR ${operator}${same(operator, owner) ? ' (OWNER)' : ''}`)
   log(`  GUARDIAN ${guardian}`)
+  if (same(operator, signer.address)) {
+    log('  ⚠ the deployer stays OPERATOR: a hot key that can tune fees and caps, rebalance between the')
+    log('    protocol vaults and unpause — never withdraw, never rewire. OWNER can replace it through the timelock.')
+  }
   log(`  delay    ${delay}s (${(delay / 3600).toFixed(1)}h)`)
   if ((await provider.getCode(owner)) === '0x') {
     log('  ⚠⚠⚠ OWNER HAS NO CODE: it is a plain key (EOA), not a multisig.')
@@ -69,7 +79,7 @@ async function handover(opts) {
   // 0. the fast roles, while the deployer can still name them
   for (const { key, c } of contracts) {
     if (!same(await c.admin(), signer.address)) continue
-    if (!same(await c.operator(), owner)) await send(`${key}.setOperator(OWNER)`, () => c.setOperator(owner))
+    if (!same(await c.operator(), operator)) await send(`${key}.setOperator(OPERATOR)`, () => c.setOperator(operator))
     if (!same(await c.guardian(), guardian)) await send(`${key}.setGuardian(GUARDIAN)`, () => c.setGuardian(guardian))
   }
 
@@ -165,7 +175,7 @@ async function handover(opts) {
   for (const { key, c } of contracts) {
     want(`${key}.admin is the timelock`, same(await c.admin(), timelock.target))
     want(`${key}.pendingAdmin is empty`, (await c.pendingAdmin()) === ethers.ZeroAddress)
-    want(`${key}.operator is OWNER`, same(await c.operator(), owner))
+    want(`${key}.operator is OPERATOR`, same(await c.operator(), operator))
     want(`${key}.guardian is GUARDIAN`, same(await c.guardian(), guardian))
   }
   const endpoint = new ethers.Contract(profile.endpoint, ENDPOINT_ABI, provider)
@@ -181,12 +191,16 @@ async function handover(opts) {
   want('the timelock is its own role admin', await timelock.hasRole(ROLE_ADMIN, timelock.target))
   if (problems.length) throw new Error(`hand-over incomplete:\n  - ${problems.join('\n  - ')}`)
 
-  state.handover = { owner, guardian, delay, timelock: timelock.target, at: new Date().toISOString() }
+  state.handover = { owner, operator, guardian, delay, timelock: timelock.target, at: new Date().toISOString() }
   const fresh = loadState(stateFile)
   fresh[netKey] = state
   saveState(stateFile, fresh)
-  log(`  ✓ hand-over complete: ${contracts.length} contracts answer to ${timelock.target}; the deployer holds nothing`)
-  return { timelock, owner, guardian, delay, gasUsed, contracts: contracts.map((x) => x.key) }
+  const keeps = [same(operator, signer.address) && 'operator', same(guardian, signer.address) && 'guardian'].filter(Boolean)
+  log(
+    `  ✓ hand-over complete: ${contracts.length} contracts answer to ${timelock.target}; the deployer holds ` +
+      (keeps.length ? `no admin power (it stays ${keeps.join(' + ')})` : 'nothing'),
+  )
+  return { timelock, owner, operator, guardian, delay, gasUsed, contracts: contracts.map((x) => x.key) }
 }
 
 module.exports = { handover }

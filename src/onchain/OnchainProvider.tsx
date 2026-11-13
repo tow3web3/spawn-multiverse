@@ -80,6 +80,7 @@ import {
   usdcAbi,
   type Manifest,
 } from './abi'
+import { rpcTransport } from './rpc'
 import type { FaceId } from '../components/Faces'
 
 const FEE_MODE_NAME: readonly FeeMode[] = ['holders', 'split', 'dev', 'burn']
@@ -500,7 +501,7 @@ export function OnchainProvider({
     return createWalletClient({
       account: burnerRef.current!,
       chain: c.chain,
-      transport: http(c.chain.rpcUrls.default.http[0]),
+      transport: rpcTransport(c.chain.id, c.chain.rpcUrls.default.http[0]),
     })
   }
 
@@ -947,7 +948,10 @@ export function OnchainProvider({
 
         const hubChain = mkChain(manifest.chainId, manifest.rpc)
         hubChainRef.current = hubChain
-        const hub = createPublicClient({ chain: hubChain, transport: http(manifest.rpc, { batch: true }) })
+        const hub = createPublicClient({
+          chain: hubChain,
+          transport: rpcTransport(manifest.chainId, manifest.rpc, { batch: true }),
+        })
         await hub.getChainId()
         hubClientRef.current = hub
         // the chain's clock vs this browser's, once (see skewRef). The
@@ -977,7 +981,7 @@ export function OnchainProvider({
             const chain = sameAsHub ? hubChain : mkChain(chainId, rpc)
             const client = sameAsHub
               ? hub
-              : createPublicClient({ chain, transport: http(rpc, { batch: true }) })
+              : createPublicClient({ chain, transport: rpcTransport(chainId, rpc, { batch: true }) })
             let dist: Address | null = c.dist ?? null
             if (!dist) {
               try {

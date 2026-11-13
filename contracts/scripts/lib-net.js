@@ -844,7 +844,7 @@ async function deployNet(opts) {
   // roles back), else the deployer
   const handed = ctx.state.handover
   const roles = opts.roles ?? {
-    operator: ethers.getAddress(process.env.SPAWN_OPERATOR ?? handed?.owner ?? signer.address),
+    operator: ethers.getAddress(process.env.SPAWN_OPERATOR ?? handed?.operator ?? handed?.owner ?? signer.address),
     guardian: ethers.getAddress(process.env.SPAWN_GUARDIAN ?? handed?.guardian ?? signer.address),
   }
   ctx.roles = roles

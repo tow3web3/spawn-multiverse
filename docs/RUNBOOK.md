@@ -79,6 +79,25 @@ failing; anything else it flags is a stop.
 
 ## 3. Mainnet deploy
 
+**The short way.** §3–§5 are wrapped in one resumable script, and §6 in a
+second one:
+
+```bash
+bash scripts/launch-mainnet.sh                 # preflight → deploy → DVNs → fees → canary → status
+bash scripts/finish-mainnet.sh 0x<OWNER>       # hand-over, then the launch deposit caps
+```
+
+`launch-mainnet.sh` opens the vaults with a **canary cap** (100 USDC each,
+`SPAWN_CANARY_CAP_USDC`) so the canary trades are the only exposure until
+the hand-over; `finish-mainnet.sh` refuses an OWNER that has never sent a
+transaction on Base (an address nobody can sign for would freeze the admin
+for good), keeps the deployer hot key as **operator and guardian** (tuning,
+caps, pause — never custody or topology; `SPAWN_OPERATOR` in `handover.js`),
+and then raises the caps with `scripts/set-cap.js` (25,000 USDC,
+`SPAWN_LAUNCH_CAP_USDC`). `SPAWN_LAUNCH_PROFILE=testnet` rehearses the first
+script on the public testnets. The rest of this section is what those
+scripts run, step by step.
+
 Every mainnet command is a **dry run** — preflight and plan, zero
 transactions — unless `SPAWN_MAINNET_CONFIRM=I_UNDERSTAND_THIS_IS_REAL_MONEY`
 is set. Run each one dry first and read the plan.
