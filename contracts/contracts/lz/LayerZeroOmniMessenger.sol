@@ -22,6 +22,17 @@ import {Roles} from "../Roles.sol";
 /// accepts registered protocol contracts, and the source chain label is
 /// derived from the packet's srcEid — never from message content.
 ///
+/// AN UNSET PEER IS NEVER A MATCH (v7.1, SPEC F-11). `peers[eid]` is
+/// bytes32(0) for every chain nobody configured, and `labelOf[eid]` is 0 —
+/// the HUB's label. Comparing the packet's sender with the stored peer and
+/// nothing else therefore accepts a packet whose sender is bytes32(0) from
+/// ANY unconfigured chain, and hands it on as a message from the hub. No
+/// user can send one, but LayerZero's DEFAULT receive library and verifiers
+/// for that chain could deliver one — and custody would then rest on those
+/// defaults instead of the verifier set pinned for our own pathways. So a
+/// chain is a peer only if a peer was SET for it (`_isPeer`), exactly like
+/// LayerZero's own OApp base (`NoPeer`).
+///
 /// WHO PAYS (v7). LayerZero charges a native fee per message, and a message
 /// usually causes replies (a BUY causes a DELIVER). The rule is that whoever
 /// causes a message pays for it AND for the replies it triggers:
@@ -133,6 +144,7 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     /// speaks for (hub adapter: pad -> 0, the hub chain's gateway -> its
     /// label). The label is what a loopback hands the receiver as source.
     function register(address sender_, uint32 label) external onlyAdmin {
+        require(sender_ != address(0), "LZM: zero sender");
         senders[sender_] = true;
         labelOfSender[sender_] = label;
         emit SenderRegistered(sender_, label);
@@ -290,11 +302,15 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
         bytes calldata
     ) external payable {
         require(msg.sender == address(endpoint), "LZM: not endpoint");
-        require(peers[origin.srcEid] == origin.sender, "LZM: not a peer");
+        require(_isPeer(origin.srcEid, origin.sender), "LZM: not a peer");
         (bytes32 srcSender, bytes32 dstAddr, bytes memory payload) = abi.decode(
             message,
             (bytes32, bytes32, bytes)
         );
+        // A message always names its source: receivers authenticate it by
+        // comparing it with an address they stored, and an address they
+        // never stored is bytes32(0) too.
+        require(srcSender != bytes32(0), "LZM: no sender");
         // We are an EVM chain, so the local target must downcast; the source
         // sender stays wide — the receiver authenticates it as bytes32.
         require(uint256(dstAddr) >> 160 == 0, "LZM: bad target");
@@ -305,8 +321,18 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
         );
     }
 
+    /// The endpoint asks this before it lets a new (srcEid, sender) path
+    /// carry its first packet. Same rule as `lzReceive`: only a SET peer.
     function allowInitializePath(Origin calldata origin) external view returns (bool) {
-        return peers[origin.srcEid] == origin.sender;
+        return _isPeer(origin.srcEid, origin.sender);
+    }
+
+    /// `sender` is the adapter this chain was told to believe for `srcEid`.
+    /// An eid with no route has peer bytes32(0): it matches NOTHING — not
+    /// even a packet whose sender is bytes32(0) (see the contract header).
+    function _isPeer(uint32 srcEid, bytes32 sender) internal view returns (bool) {
+        bytes32 peer = peers[srcEid];
+        return peer != bytes32(0) && peer == sender;
     }
 
     /// 0 = unordered delivery; the protocol is order-independent per design

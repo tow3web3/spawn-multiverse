@@ -60,7 +60,9 @@ contract OmniUSDLocal is ERC20, ReentrancyGuard, Roles {
     /// On the USDC universe every such amount is at least 1e12 — one USDC
     /// unit — and the gateway imposes the same floor on its oUSD-denominated
     /// paths (`MIN_AMOUNT`). An 18-decimal dollar could go below it; the
-    /// immutable gateway cannot be taught the floor, so the vault holds it.
+    /// gateway only checks `> 0` on its dollar-token path, so the vault
+    /// holds the floor (`OmniUSD` has the same constant and the same check
+    /// since v7.1 — there it can only bite a deposit that credited nothing).
     uint256 public constant MIN_DEPOSIT = 1e12;
 
     uint32 public immutable chainLabel;

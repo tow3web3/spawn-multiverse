@@ -16,6 +16,7 @@ describe('contract sizes', () => {
     'SpawnGateway',
     'SpawnToken',
     'OmniUSD',
+    'OmniUSDLocal',
     'FeeDistributor',
     'InternalCurveVenue',
     'LayerZeroOmniMessenger',

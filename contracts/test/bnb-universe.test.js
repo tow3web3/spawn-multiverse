@@ -399,7 +399,8 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     /** What OmniUSDLocal deliberately does not have. */
     const REMOVED_FUNCTIONS = ['tokenMessenger', 'peers', 'setPeer', 'rebalance', 'CCTP_FINALITY_STANDARD']
     const REMOVED_EVENTS = ['PeerSet', 'Rebalanced']
-    const ADDED_FUNCTIONS = ['MIN_DEPOSIT']
+    // v7.1: OmniUSD carries the same MIN_DEPOSIT floor, so the vault adds nothing
+    const ADDED_FUNCTIONS = []
     let omni, local
 
     before(async () => {
@@ -424,7 +425,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
         expect(mine, `missing ${f.format('sighash')}`).to.not.equal(null)
         expect(shape(mine), f.format('sighash')).to.deep.equal(shape(f))
       }
-      // …and it adds nothing but the documented constant
+      // …and it adds nothing at all
       const extra = local.fragments
         .filter((f) => f.type === 'function' && !fns.some((o) => o.selector === f.selector))
         .map((f) => f.name)
@@ -452,7 +453,16 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       const callsOn = (code) => new Set([...code.matchAll(/\b_?usd\.(\w+)\s*\(/g)].map((m) => m[1]))
       const gatewayCalls = callsOn(src('SpawnGateway.sol'))
       const distributorCalls = callsOn(src('FeeDistributor.sol'))
-      expect([...gatewayCalls].sort()).to.deep.equal(['bridgeBurn', 'bridgeMint', 'depositFor', 'payout', 'usdc'])
+      // (v7.1: `SCALE` and `balanceOf` are read by the `*Min` slippage checks)
+      expect([...gatewayCalls].sort()).to.deep.equal([
+        'SCALE',
+        'balanceOf',
+        'bridgeBurn',
+        'bridgeMint',
+        'depositFor',
+        'payout',
+        'usdc',
+      ])
       expect([...distributorCalls].sort()).to.deep.equal(['transfer'])
       for (const name of [...gatewayCalls, ...distributorCalls]) {
         const theirs = omni.getFunction(name)
@@ -913,29 +923,37 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       expect(await u.dollar.balanceOf(u.usd.target)).to.equal(u.T(1_000))
     })
 
-    // This pins what the adapter — the same bytecode that is live on the USDC
-    // universe — does today. It is not reachable by a user: LayerZero itself
-    // would have to deliver such a packet (a source chain where an OApp can
-    // have the all-zero address, or the receive library / verifier set that
-    // applies to a chain we never configured, i.e. LayerZero's defaults).
-    // LayerZero's own OApp base refuses this case ("NoPeer"); ours does not.
-    it('LayerZero adapter — KNOWN EXPOSURE: a packet delivered with an ALL-ZERO sender from a peerless chain is taken for the hub and paid', async () => {
+    // SPEC F-11. The v7.0 adapter took this packet for the hub and paid it
+    // (an unset peer is bytes32(0), an unset label is 0 — the hub's label);
+    // v71.test.js replays it against a frozen copy of that adapter. It was
+    // never reachable by a user: LayerZero itself would have to deliver such
+    // a packet (a source chain where an OApp can have the all-zero address,
+    // or the receive library / verifier set that applies to a chain we never
+    // configured, i.e. LayerZero's defaults). The v7.1 adapter refuses it,
+    // like LayerZero's own OApp base ("NoPeer") — and THIS universe has no
+    // route at all, so every chain on earth is a chain with no peer.
+    it('LayerZero adapter: a packet with an ALL-ZERO sender from a peerless chain is refused, on a chain with no route at all (F-11)', async () => {
       const u = await deployUniverse()
       await seed(u)
       const { message } = forgedPayout(u, stranger.address, E(1_000))
-      const origin = { srcEid: FOREIGN_EID, sender: ethers.ZeroHash, nonce: 1 }
-
-      // an unset peer is bytes32(0), an unset label is 0 — the hub's label
-      expect(await u.messenger.peers(FOREIGN_EID)).to.equal(ethers.ZeroHash)
-      expect(await u.messenger.labelOf(FOREIGN_EID)).to.equal(0n)
-      expect(await u.messenger.allowInitializePath(origin)).to.equal(true)
-
       const ep = await asEndpoint(u)
-      await (await u.messenger.connect(ep).lzReceive(origin, ethers.ZeroHash, message, stranger.address, '0x')).wait()
-      expect(await u.dollar.balanceOf(stranger)).to.equal(u.T(1_000))
-      expect(await u.dollar.balanceOf(u.usd.target)).to.equal(0n)
-      // the user's claim is still on the books — and now backed by nothing
+
+      for (const srcEid of [FOREIGN_EID, EID, 0, 30168]) {
+        const origin = { srcEid, sender: ethers.ZeroHash, nonce: 1 }
+        // the two defaults that used to line up: no peer, and the hub's label
+        expect(await u.messenger.peers(srcEid)).to.equal(ethers.ZeroHash)
+        expect(await u.messenger.labelOf(srcEid)).to.equal(0n)
+        expect(await u.messenger.allowInitializePath(origin), `eid ${srcEid}`).to.equal(false)
+        await expect(
+          u.messenger.connect(ep).lzReceive(origin, ethers.ZeroHash, message, stranger.address, '0x'),
+          `eid ${srcEid}`,
+        ).to.be.revertedWith('LZM: not a peer')
+      }
+      expect(await u.dollar.balanceOf(stranger)).to.equal(0n)
+      expect(await u.dollar.balanceOf(u.usd.target)).to.equal(u.T(1_000))
+      // the user's claim is still backed, to the unit
       expect(await u.usd.balanceOf(user)).to.equal(E(1_000))
+      await u.check()
     })
 
     it('LocalOmniMessenger has no LayerZero side: nothing arrives from outside, and a registered impostor is still nobody', async () => {

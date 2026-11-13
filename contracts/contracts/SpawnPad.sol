@@ -39,6 +39,11 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// Holder modes split the pot into per-chain slices in chunks, not on
     /// every trade.
     uint256 public constant DIST_TRIGGER = 2e18;
+    /// Gas that must remain after a SYNC send FAILED for the failure to
+    /// count as the leg's refusal rather than as starvation (see `_spawn`).
+    /// A starved call leaves 1/64 of what it was given: under this floor
+    /// for any send that needs less than ~6.3M gas.
+    uint256 internal constant SYNC_GAS_FLOOR = 100_000;
 
     /// FAIR GENESIS (v6) — the anti-snipe opening. For GENESIS_WINDOW seconds
     /// after spawn every buy pays FEE_BPS plus a snipe tax that starts at
@@ -179,6 +184,10 @@ contract SpawnPad is IOmniReceiver, Roles {
     event VenueSet(address venue);
     event GatewaySet(uint32 indexed chain, bytes32 gateway);
     event AutoDropSet(uint32 indexed chain, bool on);
+    /// A token's SYNC could not be sent to `chain` at spawn: the token has
+    /// no replica there until the operator `resync`s it.
+    event SyncFailed(address indexed token, uint32 indexed chain);
+    event Resynced(address indexed token, uint32 indexed chain);
     event Paused(address by);
     event Unpaused(address by);
     /// A FAIR GENESIS action: a snipe tax collected and/or a clamped or
@@ -345,7 +354,9 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// remote message the pad sends.
     function onOmniMessage(uint32 srcChain, bytes32 srcSender, bytes calldata payload) external {
         require(msg.sender == address(messenger), "PAD: not messenger");
-        require(gateways[srcChain] == srcSender, "PAD: not a gateway");
+        // an UNSET gateway (bytes32(0)) is never a match: label 0 can have
+        // no gateway at all, so (chain 0, sender 0) must not pass (F-11)
+        require(srcSender != bytes32(0) && gateways[srcChain] == srcSender, "PAD: not a gateway");
         (uint8 op, bytes memory data) = abi.decode(payload, (uint8, bytes));
         if (op == OP_SPAWN) {
             (
@@ -416,21 +427,56 @@ contract SpawnPad is IOmniReceiver, Roles {
         emit Spawned(address(token), creator, srcChain, name, symbol, metaURI);
 
         // One genesis, every chain: deploy a native replica on each spoke.
+        // ONE DEAD LEG MUST NOT BRICK EVERY LAUNCH (v7.1): a gateway is
+        // forever, so a chain whose send reverts — a pathway LayerZero
+        // retired, a message its executor will not carry, a route not set
+        // yet — would otherwise undo every spawn from every chain. A SYNC
+        // that cannot leave is logged and the spawn goes on; the operator
+        // sends it again with `resync` once the leg is repaired.
+        bytes memory sync = _syncPayload(address(token), name, symbol);
         for (uint256 i = 0; i < chainLabels.length; i++) {
             uint32 ch = chainLabels[i];
-            messenger.send(
-                ch,
-                gateways[ch],
-                // token id rides as bytes32: the hub is EVM so it always
-                // fits; a Solana gateway consumes it as a raw 32-byte seed.
-                abi.encode(OP_SYNC_TOKEN, abi.encode(_b32(address(token)), name, symbol)),
-                0
-            );
+            try messenger.send(ch, gateways[ch], sync, 0) {} catch {
+                // A send that merely ran out of gas is not a dead leg. The
+                // call got 63/64 of what was left, so if it starved, almost
+                // nothing remains here — whereas a leg that REFUSES the
+                // send reverts early and leaves plenty. Revert in the first
+                // case (the spawn is retried with enough gas): otherwise
+                // whoever delivers a spawn could pick the gas that skips a
+                // chain.
+                require(gasleft() >= SYNC_GAS_FLOOR, "PAD: gas");
+                emit SyncFailed(address(token), ch);
+            }
         }
 
         // The dev buy is part of the spawn itself — the one disclosed FAIR
         // GENESIS exemption (no block-0 rule, no tax, no cap).
         if (devBuyUsd > 0) _buy(srcChain, address(token), creator, devBuyUsd, true);
+    }
+
+    /// OP_SYNC_TOKEN for one token. The token id rides as bytes32: the hub
+    /// is EVM so it always fits; a Solana gateway consumes it as a raw
+    /// 32-byte seed.
+    function _syncPayload(address token, string memory name, string memory symbol)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encode(OP_SYNC_TOKEN, abi.encode(_b32(token), name, symbol));
+    }
+
+    /// Sends a token's SYNC to one chain again — for a leg whose SYNC failed
+    /// at spawn (`SyncFailed`) or was lost. Operator only: the pad's sends
+    /// ride the hub tank, so this must not be anyone's to call. It moves no
+    /// value and cannot fork a token: a gateway ignores a SYNC for a replica
+    /// it already has, and whatever reached that chain before its replica
+    /// (a dev-buy DELIVER, a FEE_DROP) is parked there until this lands.
+    function resync(address token, uint32 chain) external onlyOperator {
+        Meta storage m = metas[token];
+        bytes32 gw = gateways[chain];
+        require(m.spawnedAt != 0 && gw != bytes32(0), "PAD: unknown");
+        messenger.send(chain, gw, _syncPayload(token, m.name, m.symbol), 0);
+        emit Resynced(token, chain);
     }
 
     /// Decides how much of a buy may touch the curve and at what snipe tax.

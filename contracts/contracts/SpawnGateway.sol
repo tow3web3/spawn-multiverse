@@ -110,6 +110,11 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         // A gateway settles real dollars: wiring it to a ledger-mode oUSD
         // would make every payout revert on the message path.
         require(address(_usd.usdc()) != address(0), "GW: ledger usd");
+        // The hub is authenticated as (chain 0, the pad's address) coming
+        // from the messenger: neither may be the zero address, or "nobody"
+        // would pass for the hub. And label 0 IS the hub — never a gateway.
+        require(address(_messenger) != address(0) && _pad != address(0), "GW: zero address");
+        require(_chainLabel != HUB_CHAIN, "GW: hub label");
         messenger = _messenger;
         usd = _usd;
         chainLabel = _chainLabel;
@@ -170,6 +175,9 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         uint8 feeMode
     ) external payable nonReentrant whenNotPaused {
         _checkSpawn(name, symbol, metaURI, feeMode);
+        // same floor as `buyToken`: a dev buy the curve would round to
+        // nothing is refused here, not bounced back across the wire
+        require(devBuyUsd == 0 || devBuyUsd >= MIN_AMOUNT, "GW: dust");
         if (devBuyUsd > 0) usd.bridgeBurn(msg.sender, devBuyUsd);
         _sendSpawn(name, symbol, metaURI, devBuyUsd, feeMode);
     }
@@ -287,6 +295,10 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     }
 
     function sellToken(address hubToken, uint256 tokens) external payable nonReentrant {
+        _sell(hubToken, tokens);
+    }
+
+    function _sell(address hubToken, uint256 tokens) internal {
         require(tokens > 0, "GW: zero");
         require(tokens >= MIN_AMOUNT, "GW: dust");
         SpawnToken rep = replicaOf[hubToken];
@@ -299,6 +311,95 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
             abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens)),
             tradeLegs
         );
+    }
+
+    /* ------------------ slippage protection (v7.1) ------------------ */
+
+    /// ALL-OR-NOTHING TRADES — ONLY WHERE THE HUB ANSWERS IN THE SAME
+    /// TRANSACTION. A plain buy or sell takes whatever price the curve has
+    /// when it executes, so on a public mempool it can be sandwiched. Where
+    /// the messenger is a loopback (the hub chain's own gateway, a
+    /// single-chain universe), the hub's reply — the DELIVER or the PAYOUT —
+    /// has ALREADY been executed when `messenger.send` returns. These three
+    /// functions do exactly what `buyToken`, `buyTokenUsdc` and `sellToken`
+    /// do, then look at what the caller actually received and revert the
+    /// whole transaction if it is less than the minimum they named. Nothing
+    /// can be stranded: the deposit, the burn, the trade on the curve and
+    /// the reply all happened in this one transaction and unwind together.
+    ///
+    /// What counts as received is a BALANCE the caller holds when the call
+    /// returns: replica tokens for a buy; for a sell, the vault's dollar
+    /// token plus any oUSD claim (a short vault pays in claims), in
+    /// 18-decimal dollars. So a fill cut down by FAIR GENESIS, a buy bounced
+    /// in the launch block or by a paused hub, a delivery that had to be
+    /// parked and a sell the curve refused all fall under the minimum and
+    /// revert — the caller keeps what they came with.
+    ///
+    /// NOT FOR A REMOTE CHAIN: there the reply lands minutes later, so the
+    /// check can never pass and the call always reverts (atomically — the
+    /// LayerZero send unwinds with it). Cross-chain trades stay unprotected
+    /// until the wire carries a minimum. A minimum of 0 is refused: it would
+    /// make these the unprotected functions under another name.
+
+    /// Buy with USDC (6 decimals), or revert unless at least `minTokensOut`
+    /// replica tokens reach the caller in this transaction.
+    function buyTokenUsdcMin(address hubToken, uint256 usdcIn, uint256 minTokensOut)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+    {
+        require(usdcIn > 0, "GW: zero");
+        (SpawnToken rep, uint256 bag) = _bagBefore(hubToken, minTokensOut);
+        _sendBuy(hubToken, usd.depositFor(msg.sender, usdcIn));
+        require(rep.balanceOf(msg.sender) >= bag + minTokensOut, "GW: min out");
+    }
+
+    /// Buy with oUSD already held (18 decimals), same guarantee.
+    function buyTokenMin(address hubToken, uint256 usdIn, uint256 minTokensOut)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+    {
+        require(usdIn > 0, "GW: zero");
+        require(usdIn >= MIN_AMOUNT, "GW: dust");
+        (SpawnToken rep, uint256 bag) = _bagBefore(hubToken, minTokensOut);
+        usd.bridgeBurn(msg.sender, usdIn);
+        _sendBuy(hubToken, usdIn);
+        require(rep.balanceOf(msg.sender) >= bag + minTokensOut, "GW: min out");
+    }
+
+    /// Sell, or revert unless at least `minDollarsOut` (18-decimal dollars:
+    /// dollar tokens × SCALE, plus oUSD claims) reach the caller in this
+    /// transaction. Like every exit, it ignores the pause.
+    function sellTokenMin(address hubToken, uint256 tokens, uint256 minDollarsOut)
+        external
+        payable
+        nonReentrant
+    {
+        require(minDollarsOut > 0, "GW: zero min");
+        uint256 before = _dollarsOf(msg.sender);
+        _sell(hubToken, tokens);
+        require(_dollarsOf(msg.sender) >= before + minDollarsOut, "GW: min out");
+    }
+
+    /// The caller's bag of `hubToken` on this chain before a protected buy.
+    function _bagBefore(address hubToken, uint256 minTokensOut)
+        internal
+        view
+        returns (SpawnToken rep, uint256 bag)
+    {
+        require(minTokensOut > 0, "GW: zero min");
+        rep = replicaOf[hubToken];
+        require(address(rep) != address(0), "GW: unknown token");
+        bag = rep.balanceOf(msg.sender);
+    }
+
+    /// Everything `who` holds in this chain's dollars, in 18 decimals: the
+    /// vault's dollar token and the oUSD claims on it.
+    function _dollarsOf(address who) internal view returns (uint256) {
+        return usd.usdc().balanceOf(who) * usd.SCALE() + usd.balanceOf(who);
     }
 
     /// Mints the caller's parked deliveries of `hubToken` (see

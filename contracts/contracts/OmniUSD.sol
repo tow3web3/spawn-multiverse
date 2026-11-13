@@ -55,6 +55,12 @@ contract OmniUSD is ERC20, ReentrancyGuard, Roles {
 
     /// USDC has 6 decimals, oUSD 18.
     uint256 public constant SCALE = 1e12;
+    /// The smallest deposit that may ride a protocol message, in oUSD wei —
+    /// one USDC unit. A real USDC transfer can never credit less; the floor
+    /// is here so a deposit that credited NOTHING (a token that moved no
+    /// balance) is refused instead of sending the hub a zero-dollar message,
+    /// and so both vaults (`OmniUSDLocal` too) refuse exactly the same thing.
+    uint256 public constant MIN_DEPOSIT = 1e12;
     /// CCTP V2 Standard Transfer: attested at source-chain finality.
     uint32 public constant CCTP_FINALITY_STANDARD = 2000;
 
@@ -206,6 +212,7 @@ contract OmniUSD is ERC20, ReentrancyGuard, Roles {
         returns (uint256 amount18)
     {
         amount18 = _pull(from, usdc6);
+        require(amount18 >= MIN_DEPOSIT, "oUSD: dust");
         emit Deposited(from, amount18 / SCALE, amount18);
     }
 

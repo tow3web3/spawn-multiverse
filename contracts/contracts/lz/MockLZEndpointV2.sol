@@ -82,11 +82,23 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
         if (o.length == 38) value = uint128(bytes16(o[22:38]));
     }
 
+    /// Largest message the executor of a destination will carry (0 = no
+    /// limit). The real executor config has one per pathway — LayerZero's
+    /// default toward some chains is far below a SYNC — and both `quote` and
+    /// `send` revert above it.
+    mapping(uint32 => uint256) public maxMessageSize;
+
+    function setMaxMessageSize(uint32 dstEid, uint256 max) external {
+        maxMessageSize[dstEid] = max;
+    }
+
     function _fee(MessagingParams calldata p)
         internal
         view
         returns (uint256 fee, uint128 gas, uint256 value)
     {
+        uint256 max = maxMessageSize[p.dstEid];
+        require(max == 0 || p.message.length <= max, "ENDPOINT: message too large");
         uint128 v;
         (gas, v) = _lzReceiveOption(p.options);
         value = v;
@@ -153,12 +165,20 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
     /// real network promises no order between messages (nextNonce = 0).
     function deliverAt(uint256 at) public {
         require(at < queue.length, "ENDPOINT: empty");
+        deliverAtWithGas(at, queue[at].gas);
+    }
+
+    /// Same, with a gas limit of the caller's choosing: on the real network
+    /// ANYONE may execute a verified packet, with whatever gas they like —
+    /// the executor's option is what was paid for, not what must be used.
+    function deliverAtWithGas(uint256 at, uint256 gasLimit) public {
+        require(at < queue.length, "ENDPOINT: empty");
         Packet memory p = queue[at];
         for (uint256 i = at; i + 1 < queue.length; i++) queue[i] = queue[i + 1];
         queue.pop();
         address dst = address(uint160(uint256(p.receiver)));
         uint256 g = gasleft();
-        ILayerZeroReceiver(dst).lzReceive{gas: p.gas, value: p.value}(
+        ILayerZeroReceiver(dst).lzReceive{gas: gasLimit, value: p.value}(
             Origin(p.srcEid, p.sender, p.nonce),
             keccak256(abi.encode(p.srcEid, p.dstEid, p.nonce)),
             p.message,
@@ -173,5 +193,25 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
             deliverNext();
             max--;
         }
+    }
+
+    /// Lands a packet NO adapter here ever sent — what the real endpoint
+    /// does with a packet its receive library reports as verified, from any
+    /// (srcEid, sender) at all: it asks the receiver whether that path may
+    /// be opened (`allowInitializePath`), then calls `lzReceive`. This is
+    /// the door a receiver's own peer check has to hold (SPEC F-11).
+    function inject(uint32 srcEid, bytes32 sender, address receiver, bytes calldata message)
+        external
+        payable
+    {
+        Origin memory o = Origin(srcEid, sender, 1);
+        require(ILayerZeroReceiver(receiver).allowInitializePath(o), "ENDPOINT: path not initializable");
+        ILayerZeroReceiver(receiver).lzReceive{value: msg.value}(
+            o,
+            keccak256(abi.encode(srcEid, sender, message)),
+            message,
+            address(0),
+            ""
+        );
     }
 }
