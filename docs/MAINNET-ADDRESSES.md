@@ -1,15 +1,36 @@
-# Mainnet external addresses — CANDIDATES
+# Mainnet external addresses
 
-**Status of every address below: UNVERIFIED.** They are candidates collected
-from the issuers' own documentation while building v7. A wrong address here
-is lost money, so nothing in this file may be passed to a mainnet deploy
-until the verification chantier has re-derived each one from its source and
-checked it on-chain (the "How to verify" column), and flipped its status.
+**Status (2026-11-13): VERIFIED on the live chains by the deploy preflight,
+and exercised on mainnet forks.** A wrong address here is lost money, so no
+address is trusted because it is written down: `scripts/deploy.js` refuses
+to send a single transaction until its preflight has re-derived every one of
+them from the chain it is about to deploy on (`scripts/lib-net.js` →
+`preflight`):
 
-A read-only sanity pass was run on 2026-11-13 against public RPCs (results
-in the last section). It found no mismatch, but it is not the verification:
-it used the same candidate values it was checking and public, unauthenticated
-RPC endpoints.
+| Check | Proves |
+|---|---|
+| `chainId` | the RPC is the chain the config says |
+| `endpoint.eid()` equals the configured eid | this is LayerZero's EndpointV2 for that chain |
+| USDC `symbol() == "USDC"`, `decimals() == 6` | an ERC20 that looks like USDC |
+| USDC `isMinter(TokenMessengerV2.localMinter()) == true` | it is the **Circle-native** token, not a bridged `USDC.e` / `USDbC` look-alike (those do not list Circle's CCTP minter) — and the CCTP address is the one that mints it |
+| `TokenMessengerV2.localMessageTransmitter().localDomain()` equals the configured domain | the CCTP contracts are Circle's for this chain |
+
+How each row below earned its status:
+
+- **preflight (live)** — `npx hardhat run scripts/preflight.js`, read-only
+  against the public RPC of each chain, 2026-11-13: every address check
+  passed on Base, Optimism, Arbitrum One and Ethereum.
+- **fork** — additionally USED by the real deploy script and the fork tests
+  on an anvil fork of that chain (`npm run test:fork`): USDC pulled, paid
+  out and burned; CCTP `depositForBurn` called; the endpoint quoted, sent
+  and configured. Base and Optimism only.
+- The fork tests also prove the preflight REFUSES a lie: a wrong token
+  (WETH), a wrong CCTP domain, a wrong eid and a wrong chain id each abort
+  the deploy before any transaction.
+
+Two independent read-only passes that preceded the tooling are kept at the
+end of this file; one of them caught a wrong Ethereum USDC address quoted
+from memory (it failed the EIP-55 checksum). Never type these from memory.
 
 Scope: the four EVM chains that have native USDC **and** CCTP V2 — Base
 (hub), Optimism, Arbitrum One, Ethereum. BNB Chain is not listed in Circle's
@@ -20,12 +41,12 @@ USDC address table (its "USDC" is a Binance-pegged 18-decimal token, which
 
 Source: <https://developers.circle.com/stablecoins/usdc-contract-addresses>
 
-| Chain | Address | Status | How to verify |
+| Chain | Address | Status | Notes |
 |---|---|---|---|
-| Ethereum | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | UNVERIFIED | `symbol() == "USDC"`, `decimals() == 6`; address matches Circle's page fetched fresh |
-| OP Mainnet | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` | UNVERIFIED | same |
-| Arbitrum One | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | UNVERIFIED | same |
-| Base | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | UNVERIFIED | same |
+| Ethereum | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | VERIFIED — preflight (live) | disabled by default (`SPAWN_ENABLE=ethereum`) |
+| OP Mainnet | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` | VERIFIED — preflight (live) + fork | pulled into the vault, paid out to users on the fork |
+| Arbitrum One | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | VERIFIED — preflight (live) | no fork run on Arbitrum yet |
+| Base | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | VERIFIED — preflight (live) + fork | full local trading and a CCTP burn on the fork |
 
 Beware of look-alikes: each of these chains also has a *bridged* USDC
 (`USDC.e` / `USDbC`) with the same symbol and decimals. `symbol()` and
@@ -39,18 +60,18 @@ was wrong in its last 12 bytes; never type these from memory.)
 Source: <https://developers.circle.com/cctp/evm-smart-contracts>
 (same address on all four chains, per that page)
 
-| Contract | Address | Status | How to verify |
+| Contract | Address | Status | Evidence |
 |---|---|---|---|
-| TokenMessengerV2 | `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d` | UNVERIFIED | `localMessageTransmitter()` returns the MessageTransmitterV2 below; a static call of the 7-argument `depositForBurn` from an account with no allowance reverts inside USDC (`transfer amount exceeds allowance`), proving the selector exists |
-| MessageTransmitterV2 | `0x81D40F21F12A8F0E3252Bccb954D722d4c464B64` | UNVERIFIED | `localDomain()` returns the domain below |
-| TokenMinterV2 | `0xfd78EE919681417d192449715b2594ab58f5D002` | UNVERIFIED | not called by SPAWN!; listed for completeness |
+| TokenMessengerV2 | `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d` | VERIFIED — preflight (live, 4 chains) + fork (Base) | on the Base fork `OmniUSD.rebalance` called its 7-argument `depositForBurn` and Circle's `DepositForBurn` event named exactly the peer vault, its domain, the amount, `maxFee = 0`, threshold 2000 |
+| MessageTransmitterV2 | `0x81D40F21F12A8F0E3252Bccb954D722d4c464B64` | VERIFIED — preflight (live, 4 chains) | `localDomain()` returned the domain below on each chain. `receiveMessage` (the relay, `scripts/relay-cctp.js`) has never been called by this project |
+| TokenMinterV2 | `0xfd78EE919681417d192449715b2594ab58f5D002` | VERIFIED — preflight (live, 4 chains) | never configured: the preflight derives it (`TokenMessengerV2.localMinter()`) and requires USDC to list it as a minter |
 
 | Chain | CCTP domain | Status |
 |---|---|---|
-| Ethereum | 0 | UNVERIFIED |
-| OP Mainnet | 2 | UNVERIFIED |
-| Arbitrum One | 3 | UNVERIFIED |
-| Base | 6 | UNVERIFIED |
+| Ethereum | 0 | VERIFIED — preflight (live) |
+| OP Mainnet | 2 | VERIFIED — preflight (live) + fork |
+| Arbitrum One | 3 | VERIFIED — preflight (live) |
+| Base | 6 | VERIFIED — preflight (live) + fork |
 
 Interface used by `OmniUSD.rebalance` — verified against Circle's source,
 `circlefin/evm-cctp-contracts` `src/v2/TokenMessengerV2.sol` and
@@ -91,16 +112,61 @@ Source: LayerZero's deployment metadata,
 (the table at <https://docs.layerzero.network/v2/deployments/deployed-contracts>
 is rendered from it).
 
-| Chain | EndpointV2 | eid | Status | How to verify |
+| Chain | EndpointV2 | eid | Status | Evidence |
 |---|---|---|---|---|
-| Ethereum | `0x1a44076050125825900e736c501f859c50fE728c` | 30101 | UNVERIFIED | `endpoint.eid()` returns the eid |
-| OP Mainnet | `0x1a44076050125825900e736c501f859c50fE728c` | 30111 | UNVERIFIED | same |
-| Arbitrum One | `0x1a44076050125825900e736c501f859c50fE728c` | 30110 | UNVERIFIED | same |
-| Base | `0x1a44076050125825900e736c501f859c50fE728c` | 30184 | UNVERIFIED | same |
+| Ethereum | `0x1a44076050125825900e736c501f859c50fE728c` | 30101 | VERIFIED — preflight (live) | `endpoint.eid()` |
+| OP Mainnet | `0x1a44076050125825900e736c501f859c50fE728c` | 30111 | VERIFIED — preflight (live) + fork | quoted, sent (PacketSent), configured, delegate set |
+| Arbitrum One | `0x1a44076050125825900e736c501f859c50fE728c` | 30110 | VERIFIED — preflight (live) | `endpoint.eid()` |
+| Base | `0x1a44076050125825900e736c501f859c50fE728c` | 30184 | VERIFIED — preflight (live) + fork | quoted, sent (PacketSent), configured, delegate set |
 
-Not covered here and still to decide before mainnet: the DVN set and
-executor per pathway (today the adapters ride LayerZero's defaults and have
-no delegate set, so nobody can configure them — see SPEC §11).
+### The verifier set (DVNs) — chosen, configured by `scripts/configure-dvn.js`
+
+`required: LayerZero Labs + Google` · `optional: 1 of {Horizen, Twinstake}`
+— three independent attestations per message. Horizen and Twinstake are two
+of the four verifiers of LayerZero's own default set on these pathways, so
+they are exercised on them every day; Google Cloud is the second required
+signer so that no single operator's key decides. The set is custody
+security: whoever controls it controls what the hub and the vaults believe.
+
+Addresses are per chain (`config/profiles.js` → `mainnet.dvn.addresses`).
+Each one below is the address LayerZero's registry
+(<https://metadata.layerzero-api.com/v1/metadata/dvns>) lists for that name
+on that chain as live (v2, not deprecated), and each answered `getFee` on
+every pathway it serves — `node scripts/dvn-survey.js` re-checks both and
+exits 1 on any difference (run 2026-11-13: 16/16 ✓).
+
+| DVN | Base | Optimism | Arbitrum One | Ethereum |
+|---|---|---|---|---|
+| LayerZero Labs | `0x9e059a54699a285714207b43B055483E78FAac25` | `0x6A02D83e8d433304bba74EF1c427913958187142` | `0x2f55C492897526677C5B68fb199ea31E2c126416` | `0x589dEDbD617e0CBcB916A9223F4d1300c294236b` |
+| Google | `0xD56e4eAb23cb81f43168F9F45211Eb027b9aC7cc` | same | same | same |
+| Horizen | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0x9E930731cb4A6bf7eCc11F695A295c60bDd212eB` | `0x19670Df5E16bEa2ba9b9e68b48C054C5bAEa06B8` | `0x380275805876Ff19055EA900CDb2B46a94ecF20D` |
+| Twinstake | `0xcd37CA043f8479064e10635020c65FfC005d36f6` | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0xa59BA433ac34D2927232918Ef5B2eaAfcF130BA5` |
+
+(The same address can be a different operator on another chain — `0xa7b5…0d99`
+is Horizen on Base and Twinstake on Optimism and Arbitrum. Hence the table.)
+
+Status: **Base and Optimism — VERIFIED on forks**: the real send and receive
+libraries accepted the set, the config was read back (per side), a real
+`endpoint.send` went through under it and the quote dropped (table below).
+**Arbitrum and Ethereum — registry + `getFee` only.** Not proven anywhere:
+both ends of a live pathway agreeing (the fork has one chain) and the DVNs
+actually signing — `SPAWN_VERIFY=1 … configure-dvn.js` checks the first at
+deploy time, the canary the second.
+
+Fee per verifier, per pathway (ETH, `getFee`, 2026-11-13) — 25 DVNs are live
+on all four chains; every ordinary one quotes the same few 1e-7:
+
+| DVN | op→base | base→op | arb→base | base→arb | eth→base | base→eth |
+|---|---|---|---|---|---|---|
+| LayerZero Labs / Google / Horizen | 0.00000061 | 0.00000005 | 0.00000061 | 0.00000454 | 0.00000163 | 0.00000666 |
+| Twinstake | 0.00000061 | 0.00000004 | 0.00000061 | 0.00000451 | 0.00000161 | 0.00000659 |
+| Canary Subsidized | 0.00012600 | 0.00012551 | 0.00012600 | 0.00012930 | 0.00012687 | 0.00013196 |
+| WBTC Canary | 0.00025147 | 0.00025098 | 0.00025147 | 0.00025478 | 0.00025234 | 0.00025743 |
+| **Canary** (in LayerZero's default set) | **0.00050241** | **0.00050193** | **0.00050241** | **0.00050572** | **0.00050328** | **0.00050837** |
+
+Measured on the forks with the real endpoint: a reply hub → Optimism costs
+0.000629 ETH on the default set and **0.000127 ETH** on ours; a buy from
+Optimism (send + a 0.0002 ETH reply budget) 0.000898 → **0.000396 ETH**.
 
 ## Read-only sanity pass — 2026-11-13
 
@@ -183,8 +249,8 @@ baked into v7:
   Send config on the source and receive config on the destination must name
   the SAME DVN set for every pathway, or messages stall.
 - The DVN set is custody security (a forged hub→spoke PAYOUT pays real
-  USDC). Choose ≥2 independent, reputable verifiers present on all launch
-  chains; the DVN addresses above are per-chain and UNVERIFIED like the
-  rest of this file.
+  USDC). It has since been chosen and tooled — see "The verifier set
+  (DVNs)" above; this section is the analysis that led to it, kept as
+  written on 2026-11-13.
 - Hub-local trading on Base (no LayerZero message at all) is the primary
   path; cross-chain entry is the premium path and shows its fee.

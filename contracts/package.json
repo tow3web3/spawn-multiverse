@@ -7,7 +7,16 @@
     "test": "hardhat test",
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy-local.js --network localhost",
-    "bots": "hardhat run scripts/bots.js --network localhost"
+    "bots": "hardhat run scripts/bots.js --network localhost",
+    "test:fork:base": "node scripts/fork-run.js base",
+    "test:fork:optimism": "node scripts/fork-run.js optimism",
+    "test:fork": "node scripts/fork-run.js base && node scripts/fork-run.js optimism",
+    "rehearse": "node scripts/fork-rehearsal.js",
+    "dvn:survey": "node scripts/dvn-survey.js",
+    "budget": "SPAWN_PROFILE=mainnet hardhat run scripts/estimate-budget.js",
+    "status:mainnet": "SPAWN_PROFILE=mainnet hardhat run scripts/status.js",
+    "status:testnet": "SPAWN_PROFILE=testnet hardhat run scripts/status.js",
+    "preflight": "hardhat run scripts/preflight.js"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
