@@ -46,6 +46,15 @@ const CHAINS = {
   base: { id: 8453, rpc: 'https://mainnet.base.org', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
   optimism: { id: 10, rpc: 'https://mainnet.optimism.io', usdc: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85' },
   arbitrum: { id: 42161, rpc: 'https://arb1.arbitrum.io/rpc', usdc: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' },
+  // the separate BNB universe: gas is BNB, the dollar is BSC USDT (18 decimals)
+  bnb: {
+    id: 56,
+    rpc: 'https://bsc-rpc.publicnode.com',
+    usdc: '0x55d398326f99059fF775485246999027B3197955',
+    usdDecimals: 18,
+    native: 'BNB',
+    usd: 'USDT',
+  },
 }
 
 /** Gas first on every chain, test dollars last — if SOL runs short, the
@@ -57,7 +66,12 @@ const ORDERS = [
   { chain: 'base', asset: 'USDC', target: 20 },
   { chain: 'optimism', asset: 'USDC', target: 10 },
   { chain: 'arbitrum', asset: 'USDC', target: 10 },
+  // 'ETH' means the chain's gas coin and 'USDC' its dollar (see CHAINS.bnb)
+  { chain: 'bnb', asset: 'ETH', target: 0.006 },
+  { chain: 'bnb', asset: 'USDC', target: 5 },
 ]
+/** What an order's asset is called on its chain. */
+const nameOf = (order) => (order.asset === 'ETH' ? (CHAINS[order.chain].native ?? 'ETH') : (CHAINS[order.chain].usd ?? 'USDC'))
 /** Below this shortfall an order is not worth a transaction. */
 const MIN_ORDER = { ETH: 0.0003, USDC: 1 }
 
@@ -86,7 +100,7 @@ async function balanceOf(order) {
     return Number(BigInt(await evmCall(c.rpc, 'eth_getBalance', [DEPLOYER, 'latest']))) / 1e18
   }
   const data = '0x70a08231' + DEPLOYER.slice(2).toLowerCase().padStart(64, '0')
-  return Number(BigInt(await evmCall(c.rpc, 'eth_call', [{ to: c.usdc, data }, 'latest']))) / 1e6
+  return Number(BigInt(await evmCall(c.rpc, 'eth_call', [{ to: c.usdc, data }, 'latest']))) / 10 ** (c.usdDecimals ?? 6)
 }
 
 async function quote(user, order, lamports) {
@@ -208,7 +222,7 @@ async function execute(conn, kp, order, prepared) {
     await sleep(5_000)
     const now = await balanceOf(order).catch(() => before)
     if (now >= want) {
-      console.log(`   ✓ arrived: ${order.asset} on ${order.chain} ${before} -> ${now}`)
+      console.log(`   ✓ arrived: ${nameOf(order)} on ${order.chain} ${before} -> ${now}`)
       return now
     }
   }
@@ -249,13 +263,16 @@ async function main() {
     return
   }
 
-  if (cmd !== 'plan' && cmd !== 'run') throw new Error('usage: plan | test | run | watch <minSol>')
+  if (cmd !== 'plan' && cmd !== 'run') throw new Error('usage: plan [chain] | test | run [chain] | watch <minSol>')
+  // `plan bnb` / `run bnb`: only that chain's orders (the targets of the
+  // other chains were for their own launch and must not be topped up again)
+  if (arg && !CHAINS[arg]) throw new Error(`unknown chain "${arg}" (${Object.keys(CHAINS).join(' | ')})`)
 
   let spendable = (sol - RESERVE_SOL) * LAMPORTS
-  for (const order of ORDERS) {
+  for (const order of ORDERS.filter((o) => !arg || o.chain === arg)) {
     const have = await balanceOf(order)
     const shortfall = order.target - have
-    const label = `${order.chain.padEnd(9)} ${order.asset.padEnd(4)} have ${have} target ${order.target}`
+    const label = `${order.chain.padEnd(9)} ${nameOf(order).padEnd(4)} have ${have} target ${order.target}`
     if (shortfall < MIN_ORDER[order.asset]) {
       console.log(`${label} — ok`)
       continue
@@ -273,7 +290,7 @@ async function main() {
       continue
     }
     const prepared = await prepare(user, order, shortfall, spendable)
-    console.log(`${label} — bridging ${prepared.lamports / LAMPORTS} SOL -> ${prepared.out} ${order.asset}`)
+    console.log(`${label} — bridging ${prepared.lamports / LAMPORTS} SOL -> ${prepared.out} ${nameOf(order)}`)
     await execute(conn, kp, order, prepared)
     spendable = (await conn.getBalance(kp.publicKey)) - RESERVE_SOL * LAMPORTS
   }
