@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { StoreProvider } from './store'
 import { OnchainProvider } from './onchain/OnchainProvider'
 import { TickerBar } from './components/TickerBar'
@@ -14,25 +14,40 @@ import { TokenPage } from './components/TokenPage'
 import { PortfolioPage } from './components/PortfolioPage'
 import { DevDashboard } from './components/DevDashboard'
 import { RiskNotice } from './components/Guarded'
+import {
+  UNIVERSES,
+  UniverseNavCtx,
+  universeOf,
+  universeOfMode,
+  type AppMode,
+  type UniverseDef,
+  type UniverseId,
+} from './lib/universes'
 
-export type AppMode = 'sim' | 'testnet' | 'chain' | 'mainnet'
+export type { AppMode } from './lib/universes'
 
 /** Public demo builds (shareable link) have no LOCAL chain — but testnet works anywhere. */
 export const PUBLIC_DEMO = Boolean(import.meta.env.VITE_PUBLIC_DEMO)
 
+/** Where each mode's deployment manifest lives. Mainnet is one manifest PER
+ * UNIVERSE: a universe exists on the site only once its file is published. */
 const MANIFEST: Record<Exclude<AppMode, 'sim'>, string> = {
   testnet: '/onchain/testnet.json',
   chain: '/onchain/deployment.json',
-  mainnet: '/onchain/mainnet.json',
+  ...(Object.fromEntries(UNIVERSES.map((u) => [u.mode, u.manifest])) as Record<
+    UniverseDef['mode'],
+    string
+  >),
 }
 const LS_MODE = 'spawn.mode'
 const LS_MAINNET_SEEN = 'spawn.mode.mainnetSeen'
+const UNIVERSE_MODES = new Set<string>(UNIVERSES.map((u) => u.mode))
 
 function loadMode(): AppMode {
   try {
     const m = localStorage.getItem(LS_MODE)
     if (m === 'testnet') return 'testnet'
-    if (m === 'mainnet') return 'mainnet'
+    if (m && UNIVERSE_MODES.has(m)) return m as AppMode
     if (m === 'chain') return PUBLIC_DEMO ? 'sim' : 'chain'
     return 'sim'
   } catch {
@@ -40,15 +55,20 @@ function loadMode(): AppMode {
   }
 }
 
-/** MAINNET mode exists only once its manifest is published. A missing file
- * can come back as the app's own index.html with a 200, so the body is
- * checked, not the status. */
-async function probeMainnet(): Promise<boolean> {
+/** A universe exists only once its manifest is published AND names it. A
+ * missing file can come back as the app's own index.html with a 200, so the
+ * body is checked, not the status. */
+async function probeUniverse(u: UniverseDef): Promise<boolean> {
   try {
-    const res = await fetch(MANIFEST.mainnet, { cache: 'no-store' })
+    const res = await fetch(u.manifest, { cache: 'no-store' })
     if (!res.ok) return false
     const m = await res.json()
-    return m?.network === 'mainnet' && typeof m?.pad === 'string' && Array.isArray(m?.chains)
+    return (
+      m?.network === 'mainnet' &&
+      typeof m?.pad === 'string' &&
+      Array.isArray(m?.chains) &&
+      (m?.universe ?? 'core') === u.id
+    )
   } catch {
     return false
   }
@@ -81,8 +101,8 @@ function useRoute(): Route {
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>(loadMode)
-  /** null while the mainnet manifest is being looked for. */
-  const [hasMainnet, setHasMainnet] = useState<boolean | null>(null)
+  /** null while the mainnet manifests are being looked for. */
+  const [live, setLive] = useState<UniverseDef[] | null>(null)
   const [labOpen, setLabOpen] = useState(false)
   const [pitTab, setPitTab] = useState<PitTab>('all')
   const [query, setQuery] = useState('')
@@ -90,20 +110,22 @@ export default function App() {
 
   useEffect(() => {
     let stale = false
-    void probeMainnet().then((live) => {
+    void Promise.all(UNIVERSES.map(async (u) => ((await probeUniverse(u)) ? u : null))).then((found) => {
       if (stale) return
-      setHasMainnet(live)
-      if (!live) {
-        // a remembered MAINNET choice with no mainnet behind it
-        setMode((m) => (m === 'mainnet' ? 'sim' : m))
-        return
-      }
-      // the first visit after mainnet goes live lands on it, once; after
-      // that the visitor's own choice of mode is what sticks
+      const universes = found.filter((u): u is UniverseDef => u !== null)
+      setLive(universes)
+      // a remembered universe with no manifest behind it any more
+      setMode((m) =>
+        UNIVERSE_MODES.has(m) && !universes.some((u) => u.mode === m) ? (universes[0]?.mode ?? 'sim') : m,
+      )
+      if (universes.length === 0) return
+      // the first visit after mainnet goes live lands on it, once — on the
+      // omnichain universe when it exists; after that the visitor's own
+      // choice of mode is what sticks
       try {
         if (!localStorage.getItem(LS_MAINNET_SEEN)) {
           localStorage.setItem(LS_MAINNET_SEEN, '1')
-          setMode('mainnet')
+          setMode((universes.find((u) => u.id === 'core') ?? universes[0]).mode)
         }
       } catch {
         /* no storage */
@@ -121,6 +143,25 @@ export default function App() {
       /* no storage */
     }
   }, [mode])
+
+  // Switching universe: a token page of one universe means nothing in another
+  const switchMode = (m: AppMode) => {
+    if (m !== mode && route.page === 'token') navigate('')
+    setMode(m)
+  }
+
+  const nav = useMemo(
+    () => ({
+      live: live ?? [],
+      current: universeOfMode(mode)?.id,
+      go: (id: UniverseId) => {
+        const u = universeOf(id)
+        if (u) switchMode(u.mode)
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [live, mode, route.page],
+  )
 
   const goToPit = (tab: PitTab) => {
     setPitTab(tab)
@@ -141,8 +182,8 @@ export default function App() {
       <TickerBar />
       <Nav
         mode={mode}
-        setMode={setMode}
-        hasMainnet={hasMainnet === true}
+        setMode={switchMode}
+        universes={live ?? []}
         onOpenLab={() => setLabOpen(true)}
         onFreshSpawns={() => goToPit('new')}
         onHome={goHome}
@@ -190,11 +231,17 @@ export default function App() {
     </>
   )
 
-  return mode === 'sim' ? (
-    <StoreProvider key="sim">{content}</StoreProvider>
-  ) : (
-    <OnchainProvider key={mode} manifestUrl={MANIFEST[mode]}>
-      {content}
-    </OnchainProvider>
+  return (
+    <UniverseNavCtx.Provider value={nav}>
+      {mode === 'sim' ? (
+        <StoreProvider key="sim">{content}</StoreProvider>
+      ) : (
+        // one provider per mode, remounted on every switch: a universe's
+        // wallet state, tokens and approvals never survive into another
+        <OnchainProvider key={mode} manifestUrl={MANIFEST[mode]}>
+          {content}
+        </OnchainProvider>
+      )}
+    </UniverseNavCtx.Provider>
   )
 }

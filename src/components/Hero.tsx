@@ -1,19 +1,35 @@
 import { useStore } from '../store'
 import { fmtMoney, fmtTokens } from '../lib/format'
 import { HeroCharts } from './LastLaunch'
-import { ChainLogo, CHAIN_LOGO_LABELS } from './ChainLogos'
+import { CHAIN_NAME, ChainLogo, CoinLogo, isChainLogoId } from './ChainLogos'
 import { Asterisk } from './bits'
-import { useChainSet } from '../lib/liveChains'
+import { useChainSet, useDollar } from '../lib/liveChains'
+import { useUniverseNav } from '../lib/universes'
 
-/** The whole pitch, scannable in a few chips. */
-const FEATURES = (chains: number): { label: string; cls: string; bg?: string }[] => [
-  { label: `⛓ ${chains} CHAINS, 1 LAUNCH`, cls: 'bg-ink text-lime' },
-  { label: '✳ ONE GLOBAL SUPPLY', cls: 'bg-white' },
-  { label: '⚖ ONE PRICE EVERYWHERE', cls: '', bg: '#9ccbf5' },
-  { label: '🛡 BLOCK 0 DOES NOT EXIST', cls: '', bg: '#f7a8ce' },
-  { label: '⛽ GAS ON ONE CHAIN ONLY', cls: 'bg-white' },
-  { label: '💸 FEES: HOLDERS / DEV / 🔥 BURN', cls: 'bg-tang' },
-]
+/** The whole pitch, scannable in a few chips — per universe. */
+const FEATURES = (
+  chains: number,
+  single: boolean,
+  dollar: string,
+  pegged: boolean,
+): { label: string; cls: string; bg?: string }[] =>
+  single
+    ? [
+        { label: '⛓ ONE CHAIN, ONE TRANSACTION', cls: 'bg-ink text-lime' },
+        { label: '🛡 PRICE-PROTECTED TRADES', cls: '', bg: '#9ccbf5' },
+        { label: `💵 SETTLED IN ${dollar}${pegged ? ' (BINANCE-PEG)' : ''}`, cls: 'bg-white' },
+        { label: '🛡 BLOCK 0 DOES NOT EXIST', cls: '', bg: '#f7a8ce' },
+        { label: '✳ ONE GLOBAL SUPPLY', cls: 'bg-white' },
+        { label: '💸 FEES: HOLDERS / DEV / 🔥 BURN', cls: 'bg-tang' },
+      ]
+    : [
+        { label: `⛓ ${chains} CHAINS, 1 LAUNCH`, cls: 'bg-ink text-lime' },
+        { label: '✳ ONE GLOBAL SUPPLY', cls: 'bg-white' },
+        { label: '⚖ ONE PRICE EVERYWHERE', cls: '', bg: '#9ccbf5' },
+        { label: '🛡 BLOCK 0 DOES NOT EXIST', cls: '', bg: '#f7a8ce' },
+        { label: '⛽ GAS ON ONE CHAIN ONLY', cls: 'bg-white' },
+        { label: '💸 FEES: HOLDERS / DEV / 🔥 BURN', cls: 'bg-tang' },
+      ]
 
 function Underline() {
   return (
@@ -43,9 +59,10 @@ export function Hero({
 }) {
   const { creatures, onchain } = useStore()
   const chainSet = useChainSet()
-  const liveIds = new Set(chainSet.live.map((c) => c.id))
-  const liveLogos = CHAIN_LOGO_LABELS.filter((c) => liveIds.has(c.id))
-  const soonLogos = CHAIN_LOGO_LABELS.filter((c) => !liveIds.has(c.id))
+  const dollar = useDollar()
+  const nav = useUniverseNav()
+  const u = onchain?.universe
+  const others = nav.live.filter((x) => x.id !== u?.id)
   const traded = creatures.reduce((a, c) => a + c.volume, 0)
   const burned = creatures.reduce((a, c) => a + (c.fees?.burnedTokens ?? 0), 0)
   const ascended = creatures.filter((c) => c.status === 'ascended').length
@@ -55,6 +72,10 @@ export function Hero({
     ...(burned > 0 ? [`🔥 ${fmtTokens(burned)} BURNED`] : []),
     ...(ascended > 0 ? [`⬆ ${ascended} ASCENDED`] : []),
   ]
+  const single = chainSet.single
+  // "BNB Chain", "Ethereum": the chain's full name when there is only one
+  const only = chainSet.live[0]?.id
+  const chainName = single && only && isChainLogoId(only) ? CHAIN_NAME[only] : chainSet.names
   return (
     <section className="mx-auto grid max-w-7xl gap-5 px-4 py-4 sm:px-6 lg:grid-cols-[1.05fr_1fr] lg:py-6">
       {/* left — lime panel */}
@@ -70,8 +91,11 @@ export function Hero({
             {chainSet.soon.length > 0 ? ` · ${chainSet.soon.length} MORE COMING` : ''}
           </span>
           {onchain?.network === 'mainnet' && (
-            <span className="rounded-full border-2 border-ink bg-tang px-3 py-1 font-mono text-[10px] font-bold tracking-wide">
-              ◉ MAINNET — GUARDED BETA
+            <span
+              className="inline-flex items-center gap-1.5 rounded-full border-2 border-ink bg-tang px-3 py-1 font-mono text-[10px] font-bold tracking-wide"
+              data-testid="hero-universe"
+            >
+              ◉ {u ? `${u.name} UNIVERSE` : 'MAINNET'} — GUARDED BETA
             </span>
           )}
           {onchain?.network === 'testnet' && (
@@ -89,7 +113,7 @@ export function Hero({
         <h1 className="relative mt-4 font-display text-[clamp(2.4rem,5.5vw,4.6rem)] leading-[0.95] tracking-wide">
           ONE TOKEN.
           <br />
-          EVERY CHAIN.
+          {single ? `${chainName.toUpperCase()}.` : 'EVERY CHAIN.'}
           <br />
           <span className="relative inline-block">
             ONE PRICE.
@@ -98,18 +122,32 @@ export function Hero({
         </h1>
 
         <p className="relative mt-4 max-w-md text-[15px] font-medium leading-relaxed">
-          Launch once — your token goes live{' '}
-          <mark className="bg-ink px-1.5 py-0.5 font-bold text-lime">
-            natively on all {chainSet.count} {chainSet.soon.length > 0 ? 'live ' : ''}chains
-          </mark>{' '}
-          {chainSet.soon.length > 0
-            ? 'from one transaction. No bridges, no wrapped copies.'
-            : 'at the same second. No bridges, no wrapped copies.'}
+          {single ? (
+            <>
+              Launch once — your token goes live{' '}
+              <mark className="bg-ink px-1.5 py-0.5 font-bold text-lime">on {chainName}</mark>, settled
+              in {dollar.symbol}
+              {u?.id === 'bnb' ? ' (a Binance-custodied peg)' : ''}. One chain, one transaction per
+              trade, and every trade is price-protected: it reverts unless you get at least what
+              you were quoted.
+              {u?.id === 'ethereum' ? ' Every action pays Ethereum gas.' : ''}
+            </>
+          ) : (
+            <>
+              Launch once — your token goes live{' '}
+              <mark className="bg-ink px-1.5 py-0.5 font-bold text-lime">
+                natively on all {chainSet.count} {chainSet.soon.length > 0 ? 'live ' : ''}chains
+              </mark>{' '}
+              {chainSet.soon.length > 0
+                ? 'from one transaction. No bridges, no wrapped copies.'
+                : 'at the same second. No bridges, no wrapped copies.'}
+            </>
+          )}
         </p>
 
         {/* the pitch, scannable */}
         <div className="relative mt-4 flex max-w-lg flex-wrap gap-2">
-          {FEATURES(chainSet.count).map(({ label: l, cls, bg }) => (
+          {FEATURES(chainSet.count, single, dollar.symbol, u?.id === 'bnb').map(({ label: l, cls, bg }) => (
             <span
               key={l}
               className={`rounded-full border-2 border-ink px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm ${cls}`}
@@ -144,10 +182,10 @@ export function Hero({
 
         <div className="relative mt-4">
           <p className="font-mono text-[10px] font-bold tracking-[0.2em] opacity-70">
-            LIVE ON
+            LIVE ON{u ? ` — ${u.name} UNIVERSE` : ''}
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
-            {liveLogos.map(({ id, label }) => (
+            {chainSet.live.map(({ id, label }) => (
               <span
                 key={id}
                 className="flex items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm"
@@ -156,15 +194,25 @@ export function Hero({
                 {label}
               </span>
             ))}
+            {onchain && (
+              <span
+                className="flex items-center gap-1.5 rounded-full border-2 border-ink bg-cream px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide"
+                title={`Every amount here is in ${dollar.symbol}`}
+              >
+                <CoinLogo id={dollar.coin} size={16} />
+                {dollar.symbol}
+                {u?.id === 'bnb' ? ' · BINANCE-PEG' : ''}
+              </span>
+            )}
           </div>
-          {/* chains of the design this deployment does not run yet — said plainly */}
-          {soonLogos.length > 0 && (
+          {/* chains announced for this universe and not live yet — said plainly */}
+          {chainSet.soon.length > 0 && (
             <>
               <p className="mt-3 font-mono text-[10px] font-bold tracking-[0.2em] opacity-70">
                 COMING NEXT
               </p>
               <div className="mt-2 flex flex-wrap gap-2">
-                {soonLogos.map(({ id, label }) => (
+                {chainSet.soon.map(({ id, label }) => (
                   <span
                     key={id}
                     className="flex items-center gap-1.5 rounded-full border-2 border-dashed border-ink/50 px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide opacity-60"
@@ -174,6 +222,31 @@ export function Hero({
                     </span>
                     {label} · SOON
                   </span>
+                ))}
+              </div>
+            </>
+          )}
+          {/* the other mainnet universes: separate worlds, one click away */}
+          {others.length > 0 && (
+            <>
+              <p className="mt-3 font-mono text-[10px] font-bold tracking-[0.2em] opacity-70">
+                {u ? 'OTHER UNIVERSES — SEPARATE TOKENS, SEPARATE DOLLARS' : 'LIVE ON MAINNET'}
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2" data-testid="hero-universes">
+                {others.map((o) => (
+                  <button
+                    key={o.id}
+                    onClick={() => nav.go(o.id)}
+                    title={`${o.name} universe — ${o.line}`}
+                    className="flex items-center gap-1.5 rounded-full border-2 border-ink bg-cream px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm transition hover:-translate-y-0.5 hover:bg-white"
+                  >
+                    <span className="flex items-center -space-x-1">
+                      {o.logos.map((id) => (
+                        <ChainLogo key={id} id={id} size={16} />
+                      ))}
+                    </span>
+                    {o.name} UNIVERSE →
+                  </button>
                 ))}
               </div>
             </>

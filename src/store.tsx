@@ -411,7 +411,31 @@ export type TradeResult =
       /** The message is still crossing chains — the figures are an estimate. */
       pending?: boolean
     }
-  | { ok: false; reason: string }
+  | {
+      ok: false
+      reason: string
+      /** `min-out`: a protected trade reverted because the price moved past
+       * the tolerance — nothing was spent, and trying again is the remedy. */
+      code?: 'min-out'
+    }
+
+/** What a trade will do right now, computed with the hub's own arithmetic
+ * (fees, FAIR GENESIS tax and cap included). On-chain modes only. */
+export interface TradeExpectation {
+  /** The trade reverts unless at least `min` arrives (hub-chain gateway of a
+   * v7.1 deployment). Cross-chain trades cannot be protected yet. */
+  protected: boolean
+  /** Buy: tokens expected. Sell: dollars expected, net of the fee. */
+  expected: number
+  /** `expected` less the tolerance — what a protected trade insists on. */
+  min: number
+  /** Buy: dollars that will actually be put to work. */
+  spend?: number
+  /** Buy: dollars the FAIR GENESIS per-wallet cap turns away. */
+  clamped?: number
+  /** Buy: the fee rate applied right now (0.01 outside the genesis window). */
+  feeRate?: number
+}
 
 /** Which world an on-chain store is talking to. */
 export type NetworkProfile = 'local' | 'testnet' | 'mainnet'
@@ -421,13 +445,16 @@ export interface ChainInfo {
   id: string
   /** The hub chain's own gateway: one-transaction trades, no messaging fee. */
   local: boolean
-  /** The wallet's dollars here: USDC, plus oUSD claims on this chain's vault. */
+  /** The wallet's dollars here: the universe's dollar token (USDC, USDT —
+   * the field keeps its historical name), plus oUSD claims on this chain's vault. */
   usdc: number
   ousd: number
+  /** Trades from this chain are price-protected (see TradeExpectation). */
+  protected: boolean
   /** Native gas balance, and its symbol. */
   gas: number
   nativeSymbol: string
-  /** The chain's USDC vault: what it holds and how much it may hold. */
+  /** The chain's dollar vault: what it holds and how much it may hold. */
   liquidity: number
   depositCap: number
   depositsPaused: boolean
@@ -466,11 +493,17 @@ export interface StoreValue {
   /** Present only in on-chain mode. */
   onchain?: {
     status: 'connecting' | 'ready' | 'offline'
-    /** Local devnet, public testnet (play money) or mainnet (real USDC). */
+    /** Local devnet, public testnet (play money) or mainnet (real dollars). */
     network: NetworkProfile
+    /** Mainnet only: which independent universe this is. Its tokens exist
+     * nowhere else. `single`: one chain, no cross-chain trading. */
+    universe?: { id: 'core' | 'bnb' | 'ethereum'; name: string; line: string; single: boolean }
+    /** The settlement dollar of this deployment (USDC with 6 decimals, BSC
+     * USDT with 18…) — read from the chain, never assumed. */
+    dollar: { symbol: string; decimals: number }
     /** The protocol's tank pays every message (testnets): no fee to attach. */
     sponsored: boolean
-    /** Mints play USDC on every chain the wallet has gas on — testnets and
+    /** Mints play dollars on every chain the wallet has gas on — testnets and
      * the local devnet only; absent on mainnet. */
     airdrop?: () => Promise<void>
     /** Chain ids actually live on this deployment. */
@@ -497,8 +530,16 @@ export interface StoreValue {
     /** Tokens delivered before their replica existed: creature num -> chain -> amount. */
     parked?: Record<number, Record<string, number>>
     claimParked?: (num: number, chain: string) => Promise<number>
-    /** Turn the wallet's oUSD claims on a chain back into USDC; returns USDC received. */
+    /** Turn the wallet's oUSD claims on a chain back into its dollar token; returns the dollars received. */
     unwrap?: (chain: string) => Promise<number>
+    /** What a trade does right now, by the hub's own arithmetic. */
+    expect?: (num: number, side: Side, amount: number, chain: string) => TradeExpectation | null
+    /** The price tolerance of protected trades, in basis points. */
+    slippage?: { bps: number; set: (bps: number) => void }
+    /** Chains where a token cannot be traded yet: creature num -> chain ->
+     * `arriving` (its replica is still on its way) or `failed` (its creation
+     * message could not be sent; the operator has to send it again). */
+    unavailable?: Record<number, Record<string, 'arriving' | 'failed'>>
     /** The native fee a launch from `chain` must attach right now. */
     quoteSpawnFee?: (input: SpawnInput, chain: string) => Promise<number>
     /** Mainnet only: the one-time risk notice gating every transaction. */

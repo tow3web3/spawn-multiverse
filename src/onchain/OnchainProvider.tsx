@@ -9,21 +9,37 @@
  *  - PUBLIC TESTNET: the hub is Base Sepolia, each spoke its own network;
  *    play money (a MockUSDC anyone can mint), burner wallets, a gas drip,
  *    and usually sponsored messaging.
- *  - MAINNET: real USDC, the user's own wallet only, user-paid messaging,
- *    guarded by deposit caps and a one-time risk notice.
+ *  - MAINNET: real dollars, the user's own wallet only, user-paid messaging,
+ *    guarded by deposit caps and a risk notice. Mainnet is several
+ *    independent UNIVERSES (lib/universes), one manifest each.
  *
  * What v7 means here:
- *  - Money is USDC (6 decimals). Each chain's OmniUSD is the USDC vault AND
- *    an 18-decimal claim on it: a wallet's dollars on a chain are USDC +
- *    oUSD. Buys pull USDC through an EXACT approval to the vault (never the
- *    gateway); payouts come back as USDC, or as an oUSD claim when that
- *    chain's vault is short.
+ *  - Money is the deployment's DOLLAR TOKEN: USDC (6 decimals) in the
+ *    omnichain universe and on Ethereum, BSC USDT (18 decimals) on BNB. Its
+ *    decimals are read from the chain and every conversion goes through
+ *    lib/dollars — nothing here assumes six. Each chain's vault holds that
+ *    token AND is an 18-decimal claim on it (oUSD): a wallet's dollars on a
+ *    chain are token + oUSD. Buys pull the token through an EXACT approval
+ *    to the vault (never the gateway); payouts come back as the token, or as
+ *    an oUSD claim when that chain's vault is short.
  *  - Every gateway call is payable: it must attach the fee its `quote*`
  *    view returns, unless the deployment is sponsored.
  *  - The hub chain has its own gateway (`local`): trades there settle in one
  *    transaction, no cross-chain wait.
  *  - The hub never reverts on a message — it REFUSES (event `Refused`) and
  *    sends value home. Outcomes are read from events, not from reverts.
+ *
+ * What v7.1 adds:
+ *  - Everything this provider remembers in the browser is keyed by the
+ *    deployment, so nothing leaks from one universe into another.
+ *  - PRICE PROTECTION where the hub answers in the same transaction (the hub
+ *    chain's own gateway, a single-chain universe): the trade goes through
+ *    `*Min` and reverts unless at least the minimum arrives. The minimum is
+ *    the hub's own arithmetic (lib/curveMath) on the quote the user is
+ *    looking at, less their tolerance. Cross-chain trades cannot be
+ *    protected yet, and the interface says so.
+ *  - A chain whose SYNC failed has no replica of a token: it is shown as not
+ *    available there instead of offering a trade the gateway would refuse.
  */
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
@@ -32,19 +48,21 @@ import {
   custom,
   defineChain,
   formatEther,
-  formatUnits,
   getAddress,
   http,
   pad as padHex,
   parseEther,
   parseEventLogs,
-  parseUnits,
+  toFunctionSelector,
   type Address,
   type Chain,
   type Log,
   type PublicClient,
 } from 'viem'
 import { narrowActor } from '../lib/format'
+import { USDC, fromUnits, lessBps, scaleOf, toUnits, type Dollar } from '../lib/dollars'
+import { expectBuy, expectSell, type CurveState, type GenesisState } from '../lib/curveMath'
+import { universeOf, type UniverseDef } from '../lib/universes'
 import { hostedImagePath } from '../lib/tokenImage'
 import { MAX_META_BYTES, buildMetaURI, utf8Len } from '../lib/tokenMeta'
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
@@ -57,6 +75,7 @@ import {
   type NetworkProfile,
   type SpawnInput,
   type StoreValue,
+  type TradeExpectation,
   type TradeResult,
   type Wallet,
 } from '../store'
@@ -95,8 +114,18 @@ const toActor = (b32: string): string => {
 /** Play dollars minted per chain on testnets / the local devnet. */
 const MINT_PER_CHAIN = 1337
 const ZERO = '0x0000000000000000000000000000000000000000'
-/** oUSD has 18 decimals, USDC 6: one USDC unit is SCALE oUSD wei. */
-const SCALE = 10n ** 12n
+const ZERO32 = `0x${'0'.repeat(64)}` as const
+/** The gateway's floor on a trade (`MIN_AMOUNT`): 1e12 wei of dollars on a
+ * buy, 1e12 wei of tokens on a sell — below it the call reverts "GW: dust". */
+const MIN_AMOUNT = 10n ** 12n
+/** Price tolerance of a protected trade, in basis points. */
+const DEFAULT_SLIPPAGE_BPS = 200
+const MIN_SLIPPAGE_BPS = 10
+const MAX_SLIPPAGE_BPS = 5000
+const LS_SLIPPAGE = 'spawn.slippage.bps'
+/** The v7.1 gateway's protected entrypoints. A gateway without them (the
+ * v7.0 testnet) is recognised by this selector missing from its code. */
+const MIN_SELECTOR = toFunctionSelector('buyTokenUsdcMin(address,uint256,uint256)').slice(2).toLowerCase()
 // Hardhat's well-known dev account #0 — funds wallets with gas on the LOCAL
 // dev chain only. Never reuse outside a throwaway devnet.
 const FUNDER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as const
@@ -106,7 +135,8 @@ const LOG_CHUNK_PUBLIC = 199n
 // First load only backfills this many hub blocks of tape (~33h on Base's 2s
 // blocks) — keeps page loads fast on capped public RPCs.
 const BACKFILL_BLOCKS = 60_000n
-const LS_RISK = 'spawn.risk.accepted.v1'
+/** The risk notice is accepted once PER UNIVERSE: each has its own risks. */
+const riskKey = (universe: string) => `spawn.risk.accepted.v2.${universe}`
 /** Gateway string caps (bytes) — a longer string reverts "GW: string too long".
  * (The metaURI cap, 1024, lives with its builder in lib/tokenMeta.) */
 const MAX_NAME_BYTES = 64
@@ -129,8 +159,6 @@ const KNOWN_CHAINS: Record<number, { name: string; symbol?: string; explorer?: s
 }
 
 const ef = (v: bigint) => Number(formatEther(v))
-const e6 = (v: bigint) => Number(formatUnits(v, 6))
-const toU6 = (n: number) => parseUnits(n.toFixed(6), 6)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const up = (chainId: string) => chainId.toUpperCase()
 
@@ -138,6 +166,27 @@ interface TokenEntry {
   meta: CreatureMeta
   token: Address
   market: Market
+  /** The curve exactly as the venue stores it (wei): what a minimum is
+   * computed from. `market.state` is its float shadow, for display. */
+  curve: CurveState
+}
+
+/** A trade as the hub will execute it, in the chain's own integers. */
+interface RawExpectation {
+  protected: boolean
+  /** Buy: token wei. Sell: dollar wei (18 decimals), net of the fee. */
+  expected: bigint
+  /** `expected` less the tolerance. */
+  min: bigint
+  /** Buy: the dollars that will really be sent — the request, sized down to
+   * what the FAIR GENESIS cap leaves — in wei and in the token's units. */
+  spendWei: bigint
+  spendUnits: bigint
+  /** Buy: the part of the request the cap turns away (wei). */
+  clampedWei: bigint
+  feeBps: bigint
+  /** Sell: the token wei that will be sold (a whole bag sells whole). */
+  tokensWei: bigint
 }
 
 /** One user-facing network: its contracts and a client to reach it. */
@@ -151,6 +200,15 @@ interface ChainIO {
   dist: Address | null
   /** Hub chain's own gateway: the pad's events are in the same receipt. */
   local: boolean
+  /** Decimals of this chain's dollar token, and oUSD wei per smallest unit
+   * of it (the vault's own SCALE). `verified`: both were read from the
+   * chain; until then they are what the manifest declares, and no
+   * transaction goes out before they are confirmed. */
+  dec: number
+  scale: bigint
+  verified: boolean
+  /** The gateway has the v7.1 `*Min` entrypoints. */
+  hasMin: boolean
   chain: Chain
   client: PublicClient
 }
@@ -280,12 +338,24 @@ async function ensureInjectedChain(provider: Eip1193Provider, chain: Chain) {
 /** The per-browser trade ledger of one wallet: dollars paid per creature
  * (`cost`) and the tokens those dollars bought, net of sells (`held`). PnL is
  * only shown for a bag this ledger fully accounts for. */
-function loadLedger(kind: 'cost' | 'held', addr: string): Record<number, number> {
+function loadLedger(kind: 'cost' | 'held', scope: string, addr: string): Record<number, number> {
+  // keyed by the deployment (its pad): creature #1 of one universe is not
+  // creature #1 of another
   try {
-    return JSON.parse(localStorage.getItem(`spawn.${kind}.${addr.toLowerCase()}`) ?? '{}')
+    return JSON.parse(localStorage.getItem(`spawn.${kind}.${scope}.${addr.toLowerCase()}`) ?? '{}')
   } catch {
     return {}
   }
+}
+
+function loadSlippage(): number {
+  try {
+    const n = Number(localStorage.getItem(LS_SLIPPAGE))
+    if (Number.isInteger(n) && n >= MIN_SLIPPAGE_BPS && n <= MAX_SLIPPAGE_BPS) return n
+  } catch {
+    /* no storage */
+  }
+  return DEFAULT_SLIPPAGE_BPS
 }
 
 function parseMetaURI(uri: string): {
@@ -301,19 +371,54 @@ function parseMetaURI(uri: string): {
   }
 }
 
-/** A short, human reason out of a viem / wallet error. */
-function reasonOf(e: unknown): string {
+/** Everything a viem / wallet error says, flattened: the revert string of a
+ * failed gas estimate can sit in `details` or deep in the cause chain. */
+function errorText(e: unknown): string {
+  const parts: string[] = []
+  let cur = e as { shortMessage?: string; message?: string; details?: string; cause?: unknown } | undefined
+  for (let i = 0; cur && i < 6; i++) {
+    if (typeof cur === 'string') {
+      parts.push(cur)
+      break
+    }
+    for (const s of [cur.shortMessage, cur.details, cur.message]) if (s) parts.push(String(s))
+    cur = cur.cause as typeof cur
+  }
+  return parts.join('\n')
+}
+
+/** A transaction that was mined and reverted: gas was spent, nothing else. */
+class MinedRevert extends Error {
+  mined = true
+}
+
+/** A protected trade the chain turned away because the price left the
+ * tolerance. Not a failure of anything: the protection doing its job. */
+const isMinOut = (e: unknown) => /GW: min out/.test(errorText(e))
+const minOutReason = (e: unknown) =>
+  e instanceof MinedRevert
+    ? 'The price moved more than your tolerance — the trade was cancelled and nothing was spent but the gas of that transaction. Try again.'
+    : 'The price moved more than your tolerance — nothing was spent. Try again.'
+
+/** A short, human reason out of a viem / wallet error. `sym` is the
+ * deployment's dollar ("USDC", "USDT"). */
+function reasonOf(e: unknown, sym = 'USDC'): string {
   const any = e as { shortMessage?: string; message?: string; code?: number; cause?: { code?: number } }
   if (any?.code === 4001 || any?.cause?.code === 4001) return 'Rejected in the wallet.'
+  const all = errorText(e)
   const msg = String(any?.shortMessage ?? any?.message ?? 'Transaction failed.')
-  if (/GW: paused/.test(msg)) return 'Buys and launches are paused on this chain — sells stay open.'
-  if (/deposit cap/.test(msg)) return "This chain's deposit cap is full — try a smaller amount or another chain."
-  if (/deposits paused/.test(msg)) return 'Deposits are paused on this chain.'
-  if (/GW: unknown token/.test(msg)) return 'This token has not reached this chain yet — give it a minute.'
-  if (/LZM: fee|LOM: fee/.test(msg)) return 'The network fee moved — try again.'
-  if (/vault short/.test(msg)) return "This chain's vault is short of USDC right now — your claim stays valid."
-  if (/insufficient funds/i.test(msg)) return 'Not enough gas in the wallet for this transaction.'
-  if (/User rejected|denied/i.test(msg)) return 'Rejected in the wallet.'
+  if (/GW: min out/.test(all)) return minOutReason(e)
+  if (/GW: paused/.test(all)) return 'Buys and launches are paused on this chain — sells stay open.'
+  if (/deposit cap/.test(all)) return "This chain's deposit cap is full — try a smaller amount or another chain."
+  if (/deposits paused/.test(all)) return 'Deposits are paused on this chain.'
+  if (/GW: unknown token|GW: no replica/.test(all)) return 'This token is not available on this chain yet.'
+  if (/GW: dust|oUSD: dust|GW: zero|VENUE: dust/.test(all)) return 'That amount is too small to trade.'
+  if (/PAD: gas/.test(all))
+    return 'The launch ran out of gas before it could reach every chain — send it again with a higher gas limit.'
+  if (/LZM: fee|LOM: fee/.test(all)) return 'The network fee moved — try again.'
+  if (/vault short/.test(all)) return `This chain's vault is short of ${sym} right now — your claim stays valid.`
+  if (/insufficient funds/i.test(all)) return 'Not enough gas in the wallet for this transaction.'
+  if (/User rejected|denied/i.test(all)) return 'Rejected in the wallet.'
   return msg.split('\n')[0].slice(0, 140)
 }
 
@@ -408,14 +513,14 @@ export function OnchainProvider({
   const [network, setNetwork] = useState<NetworkProfile>('local')
   const [sponsored, setSponsored] = useState(false)
   const [hubPaused, setHubPaused] = useState(false)
-  const [riskAccepted, setRiskAccepted] = useState(() => {
-    try {
-      return localStorage.getItem(LS_RISK) === '1'
-    } catch {
-      return false
-    }
-  })
+  /** Mainnet: the universe this manifest is, once it is known. */
+  const [universe, setUniverse] = useState<UniverseDef | undefined>(undefined)
+  /** The settlement dollar: symbol from the manifest, decimals from the chain. */
+  const [dollar, setDollar] = useState<Dollar>(USDC)
+  /** Read from storage once the manifest says WHICH universe's notice it is. */
+  const [riskAccepted, setRiskAccepted] = useState(false)
   const [riskOpen, setRiskOpen] = useState(false)
+  const [slippageBps, setSlippageBps] = useState(loadSlippage)
   /** The chains this deployment runs. Remembered per manifest so a return
    * visit never flashes the full six-chain design before the manifest
    * loads — the copy must only name what is live. */
@@ -445,9 +550,23 @@ export function OnchainProvider({
   const sponsoredRef = useRef(false)
   const hubPausedRef = useRef(false)
   const riskRef = useRef(riskAccepted)
+  /** Which universe's risk notice this is (its storage key). */
+  const universeRef = useRef<UniverseDef | undefined>(undefined)
+  const dollarRef = useRef<Dollar>(USDC)
+  /** The deployment's key for everything kept in this browser: its pad. */
+  const scopeRef = useRef('')
+  const slippageRef = useRef(slippageBps)
   const burnerRef = useRef<PrivateKeyAccount | null>(null)
   const entriesRef = useRef<Map<number, TokenEntry>>(new Map())
   const replicaCache = useRef<Map<string, Address>>(new Map())
+  /** Tokens whose SYNC to a chain failed and was not sent again:
+   * hub token (lowercase) -> chain labels. */
+  const syncFailedRef = useRef<Map<string, Set<number>>>(new Map())
+  /** creature num -> chain id -> why it cannot be traded there yet. */
+  const unavailableRef = useRef<Record<number, Record<string, 'arriving' | 'failed'>>>({})
+  /** FAIR GENESIS in the hub's integers, for the tokens still in their
+   * window: creature num -> tax now, and this wallet's spend against the cap. */
+  const genesisRawRef = useRef<Record<number, GenesisState>>({})
   const chainStateRef = useRef<Record<string, ChainState>>({})
   const tokensByChainRef = useRef<Map<number, Record<string, bigint>>>(new Map())
   /** Claimable holder rewards: creature num -> chain id -> oUSD wei. */
@@ -468,8 +587,8 @@ export function OnchainProvider({
   const heldRef = useRef<Record<number, number>>({})
   /** Loads the trade ledger of the wallet that just became active. */
   const rekey = (addr: string) => {
-    costsRef.current = loadLedger('cost', addr)
-    heldRef.current = loadLedger('held', addr)
+    costsRef.current = loadLedger('cost', scopeRef.current, addr)
+    heldRef.current = loadLedger('held', scopeRef.current, addr)
   }
   const sourceRef = useRef<WalletSource>('burner')
   const injectedRef = useRef<Address | null>(null)
@@ -517,8 +636,37 @@ export function OnchainProvider({
       account: activeAccount(),
     })
     const receipt = await c.client.waitForTransactionReceipt({ hash })
-    if (receipt.status !== 'success') throw new Error('The transaction reverted.')
+    if (receipt.status !== 'success') {
+      // Mined and reverted (a wallet lets the user send a transaction its
+      // own estimate said would fail). The receipt carries no reason, so the
+      // call is replayed against the block it died in to hear it.
+      let why = ''
+      try {
+        await c.client.simulateContract({
+          ...req,
+          account: activeAddr() ?? undefined,
+          blockNumber: receipt.blockNumber,
+        } as never)
+      } catch (e) {
+        why = errorText(e)
+      }
+      throw new MinedRevert(why || 'The transaction reverted.')
+    }
     return receipt
+  }
+
+  /** Confirms a chain's dollar decimals and vault scale against the chain
+   * itself before the first transaction there, when boot could not (its RPC
+   * was unreachable). An amount is never converted on a declared value alone. */
+  const sure = async (c: ChainIO) => {
+    if (c.verified) return
+    const [dec, scale] = await Promise.all([
+      read<number>(c.client, { address: c.usdc, abi: usdcAbi, functionName: 'decimals' }),
+      read<bigint>(c.client, { address: c.usd, abi: usdAbi, functionName: 'SCALE' }),
+    ])
+    if (Number(dec) !== c.dec || scale !== c.scale)
+      throw new Error(`${up(c.id)}'s dollar does not match this deployment's manifest — refusing to trade.`)
+    c.verified = true
   }
 
   const read = <T,>(
@@ -552,7 +700,7 @@ export function OnchainProvider({
     const addr = activeAddr()
     if (!addr) return
     try {
-      const key = addr.toLowerCase()
+      const key = `${scopeRef.current}.${addr.toLowerCase()}`
       localStorage.setItem(`spawn.cost.${key}`, JSON.stringify(costsRef.current))
       localStorage.setItem(`spawn.held.${key}`, JSON.stringify(heldRef.current))
     } catch {
@@ -576,7 +724,7 @@ export function OnchainProvider({
     return addr
   }, [])
 
-  const poll = useCallback(async () => {
+  const pollOnce = useCallback(async () => {
     const hub = hubClientRef.current
     const m = manifestRef.current
     if (!hub || !m) return
@@ -610,13 +758,14 @@ export function OnchainProvider({
         let image = hostedImagePath(parsed.image)
         if (!image) {
           try {
-            image = localStorage.getItem(`spawn.img.${token.toLowerCase()}`) ?? undefined
+            image = localStorage.getItem(`spawn.img.${scopeRef.current}.${token.toLowerCase()}`) ?? undefined
           } catch {
             /* no storage */
           }
         }
         entry = {
           token,
+          curve: { vBase, vTokens, sold, ascended },
           meta: {
             num,
             name,
@@ -646,6 +795,7 @@ export function OnchainProvider({
         }
         entriesRef.current.set(num, entry)
       }
+      entry.curve = { vBase, vTokens, sold, ascended }
       entry.market.state = {
         phase: ascended ? 'pool' : 'curve',
         vBase: ef(vBase),
@@ -724,8 +874,38 @@ export function OnchainProvider({
         } else if (log.eventName === 'Ascended') {
           const entry = byToken.get((log.args.token as string).toLowerCase())
           if (entry) entry.market.ascendedAt = at(log.args.ts)
+        } else if (log.eventName === 'SyncFailed' || log.eventName === 'Resynced') {
+          // v7.1: a chain the launch could not reach has no replica of the
+          // token until the operator sends the SYNC again
+          const key = (log.args.token as string).toLowerCase()
+          const set = syncFailedRef.current.get(key) ?? new Set<number>()
+          if (log.eventName === 'SyncFailed') set.add(Number(log.args.chain))
+          else set.delete(Number(log.args.chain))
+          syncFailedRef.current.set(key, set)
         }
       }
+    }
+
+    // 2b. where each token can be traded: a remote chain needs its replica.
+    //     Resolved for everyone, wallet or not — the token page must not
+    //     offer a chain the gateway would refuse ("GW: unknown token").
+    {
+      const entries = [...entriesRef.current.entries()]
+      await Promise.all(
+        entries.flatMap(([, entry]) =>
+          iosRef.current.map((c) => replicaAddr(c.id, entry.token).catch(() => ZERO as Address)),
+        ),
+      )
+      const unavailable: Record<number, Record<string, 'arriving' | 'failed'>> = {}
+      for (const [num, entry] of entries) {
+        const failed = syncFailedRef.current.get(entry.token.toLowerCase())
+        for (const c of iosRef.current) {
+          if (c.local) continue // the hub chain's replica is born with the token
+          if (replicaCache.current.has(`${c.id}:${entry.token}`)) continue
+          ;(unavailable[num] ??= {})[c.id] = failed?.has(c.label) ? 'failed' : 'arriving'
+        }
+      }
+      unavailableRef.current = unavailable
     }
 
     // 3. per-chain health: vault, pause switches, messaging fees. Each
@@ -784,13 +964,6 @@ export function OnchainProvider({
     // 4. the wallet's bags, holder rewards, parked deliveries
     if (addr) {
       const entries = [...entriesRef.current.entries()]
-      // make sure every replica address is known (cached after the first hit)
-      await Promise.all(
-        entries.flatMap(([, entry]) =>
-          iosRef.current.map((c) => replicaAddr(c.id, entry.token).catch(() => ZERO as Address)),
-        ),
-      )
-
       const positions: Wallet['positions'] = {}
       const rewards: Record<number, number> = {}
       const holderFees: Record<number, HolderFees> = {}
@@ -888,30 +1061,67 @@ export function OnchainProvider({
       // FAIR GENESIS window state, for tokens still inside (or near) their
       // window — one cheap hub read each, skipped once closed
       const fg: Record<number, { endsAt: number; spentUsd: number; capUsd: number }> = {}
+      const raw: Record<number, GenesisState> = {}
       await Promise.all(
         entries.map(async ([num, entry]) => {
           if (Date.now() > entry.meta.spawnedAt + 660_000) return
           try {
-            const [endsAt, , spentUsd, capUsd] = await hub.readContract({
+            const [endsAt, snipeBps, spentUsd, capUsd] = await hub.readContract({
               address: m.pad,
               abi: padAbi,
               functionName: 'fairGenesisOf',
               args: [entry.token, padHex(addr, { size: 32 })],
             })
             fg[num] = { endsAt: at(endsAt), spentUsd: ef(spentUsd), capUsd: ef(capUsd) }
+            raw[num] = { snipeBps, spent: spentUsd, cap: capUsd }
           } catch {
             /* transient */
           }
         }),
       )
       fairGenesisRef.current = fg
+      genesisRawRef.current = raw
 
-      const total = Object.values(nextState).reduce((a, s) => a + s.usdc * SCALE + s.ousd, 0n)
-      setWallet({ address: addr, balance: ef(total), positions })
+      setWallet({ address: addr, balance: ef(dollarsWei(nextState)), positions })
     }
 
     bump()
   }, [replicaAddr])
+
+  /** Polls never overlap. Two at once would both read the tape from the same
+   * block and book every trade in it twice (volume, holders, the tape
+   * itself). A call made while one is in flight gets the NEXT poll — one
+   * that starts after this moment, so whoever just transacted sees their
+   * own block — and every such caller shares that one. */
+  const pollRunning = useRef<Promise<void> | null>(null)
+  const pollQueued = useRef<Promise<void> | null>(null)
+  const poll = useCallback((): Promise<void> => {
+    const start = () => {
+      const p = pollOnce().finally(() => {
+        if (pollRunning.current === p) pollRunning.current = null
+      })
+      pollRunning.current = p
+      return p
+    }
+    if (!pollRunning.current) return start()
+    if (!pollQueued.current) {
+      pollQueued.current = pollRunning.current
+        .catch(() => undefined)
+        .then(() => {
+          pollQueued.current = null
+          return start()
+        })
+    }
+    return pollQueued.current
+  }, [pollOnce])
+
+  /** Everything the wallet holds in dollars across the chains, in 18-decimal
+   * wei: each chain's dollar token at ITS scale, plus oUSD. */
+  const dollarsWei = (states: Record<string, ChainState>) =>
+    iosRef.current.reduce((a, c) => {
+      const s = states[c.id]
+      return s ? a + s.usdc * c.scale + s.ousd : a
+    }, 0n)
 
   // boot: fetch manifest, build one client per network, start polling
   useEffect(() => {
@@ -924,8 +1134,32 @@ export function OnchainProvider({
         const manifest = (await res.json()) as Manifest
         if (!manifest?.pad || !Array.isArray(manifest.chains)) throw new Error('bad manifest')
         if (manifest.chains.some((c) => !c.usdc))
-          throw new Error('pre-v7 deployment manifest (no USDC) — redeploy or wait for the v7 rollout')
+          throw new Error('pre-v7 deployment manifest (no dollar token) — redeploy or wait for the v7 rollout')
         manifestRef.current = manifest
+        scopeRef.current = manifest.pad.toLowerCase()
+        // which universe (mainnet) and which dollar this deployment is. The
+        // manifest declares the dollar; the chain confirms it below.
+        const uni = manifest.network === 'mainnet' ? universeOf(manifest.universe ?? 'core') : undefined
+        if (manifest.network === 'mainnet' && !uni) throw new Error(`unknown universe "${manifest.universe}"`)
+        universeRef.current = uni
+        setUniverse(uni)
+        const declared: Dollar = {
+          symbol: manifest.dollar?.symbol ?? USDC.symbol,
+          decimals: manifest.dollar?.decimals ?? USDC.decimals,
+        }
+        scaleOf(declared.decimals) // throws on nonsense
+        dollarRef.current = declared
+        setDollar(declared)
+        if (uni) {
+          let accepted = false
+          try {
+            accepted = localStorage.getItem(riskKey(uni.id)) === '1'
+          } catch {
+            /* no storage */
+          }
+          riskRef.current = accepted
+          setRiskAccepted(accepted)
+        }
         const ids = manifest.chains.map((c) => c.id)
         setChainIds(ids)
         try {
@@ -995,6 +1229,35 @@ export function OnchainProvider({
                 dist = null
               }
             }
+            // The dollar as the chain has it: the token's decimals and the
+            // vault's SCALE. A deployment whose manifest says one thing and
+            // whose chain says another is not booted — every amount on the
+            // screen would be off by a power of ten.
+            let dec = declared.decimals
+            let scale = scaleOf(dec)
+            let verified = false
+            let hasMin = false
+            try {
+              const [d, s, code] = await Promise.all([
+                read<number>(client, { address: c.usdc!, abi: usdcAbi, functionName: 'decimals' }),
+                read<bigint>(client, { address: c.usd, abi: usdAbi, functionName: 'SCALE' }),
+                client.getCode({ address: c.gateway }),
+              ])
+              if (Number(d) !== declared.decimals)
+                throw new Error(
+                  `${c.id}: the dollar token has ${d} decimals, the manifest says ${declared.decimals}`,
+                )
+              if (s !== scaleOf(Number(d)))
+                throw new Error(`${c.id}: the vault's SCALE is ${s}, not 10^(18-${d})`)
+              dec = Number(d)
+              scale = s
+              verified = true
+              hasMin = (code ?? '').toLowerCase().includes(MIN_SELECTOR)
+            } catch (e) {
+              // a real mismatch is fatal; a chain that merely did not answer
+              // is confirmed before its first transaction (see `sure`)
+              if (/decimals, the manifest|SCALE is/.test(String((e as Error).message))) throw e
+            }
             return {
               id: c.id,
               label: c.label,
@@ -1005,6 +1268,10 @@ export function OnchainProvider({
               // on the one-node devnet every chain is "local" in effect; the
               // flag only marks the hub chain's own gateway on real networks
               local: c.local === true,
+              dec,
+              scale,
+              verified,
+              hasMin,
               chain,
               client,
             }
@@ -1113,16 +1380,17 @@ export function OnchainProvider({
               functionName: 'balanceOf',
               args: [addr],
             })
-            if (have >= toU6(50)) {
+            if (have >= toUnits(50, c.dec)) {
               done++
               continue
             }
           }
+          await sure(c)
           await write(c, {
             address: c.usdc,
             abi: usdcAbi,
             functionName: 'mint',
-            args: [addr, toU6(MINT_PER_CHAIN)],
+            args: [addr, toUnits(MINT_PER_CHAIN, c.dec)],
           })
           done++
         } catch {
@@ -1233,8 +1501,7 @@ export function OnchainProvider({
         /* no gas yet — connected with an empty wallet; UI shows the state */
       }
     }
-    const total = Object.values(chainStateRef.current).reduce((a, s) => a + s.usdc * SCALE + s.ousd, 0n)
-    return { address: who, balance: ef(total), positions: wallet?.positions ?? {} }
+    return { address: who, balance: ef(dollarsWei(chainStateRef.current)), positions: wallet?.positions ?? {} }
   }, [mintUsdc, poll, wallet])
 
   /** Back to the disconnected state. The burner key stays in storage, so
@@ -1289,19 +1556,106 @@ export function OnchainProvider({
     [],
   )
 
-  /** Makes sure the vault may pull exactly `usdc6` from the wallet. The
-   * approval goes to the OmniUSD vault (it is what moves the USDC), and it
-   * is exact: the gateway can pull from anyone who approved the vault, so a
-   * standing unlimited approval would be a standing risk. */
-  const approveExact = async (c: ChainIO, owner: Address, usdc6: bigint) => {
+  /** Makes sure the vault may pull exactly `units` of the dollar token from
+   * the wallet. The approval goes to the vault (it is what moves the token),
+   * and it is exact: the gateway can pull from anyone who approved the vault,
+   * so a standing unlimited approval would be a standing risk. */
+  const approveExact = async (c: ChainIO, owner: Address, units: bigint) => {
     const allowance = await read<bigint>(c.client, {
       address: c.usdc,
       abi: usdcAbi,
       functionName: 'allowance',
       args: [owner, c.usd],
     })
-    if (allowance >= usdc6) return
-    await write(c, { address: c.usdc, abi: usdcAbi, functionName: 'approve', args: [c.usd, usdc6] })
+    if (allowance >= units) return
+    await write(c, { address: c.usdc, abi: usdcAbi, functionName: 'approve', args: [c.usd, units] })
+  }
+
+  /** `amount` dollars (as typed) in chain `c`'s token units and in wei. */
+  const dollarsIn = (c: ChainIO, amount: number) => {
+    const units = toUnits(amount, c.dec)
+    return { units, wei: units * c.scale }
+  }
+  /** A dollar figure for a message: "$12.50 USDT". */
+  const money = (c: ChainIO, units: bigint) =>
+    `$${fromUnits(units, c.dec).toLocaleString('en-US', { maximumFractionDigits: 2 })} ${dollarRef.current.symbol}`
+
+  /** The trade is protected when the hub answers in this very transaction
+   * AND the gateway has the v7.1 entrypoints. */
+  const protectedOn = (c: ChainIO) => (syncRef.current || c.local) && c.hasMin
+
+  /**
+   * What the hub will do with this trade right now, in its own integers:
+   * the fee, the FAIR GENESIS tax and the per-wallet cap included. `fresh`
+   * reads the curve and the window straight from the hub (right before
+   * signing); otherwise the last poll's figures serve the display.
+   */
+  const expectRaw = async (
+    entry: TokenEntry,
+    side: Side,
+    amount: number,
+    c: ChainIO,
+    fresh: boolean,
+  ): Promise<RawExpectation> => {
+    let curve = entry.curve
+    let genesis = genesisRawRef.current[entry.meta.num]
+    const addr = activeAddr()
+    if (fresh && hubClientRef.current && manifestRef.current) {
+      const hub = hubClientRef.current
+      const m = manifestRef.current
+      const [row, fg] = await Promise.all([
+        hub.readContract({
+          address: m.pad,
+          abi: padAbi,
+          functionName: 'getToken',
+          args: [BigInt(entry.meta.num - 1)],
+        }),
+        hub.readContract({
+          address: m.pad,
+          abi: padAbi,
+          functionName: 'fairGenesisOf',
+          args: [entry.token, addr ? padHex(addr, { size: 32 }) : ZERO32],
+        }),
+      ])
+      curve = { vBase: row[7], vTokens: row[8], sold: row[9], ascended: row[10] }
+      genesis = { snipeBps: fg[1], spent: fg[2], cap: fg[3] }
+      entry.curve = curve
+    }
+    const prot = protectedOn(c)
+    if (side === 'buy') {
+      const { wei } = dollarsIn(c, amount)
+      const e = expectBuy(curve, wei, genesis)
+      // a buy the cap would cut is SIZED DOWN to what the hub will take, so
+      // nothing rides out only to be refunded (and so a protected minimum
+      // can be met at all)
+      const spendUnits = e.spendable / c.scale
+      return {
+        protected: prot,
+        expected: e.tokens,
+        min: prot ? lessBps(e.tokens, slippageRef.current) : 0n,
+        spendWei: spendUnits * c.scale,
+        spendUnits,
+        clampedWei: wei - spendUnits * c.scale,
+        feeBps: e.feeBps,
+        tokensWei: 0n,
+      }
+    }
+    const perChain = tokensByChainRef.current.get(entry.meta.num) ?? {}
+    const have = perChain[c.id] ?? 0n
+    let tokensWei = parseEther(amount.toFixed(18))
+    // "sell everything" must not leave float dust behind on the chain
+    if (have > 0n && (tokensWei > have || (have - tokensWei) * 1_000_000_000n < have)) tokensWei = have
+    const net = expectSell(curve, tokensWei)
+    return {
+      protected: prot,
+      expected: net,
+      min: prot ? lessBps(net, slippageRef.current) : 0n,
+      spendWei: 0n,
+      spendUnits: 0n,
+      clampedWei: 0n,
+      feeBps: 100n,
+      tokensWei,
+    }
   }
 
   const trade = useCallback(
@@ -1320,6 +1674,25 @@ export function OnchainProvider({
       if (!cleared()) return { ok: false, reason: 'Read and accept the risk notice first.' }
       const st = stateOf(chainId)
       const sym = c.chain.nativeCurrency.symbol
+      const usdSym = dollarRef.current.symbol
+      if (unavailableRef.current[num]?.[chainId])
+        return {
+          ok: false,
+          reason:
+            unavailableRef.current[num][chainId] === 'failed'
+              ? `${entry.meta.ticker} is not available on ${up(chainId)} yet — its creation message did not reach that chain; the operator has to send it again.`
+              : `${entry.meta.ticker} has not reached ${up(chainId)} yet — give it a minute.`,
+        }
+
+      // what the hub will do with it, on a fresh read, in its own integers
+      let exp: RawExpectation
+      try {
+        await sure(c)
+        exp = await expectRaw(entry, side, amount, c, true)
+      } catch (e) {
+        return { ok: false, reason: reasonOf(e, usdSym) }
+      }
+      let note: string | undefined
 
       try {
         const fee = await feeFor(c, side === 'buy' ? 'quoteBuy' : 'quoteSell')
@@ -1343,42 +1716,60 @@ export function OnchainProvider({
             return { ok: false, reason: 'The hub is paused: a buy would only be refunded. Sells stay open.' }
           if (st.paused)
             return { ok: false, reason: `Buys are paused on ${up(chainId)} — sells stay open.` }
-          const usdc6 = toU6(amount)
-          const usd18 = usdc6 * SCALE
-          // spend oUSD claims first (no approval, no vault deposit), else USDC
+          const asked = dollarsIn(c, amount)
+          // FAIR GENESIS: inside the window a wallet may put at most the cap
+          // to work. A buy the cap would cut is sized down to what the hub
+          // will take — the rest would only ride out and be refunded — and
+          // a wallet at its cap is told so before anything is signed.
+          if (exp.spendUnits === 0n) {
+            const cap = fairGenesisRef.current[num]?.capUsd ?? 250
+            return {
+              ok: false,
+              reason: `FAIR GENESIS: this wallet has used its $${cap.toLocaleString('en-US')} cap for ${entry.meta.ticker}'s opening window — buy again when the window closes.`,
+            }
+          }
+          if (exp.clampedWei > 0n)
+            note = `FAIR GENESIS CAP — SIZED DOWN TO ${money(c, exp.spendUnits)} OF THE ${money(c, asked.units)} ASKED`
+          if (exp.spendWei < MIN_AMOUNT) return { ok: false, reason: 'That amount is too small to buy with.' }
+          if (exp.protected && exp.min === 0n)
+            return { ok: false, reason: 'That amount is too small to buy anything with — nothing would arrive.' }
+          const usdUnits = exp.spendUnits
+          const usd18 = exp.spendWei
+          // spend oUSD claims first (no approval, no vault deposit), else the token
           if (st.ousd >= usd18) {
             receipt = await write(c, {
               address: c.gateway,
               abi: gatewayAbi,
-              functionName: 'buyToken',
-              args: [entry.token, usd18],
+              functionName: exp.protected ? 'buyTokenMin' : 'buyToken',
+              args: exp.protected ? [entry.token, usd18, exp.min] : [entry.token, usd18],
               value: fee,
             })
-          } else if (st.usdc >= usdc6) {
+          } else if (st.usdc >= usdUnits) {
             if (st.depositsPaused)
               return { ok: false, reason: `Deposits are paused on ${up(chainId)} for now.` }
-            if (st.liquidity + usdc6 > st.depositCap)
+            if (st.liquidity + usdUnits > st.depositCap)
               return {
                 ok: false,
-                reason: `${up(chainId)}'s vault is at its deposit cap ($${e6(st.depositCap).toLocaleString('en-US')}) — only $${Math.max(0, e6(st.depositCap - st.liquidity)).toFixed(2)} of room left.`,
+                reason: `${up(chainId)}'s vault is at its deposit cap (${money(c, st.depositCap)}) — only ${money(c, st.depositCap > st.liquidity ? st.depositCap - st.liquidity : 0n)} of room left.`,
               }
-            await approveExact(c, addr, usdc6)
+            await approveExact(c, addr, usdUnits)
             receipt = await write(c, {
               address: c.gateway,
               abi: gatewayAbi,
-              functionName: 'buyTokenUsdc',
-              args: [entry.token, usdc6],
+              functionName: exp.protected ? 'buyTokenUsdcMin' : 'buyTokenUsdc',
+              args: exp.protected ? [entry.token, usdUnits, exp.min] : [entry.token, usdUnits],
               value: fee,
             })
           } else {
-            const usdc = e6(st.usdc)
             const ousd = ef(st.ousd)
             return {
               ok: false,
               reason:
-                `Only $${usdc.toFixed(2)} USDC on ${up(chainId)}` +
+                `Only ${money(c, st.usdc)} on ${up(chainId)}` +
                 (ousd >= 0.01 ? ` (+ $${ousd.toFixed(2)} in oUSD claims — unwrap them or buy less)` : '') +
-                (networkRef.current === 'mainnet' ? ' — fund this chain or pick another.' : ' — hit MINT USDC or pick another chain.'),
+                (networkRef.current === 'mainnet'
+                  ? ' — fund this chain or pick another.'
+                  : ` — hit MINT ${usdSym} or pick another chain.`),
             }
           }
         } else {
@@ -1395,14 +1786,15 @@ export function OnchainProvider({
                 : 'You hold none of this creature.',
             }
           }
-          let tokensWei = parseEther(amount.toFixed(18))
-          // "sell everything" must not leave float dust behind on the chain
-          if (tokensWei > have || (have - tokensWei) * 1_000_000_000n < have) tokensWei = have
+          const tokensWei = exp.tokensWei
+          if (tokensWei < MIN_AMOUNT) return { ok: false, reason: 'That amount is too small to sell.' }
+          if (exp.protected && exp.min === 0n)
+            return { ok: false, reason: 'That amount is too small to sell — it would pay out nothing.' }
           receipt = await write(c, {
             address: c.gateway,
             abi: gatewayAbi,
-            functionName: 'sellToken',
-            args: [entry.token, tokensWei],
+            functionName: exp.protected ? 'sellTokenMin' : 'sellToken',
+            args: exp.protected ? [entry.token, tokensWei, exp.min] : [entry.token, tokensWei],
             value: fee,
           })
         }
@@ -1426,9 +1818,10 @@ export function OnchainProvider({
         }
         if (got?.kind === 'bounced') {
           await poll()
+          const cap = fairGenesisRef.current[num]?.capUsd ?? 250
           return {
             ok: false,
-            reason: `FAIR GENESIS turned the buy away (spawn block or your $250 window cap) — $${got.refunded.toFixed(2)} refunded.`,
+            reason: `FAIR GENESIS turned the buy away (spawn block or your $${cap.toLocaleString('en-US')} window cap) — $${got.refunded.toFixed(2)} refunded.`,
           }
         }
 
@@ -1436,7 +1829,6 @@ export function OnchainProvider({
         let tokens: number
         let price: number
         let ascended = false
-        let note: string | undefined
         let pending = false
         if (got?.kind === 'trade') {
           usd = got.usd
@@ -1446,20 +1838,19 @@ export function OnchainProvider({
           if (got.guardRefund > 0.005)
             note = `FAIR GENESIS CAPPED IT — $${got.guardRefund.toFixed(2)} REFUNDED`
         } else {
-          // still in flight (or an unreadable receipt) — estimate from the quote
-          const q = marketQuote(entry.market, side, amount)
-          usd = side === 'buy' ? amount : q.usd
-          tokens = side === 'buy' ? q.tokens : amount
+          // still in flight (or an unreadable receipt) — the expectation serves
+          usd = side === 'buy' ? ef(exp.spendWei) : ef(exp.expected)
+          tokens = side === 'buy' ? ef(exp.expected) : ef(exp.tokensWei)
           price = entry.market.state.vBase / entry.market.state.vTokens
           pending = !instant
-          note = pending ? 'STILL CROSSING CHAINS — YOUR BALANCE UPDATES WHEN IT LANDS' : undefined
+          note = pending ? 'STILL CROSSING CHAINS — YOUR BALANCE UPDATES WHEN IT LANDS' : note
         }
-        // a sell paid as a claim instead of USDC is worth saying out loud
+        // a sell paid as a claim instead of the dollar token is worth saying out loud
         if (side === 'sell' && instant) {
           const paid = parseEventLogs({ abi: usdAbi, logs: receipt.logs }).find(
             (e) => e.eventName === 'PaidOut' && String(e.args.to).toLowerCase() === addr.toLowerCase(),
           )
-          if (paid && paid.args.usdcOut === 0n && paid.args.minted >= SCALE)
+          if (paid && paid.args.usdcOut === 0n && paid.args.minted >= c.scale)
             note = `${up(chainId)}'S VAULT IS SHORT — PAID AS AN oUSD CLAIM, UNWRAP IT WHEN LIQUIDITY RETURNS`
         }
 
@@ -1479,7 +1870,13 @@ export function OnchainProvider({
         await poll()
         return { ok: true, usd, tokens, price, ascended, note, pending }
       } catch (e) {
-        return { ok: false, reason: reasonOf(e) }
+        // the protection doing its job is not a failure: nothing moved, and
+        // trying again (or widening the tolerance) is the whole remedy
+        if (isMinOut(e)) {
+          void poll().catch(() => undefined)
+          return { ok: false, reason: minOutReason(e), code: 'min-out' }
+        }
+        return { ok: false, reason: reasonOf(e, usdSym) }
       }
     },
     [poll, waitHub, wallet],
@@ -1548,8 +1945,9 @@ export function OnchainProvider({
       if (utf8Len(metaURI) > MAX_META_BYTES) throw new Error('Those links are too long — shorten them.')
 
       const devBuy = input.devBuyUsd ?? 0
-      const usdc6 = devBuy > 0 ? toU6(devBuy) : 0n
-      const usd18 = usdc6 * SCALE
+      await sure(c)
+      const { units: usdUnits, wei: usd18 } = devBuy > 0 ? dollarsIn(c, devBuy) : { units: 0n, wei: 0n }
+      if (devBuy > 0 && usd18 < MIN_AMOUNT) throw new Error('That dev buy is too small.')
       const feeMode = FEE_MODE_INDEX[input.feeMode ?? 'holders']
       const fee = await feeFor(c, 'quoteSpawn', [name, ticker, metaURI, devBuy > 0])
       const sym = c.chain.nativeCurrency.symbol
@@ -1565,7 +1963,7 @@ export function OnchainProvider({
       const hubMark = (await hub.getBlockNumber({ cacheTime: 0 })) + 1n
       let receipt
       try {
-        if (usdc6 > 0n && st.ousd >= usd18) {
+        if (usdUnits > 0n && st.ousd >= usd18) {
           receipt = await write(c, {
             address: c.gateway,
             abi: gatewayAbi,
@@ -1574,23 +1972,25 @@ export function OnchainProvider({
             value: fee,
           })
         } else {
-          if (usdc6 > 0n) {
-            if (st.usdc < usdc6)
-              throw new Error(`Only $${e6(st.usdc).toFixed(2)} USDC on ${up(c.id)} for the dev buy.`)
-            if (st.depositsPaused || st.liquidity + usdc6 > st.depositCap)
-              throw new Error(`${up(c.id)}'s vault cannot take a $${devBuy} deposit right now (deposit cap).`)
-            await approveExact(c, addr, usdc6)
+          if (usdUnits > 0n) {
+            if (st.usdc < usdUnits)
+              throw new Error(`Only ${money(c, st.usdc)} on ${up(c.id)} for the dev buy.`)
+            if (st.depositsPaused || st.liquidity + usdUnits > st.depositCap)
+              throw new Error(
+                `${up(c.id)}'s vault cannot take a ${money(c, usdUnits)} deposit right now (deposit cap).`,
+              )
+            await approveExact(c, addr, usdUnits)
           }
           receipt = await write(c, {
             address: c.gateway,
             abi: gatewayAbi,
             functionName: 'spawnTokenUsdc',
-            args: [name, ticker, metaURI, usdc6, feeMode],
+            args: [name, ticker, metaURI, usdUnits, feeMode],
             value: fee,
           })
         }
       } catch (e) {
-        throw new Error(reasonOf(e))
+        throw new Error(reasonOf(e, dollarRef.current.symbol))
       }
 
       const refusedIn = (logs: Log[]) =>
@@ -1653,7 +2053,7 @@ export function OnchainProvider({
         // the creator's own copy of the face: what this browser shows when
         // the launch carries no hosted image
         try {
-          localStorage.setItem(`spawn.img.${token.toLowerCase()}`, input.image)
+          localStorage.setItem(`spawn.img.${scopeRef.current}.${token.toLowerCase()}`, input.image)
         } catch {
           /* no storage */
         }
@@ -1840,22 +2240,81 @@ export function OnchainProvider({
     [poll],
   )
 
-  /** Turns the wallet's oUSD claims on one chain back into USDC, as far as
-   * that chain's vault can pay right now. Returns the USDC received. */
+  /** Turns the wallet's oUSD claims on one chain back into its dollar token,
+   * as far as that chain's vault can pay right now. Returns the dollars
+   * received. Only whole token units unwrap: sub-unit oUSD dust (none with an
+   * 18-decimal dollar) stays as a claim. */
   const unwrap = useCallback(
     async (chainId: string): Promise<number> => {
       const c = io(chainId)
       if (!c || !activeAddr()) return 0
       if (!cleared()) return 0
+      await sure(c)
       const st = stateOf(chainId)
-      let usdc6 = st.ousd / SCALE
-      if (usdc6 > st.liquidity) usdc6 = st.liquidity
-      if (usdc6 === 0n) return 0
-      await write(c, { address: c.usd, abi: usdAbi, functionName: 'unwrap', args: [usdc6 * SCALE] })
+      let units = st.ousd / c.scale
+      if (units > st.liquidity) units = st.liquidity
+      if (units === 0n) return 0
+      try {
+        await write(c, { address: c.usd, abi: usdAbi, functionName: 'unwrap', args: [units * c.scale] })
+      } catch (e) {
+        throw new Error(reasonOf(e, dollarRef.current.symbol))
+      }
       await poll()
-      return e6(usdc6)
+      return fromUnits(units, c.dec)
     },
     [poll],
+  )
+
+  /** What a trade does right now, for the screen: the last poll's curve and
+   * window, the hub's arithmetic, the user's tolerance. */
+  const expect = useCallback(
+    (num: number, side: Side, amount: number, chainId: string): TradeExpectation | null => {
+      const entry = entriesRef.current.get(num)
+      const c = io(chainId)
+      if (!entry || !c || !(amount > 0)) return null
+      const prot = protectedOn(c)
+      if (side === 'buy') {
+        const { wei } = dollarsIn(c, amount)
+        const e = expectBuy(entry.curve, wei, genesisRawRef.current[num])
+        const spendUnits = e.spendable / c.scale
+        return {
+          protected: prot,
+          expected: ef(e.tokens),
+          min: prot ? ef(lessBps(e.tokens, slippageRef.current)) : ef(e.tokens),
+          spend: ef(spendUnits * c.scale),
+          clamped: ef(wei - spendUnits * c.scale),
+          feeRate: Number(e.feeBps) / 10_000,
+        }
+      }
+      const have = tokensByChainRef.current.get(num)?.[chainId] ?? 0n
+      let tokensWei = parseEther(amount.toFixed(18))
+      if (have > 0n && (tokensWei > have || (have - tokensWei) * 1_000_000_000n < have)) tokensWei = have
+      const net = expectSell(entry.curve, tokensWei)
+      return {
+        protected: prot,
+        expected: ef(net),
+        min: prot ? ef(lessBps(net, slippageRef.current)) : ef(net),
+        feeRate: 0.01,
+      }
+    },
+    [],
+  )
+
+  const slippage = useMemo(
+    () => ({
+      bps: slippageBps,
+      set: (bps: number) => {
+        const v = Math.min(MAX_SLIPPAGE_BPS, Math.max(MIN_SLIPPAGE_BPS, Math.round(bps)))
+        slippageRef.current = v
+        setSlippageBps(v)
+        try {
+          localStorage.setItem(LS_SLIPPAGE, String(v))
+        } catch {
+          /* no storage */
+        }
+      },
+    }),
+    [slippageBps],
   )
 
   const creatures = useMemo(() => {
@@ -1872,12 +2331,13 @@ export function OnchainProvider({
       out[c.id] = {
         id: c.id,
         local: c.local,
-        usdc: e6(s.usdc),
+        usdc: fromUnits(s.usdc, c.dec),
         ousd: ef(s.ousd),
+        protected: protectedOn(c),
         gas: ef(s.gas),
         nativeSymbol: c.chain.nativeCurrency.symbol,
-        liquidity: e6(s.liquidity),
-        depositCap: e6(s.depositCap),
+        liquidity: fromUnits(s.liquidity, c.dec),
+        depositCap: fromUnits(s.depositCap, c.dec),
         depositsPaused: s.depositsPaused,
         paused: s.paused,
         fee: { buy: ef(s.fee.buy), sell: ef(s.fee.sell), claim: ef(s.fee.claim), pull: ef(s.fee.pull) },
@@ -1911,7 +2371,8 @@ export function OnchainProvider({
               setRiskAccepted(true)
               setRiskOpen(false)
               try {
-                localStorage.setItem(LS_RISK, '1')
+                // this universe's notice only: the next universe has its own
+                localStorage.setItem(riskKey(universeRef.current?.id ?? 'core'), '1')
               } catch {
                 /* no storage — asked again next visit */
               }
@@ -1919,6 +2380,11 @@ export function OnchainProvider({
           }
         : undefined,
     [network, riskAccepted, riskOpen],
+  )
+
+  const universeInfo = useMemo(
+    () => (universe ? { id: universe.id, name: universe.name, line: universe.line, single: universe.single } : undefined),
+    [universe],
   )
 
   const value = useMemo<StoreValue>(
@@ -1936,6 +2402,8 @@ export function OnchainProvider({
       onchain: {
         status,
         network,
+        universe: universeInfo,
+        dollar,
         sponsored,
         airdrop: network === 'mainnet' ? undefined : airdrop,
         chains: chainIds,
@@ -1951,6 +2419,9 @@ export function OnchainProvider({
         parked: parkedRef.current,
         claimParked,
         unwrap,
+        expect,
+        slippage,
+        unavailable: unavailableRef.current,
         quoteSpawnFee,
         fairGenesis: fairGenesisRef.current,
         risk,
@@ -1968,6 +2439,8 @@ export function OnchainProvider({
       justSpawned,
       status,
       network,
+      universeInfo,
+      dollar,
       sponsored,
       airdrop,
       chainIds,
@@ -1980,6 +2453,8 @@ export function OnchainProvider({
       bags,
       claimParked,
       unwrap,
+      expect,
+      slippage,
       quoteSpawnFee,
       risk,
     ],

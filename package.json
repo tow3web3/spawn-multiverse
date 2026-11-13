@@ -11,7 +11,8 @@
     "chain:deploy": "npm --prefix contracts run deploy:local",
     "chain:bots": "npm --prefix contracts run bots",
     "chain:test": "npm --prefix contracts test",
-    "test:functions": "node --test \"netlify/lib/*.test.mjs\""
+    "test:functions": "node --test \"netlify/lib/*.test.mjs\"",
+    "test:units": "node --test \"src/lib/*.test.mjs\""
   },
   "dependencies": {
     "@netlify/blobs": "^11.1.9",

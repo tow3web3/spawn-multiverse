@@ -16,4 +16,10 @@ export const CHAINS: Chain[] = [
   { id: 'bnb', label: 'BNB', color: '#f8d55a', brand: '#F0B90B' },
   { id: 'arbitrum', label: 'ARBITRUM', color: '#f5a8c8', brand: '#12AAFF' },
   { id: 'optimism', label: 'OPTIMISM', color: '#f58b7e', brand: '#FF0420' },
+  // announced for the omnichain universe once Circle's USDC is live there;
+  // never part of the simulation's six-chain design
+  { id: 'robinhood', label: 'ROBINHOOD', color: '#dff78a', brand: '#CCFF00' },
 ]
+
+/** The six chains the simulation runs. */
+export const DESIGN_CHAINS: Chain[] = CHAINS.filter((c) => c.id !== 'robinhood')

@@ -21,12 +21,24 @@ Four modes, same UI (toggle in the nav):
   on Optimism + Arbitrum Sepolia over real LayerZero V2 messages, a gas drip
   for visitors, MetaMask or an instant burner wallet, play USDC anyone can
   mint.
-- **◉ MAINNET** — appears only once `public/onchain/mainnet.json` is
-  published. Real USDC, your own wallet only (no burner, no drip, no mint), a
-  one-time risk notice before the first transaction, a permanent "guarded
-  beta — unaudited" banner with each chain's deposit cap, and the network fee
-  shown before every signature. The page only names the chains the manifest
-  lists; the rest of the six are marked as coming.
+- **◉ MAINNET** — not one deployment but several independent **universes**,
+  each with its own hub, its own tokens, its own dollar and its own manifest
+  (a universe appears on the site only once its manifest is published):
+  - **MAINNET / omnichain** (`public/onchain/mainnet.json`) — Base (hub) +
+    Optimism + Arbitrum, settled in USDC; Solana and Robinhood are the chains
+    still to come here.
+  - **BNB** (`public/onchain/mainnet-bnb.json`) — BNB Chain alone, settled in
+    BSC USDT (18 decimals, a Binance-custodied peg). One chain, one
+    transaction per trade, no messaging fee.
+  - **ETHEREUM** (`public/onchain/mainnet-ethereum.json`) — Ethereum mainnet
+    alone, settled in USDC; every action pays L1 gas.
+
+  A token launched in one universe does not exist in another — the switcher,
+  the banner, the token page and the Launch Lab all say which universe you are
+  in. Real money, your own wallet only (no burner, no drip, no mint), a risk
+  notice accepted once **per universe** before the first transaction there, a
+  permanent "guarded beta — unaudited" banner with each chain's deposit cap,
+  and the network fee shown before every signature.
 - **LOCAL** — the same Solidity protocol on a hardhat chain: every buy,
   sell and spawn is a transaction against the hub-and-spoke protocol in
   [contracts/](contracts/). Price discovery is a pluggable **venue module**
@@ -52,15 +64,24 @@ npm run chain:test     # contract invariants suite
 The money is fictional in SIM, TESTNET and LOCAL; the math (and on-chain, the
 transactions) are not. In MAINNET mode the money is real.
 
-How money moves on-chain (protocol v7): you trade in **USDC**. Each chain has
-a vault — a buy approves the vault for the exact amount and puts USDC in, a
-sell or refund pays USDC out on the chain you sold from. If that chain's
-vault is short you receive **oUSD**, a 1:1 claim you unwrap once liquidity is
-back; holder rewards are paid in oUSD too. Every action attaches the network
-fee its `quote*` view returns (testnets sponsor it). On the hub chain a trade
-is one transaction; from another chain it crosses LayerZero and back. Holder
-fees arrive by themselves on the hub chain; elsewhere they wait on the hub
-until someone pulls them.
+How money moves on-chain (protocol v7.1): you trade in the universe's
+**dollar** — USDC (6 decimals) or BSC USDT (18 decimals); its decimals are
+read from the chain, never assumed ([src/lib/dollars.ts](src/lib/dollars.ts)
+is the only place an amount is converted). Each chain has a vault — a buy
+approves the vault for the exact amount and puts the dollar in, a sell or
+refund pays it out on the chain you sold from. If that chain's vault is short
+you receive **oUSD**, a 1:1 claim you unwrap once liquidity is back; holder
+rewards are paid in oUSD too. Every action attaches the network fee its
+`quote*` view returns (testnets sponsor it). On the hub chain a trade is one
+transaction **and price-protected**: the page computes what the hub will
+deliver with the hub's own arithmetic ([src/lib/curveMath.ts](src/lib/curveMath.ts)),
+shows "you receive at least …" with a tolerance you set (2% by default), and
+the trade reverts — nothing spent — if the price moves past it. From another
+chain a trade crosses LayerZero and back and fills at whatever price it finds
+(no price protection yet; the page says so). Holder fees arrive by themselves
+on the hub chain; elsewhere they wait on the hub until someone pulls them. A
+chain the launch could not reach (`SyncFailed`) is shown as "not available
+yet" for that token until the operator resyncs it.
 
 ## The engine
 
@@ -81,8 +102,10 @@ Each token has **one global market** ([src/engine/](src/engine/)):
 
 ```bash
 npm install
-npm run dev     # http://localhost:5173
-npm run build   # type-check + production build
+npm run dev            # http://localhost:5173
+npm run build          # type-check + production build
+npm run test:units     # amount conversions (6/8/18 decimals) + the hub's trade arithmetic
+npm run test:functions # the Netlify functions
 ```
 
 ## What's inside
