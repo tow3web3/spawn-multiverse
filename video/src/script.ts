@@ -42,6 +42,24 @@ export type Media = {
 /** seconds → frames */
 export const f = (s: number) => Math.round(s * FPS)
 
+/**
+ * THE CHAINS — one table, read by every shot. Flip `status` to 'live' and the
+ * chain's "SOON" tag disappears from the whole film.
+ */
+export type ChainStatus = 'live' | 'soon'
+export const CHAINS = [
+  { id: 'base', label: 'BASE', status: 'live' },
+  { id: 'arbitrum', label: 'ARBITRUM', status: 'live' },
+  { id: 'optimism', label: 'OPTIMISM', status: 'live' },
+  { id: 'bnb', label: 'BNB CHAIN', status: 'soon' },
+  { id: 'ethereum', label: 'ETHEREUM', status: 'soon' },
+  { id: 'solana', label: 'SOLANA', status: 'soon' },
+] as const satisfies readonly { id: string; label: string; status: ChainStatus }[]
+export type ChainKey = (typeof CHAINS)[number]['id']
+export const chain = (id: ChainKey) => CHAINS.find((c) => c.id === id)!
+/** the one status marker in the film */
+export const SOON = 'SOON'
+
 /** The music's landmarks (seconds into music.mp3 = seconds into the film). */
 export const MUSIC = {
   volume: 0.9,
@@ -71,7 +89,7 @@ export const CUTS = {
   S5: [bar(4), bar(7)], // 25.76 – 32.19
   S6: [bar(7), bar(10)], // 32.19 – 38.62
   S7: [bar(10), bar(12)], // 38.62 – 42.90
-  S7b: [bar(12), bar(14)], // 42.90 – 47.19  THE MAP
+  S7b: [bar(12), bar(14)], // 42.90 – 47.19  THE DOORS
   S8: [bar(14), 50.0], // 47.19 (the last hit) – 50.0, still end card over the tail
 } as const
 
@@ -95,7 +113,7 @@ export const S2a = {
   title: { text: 'EVERYWHERE ELSE, PEOPLE GET COPIES.', at: 0.6 },
 }
 export const S2b = {
-  // s02b: three clay figures wave paper copies at a porthole, the real
+  // s02b: clay figures wave paper copies at a porthole, the real
   // creature glows behind the glass (centre). The figures and the camera move,
   // so the prices are clean UI chips in a fixed row, not pinned to the tags.
   // Until s02b.mp4 exists: a slow crop-in on the end of s02.
@@ -111,7 +129,7 @@ export const S2b = {
    * Price labels in a row at the TOP of the frame (above each grey copy), so
    * the figures stay visible. Each chip ticks through its own `prices` every
    * `tickEvery` s from `at` (up-tick flashes green, down-tick pink, tick.mp3 on
-   * each change). The three ranges never overlap, so no two chips ever agree.
+   * each change). The price ranges never overlap, so no two chips ever agree.
    */
   tickEvery: 0.5,
   tags: [
@@ -119,7 +137,7 @@ export const S2b = {
     { x: 0.5, at: 0.4, prices: ['$0.0039', '$0.0037', '$0.0038', '$0.0036', '$0.0039', '$0.0037', '$0.0035', '$0.0038'] },
     { x: 0.8, at: 0.65, prices: ['$0.0052', '$0.0054', '$0.0051', '$0.0053', '$0.0050', '$0.0052', '$0.0055', '$0.0053'] },
   ],
-  title: { text: 'WRAPPED. BRIDGED. THREE PRICES.', at: 1.0 },
+  title: { text: 'WRAPPED. BRIDGED. DIFFERENT PRICES.', at: 1.0 },
 }
 
 // ───────────────────────────── S3 THE BUTTON
@@ -141,13 +159,16 @@ export const S3 = {
 
 // ───────────────────────────── S4 BORN EVERYWHERE
 export const S4 = {
-  title: { text: 'ONE LAUNCH. THREE CHAINS. ALL NATIVE.', at: 0.0 }, // on the cut (19.33)
-  sub: { text: 'NO BRIDGE. NO WRAPPED COPY.', at: rel('S4', bar(2)) }, // next downbeat 21.47
-  // the panels pop on the kicks 19.87 / 20.14 / 20.40
+  title: { text: 'ONE LAUNCH. SIX CHAINS. ALL NATIVE.', at: 0.0 }, // on the cut (19.33)
+  sub: { text: 'NO BRIDGE. NO WRAPPED COPY.', at: rel('S4', 22.55) },
+  /** one vertical world per chain, in CHAINS order; they pop on the kicks */
   panels: [
-    { chain: 'base', label: 'BASE', media: { clip: 's04a', still: 'k04' } as Media, at: rel('S4', 19.87) },
-    { chain: 'arbitrum', label: 'ARBITRUM', media: { clip: 's04b', still: 'k05' } as Media, at: rel('S4', 20.14) },
-    { chain: 'optimism', label: 'OPTIMISM', media: { clip: 's04c', still: 'k06' } as Media, at: rel('S4', 20.4) },
+    { chain: 'base', media: { clip: 's04a', still: 'k04' } as Media, at: rel('S4', 19.87) },
+    { chain: 'arbitrum', media: { clip: 's04b', still: 'k05' } as Media, at: rel('S4', 20.14) },
+    { chain: 'optimism', media: { clip: 's04c', still: 'k06' } as Media, at: rel('S4', 20.4) },
+    { chain: 'bnb', media: { clip: 's04d', still: 'k04d' } as Media, at: rel('S4', 20.69) },
+    { chain: 'ethereum', media: { clip: 's04e', still: 'k04e' } as Media, at: rel('S4', 21.22) },
+    { chain: 'solana', media: { clip: 's04f', still: 'k04f' } as Media, at: rel('S4', 21.48) },
   ] as const,
 }
 
@@ -216,45 +237,30 @@ export const S7 = {
   lock: { text: 'CHOSEN AT LAUNCH. LOCKED FOREVER.', at: rel('S7', bar(11)) }, // 40.76
 }
 
-// ───────────────────────────── S7b THE MAP
-// Six cardboard doors. What is true: Base + Arbitrum + Optimism share ONE
-// token at ONE price (the omnichain universe); BNB Chain and Ethereum are each
-// their own universe; Solana is next. Flip a chain's status by editing its
-// `status` word(s) here.
+// ───────────────────────────── S7b THE DOORS
+// Six doors in a slight arc; the live chains' doors stand open. Each door gets
+// its chain's logo chip; a 'soon' chain gets a SOON tag on its blank sign.
 export const S7b = {
-  // the overlays are pinned to the doors: no extra drift on the picture
-  media: { clip: 's11', still: 'k11', clipIn: 0, rate: 1, drift: [1.0, 1.0] } as Media,
+  // s12 is a locked-off camera: no drift, overlays pinned to the doors.
+  // rate 0.6 uses only the first ~2.6 s: from ~3.0 s in the clip the yellow
+  // door starts to open, and doors carrying SOON must stay closed.
+  media: { clip: 's12', still: 'k12', clipIn: 0, rate: 0.6, drift: [1.0, 1.0] } as Media,
+  /** overlay layer scale over the shot, if the clip turns out to move */
+  follow: { scale: [1.0, 1.0] as [number, number], origin: '50% 50%' },
+  /** in the dark floor band, centred, clear of the creature (box ends y≈0.79) */
+  title: { text: 'SIX CHAINS. ONE TOKEN. ONE PRICE.', at: 0 },
   /**
-   * s11 has its own slow push-in (outer doors 0.094 → 0.072 and 0.906 → 0.928
-   * over the clip ≈ 1.046× over this shot). The overlay layer scales the same
-   * way about the same point so the chips stay on their doors. Door x values
-   * below are measured on the clip's first frame.
+   * Measured on s12 (fractions of the frame): door centre x, the y of the
+   * logo chip's top (the chips follow the arc of door tops), the blank sign.
    */
-  follow: { scale: [1.0, 1.046] as [number, number], origin: '50% 55%' },
-  title: { text: 'SIX CHAINS ON THE MAP.', at: 0 },
-  /** y of the logo chips above the doors, fraction of frame height */
-  chipY: 0.205,
-  /** x = door centre (fraction of frame width), left to right */
   doors: [
-    { chain: 'base', label: 'BASE', x: 0.095, at: rel('S7b', 43.2) },
-    { chain: 'arbitrum', label: 'ARBITRUM', x: 0.26, at: rel('S7b', 43.2) },
-    { chain: 'optimism', label: 'OPTIMISM', x: 0.42, at: rel('S7b', 43.2) },
-    { chain: 'bnb', label: 'BNB CHAIN', x: 0.58, at: rel('S7b', 43.98) },
-    { chain: 'ethereum', label: 'ETHEREUM', x: 0.74, at: rel('S7b', 45.05) },
-    { chain: 'solana', label: 'SOLANA', x: 0.9, at: rel('S7b', 46.12) },
+    { chain: 'base', x: 0.094, chipY: 0.07, at: rel('S7b', 43.2) },
+    { chain: 'arbitrum', x: 0.25, chipY: 0.12, at: rel('S7b', 43.2) },
+    { chain: 'optimism', x: 0.41, chipY: 0.15, at: rel('S7b', 43.2) },
+    { chain: 'bnb', x: 0.586, chipY: 0.15, sign: { x: 0.585, y: 0.41 }, at: rel('S7b', 43.98) },
+    { chain: 'ethereum', x: 0.75, chipY: 0.12, sign: { x: 0.745, y: 0.41 }, at: rel('S7b', 45.05) },
+    { chain: 'solana', x: 0.914, chipY: 0.07, sign: { x: 0.908, y: 0.41 }, at: rel('S7b', 46.12) },
   ] as const,
-  /**
-   * Status words in the floor band. `x` = centre of the tag (shifted off the
-   * door centre where two tags would collide or cover a creature).
-   */
-  status: {
-    omni: { text: 'ONE TOKEN · ONE PRICE', from: 0.095, to: 0.42, at: rel('S7b', 43.2) }, // lime bracket under doors 1–3
-    bnb: { text: 'OWN UNIVERSE · USDT', x: 0.545, at: rel('S7b', 43.98) },
-    ethereum: { text: 'OWN UNIVERSE · USDC', x: 0.775, at: rel('S7b', 45.05) },
-    solana: { text: 'NEXT', at: rel('S7b', 46.12) }, // hot-pink tag on door 6's blank sign
-  },
-  /** door 6's blank paper sign (fractions of the frame) */
-  signAt: { x: 0.896, y: 0.45 },
 }
 
 // ───────────────────────────── S8 CLOSE
@@ -264,7 +270,7 @@ export const S8 = {
   wordmark: { text: 'SPAWN!', at: 0 },
   tagline: { text: 'THE OMNICHAIN MEME MACHINE', at: rel('S8', 47.6) },
   url: { text: 'spawn-multiverse.netlify.app', at: rel('S8', 48.0) },
-  status: { lines: ['GUARDED BETA', 'BASE · OPTIMISM · ARBITRUM · BNB · ETHEREUM — SOLANA NEXT'], at: rel('S8', 48.4) },
+  status: { lines: ['GUARDED BETA', 'SIX CHAINS · OPENING ONE BY ONE'], at: rel('S8', 48.4) },
   /** the last N seconds are a perfectly still frame (over the music's tail) */
   holdLast: 1.1, // still from 48.9
 }

@@ -89,7 +89,7 @@ export const BnbMark: React.FC<P> = (p) => {
   )
 }
 
-/** Solana's three bars in the brand gradient, on a dark disc. */
+/** Solana's bars in the brand gradient, on a dark disc. */
 export const SolanaMark: React.FC<P> = (p) => {
   const id = `sol-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
   return (

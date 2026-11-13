@@ -55,7 +55,7 @@ export const TitleBlock: React.FC<{
   maxWidth?: number
   rotate?: number
   style?: React.CSSProperties
-  /** hide from this frame on (hard cut to the next title) */
+  /** hide from this frame on (hard cut to the following title) */
   until?: number
 }> = ({ text, at, variant = 'ink', size = 96, maxWidth = 1500, rotate = -1, style, until }) => {
   const frame = useCurrentFrame()

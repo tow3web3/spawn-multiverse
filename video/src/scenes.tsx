@@ -1,7 +1,7 @@
 import React from 'react'
 import { AbsoluteFill, interpolate, random, spring, useCurrentFrame, useVideoConfig } from 'remotion'
 import { ChainDisc, type ChainId, Smiley } from './logos'
-import { CUTS, durFrames, f, S1, S2a, S2b, S3, S4, S5, S6, S7, S7b, S8 } from './script'
+import { CHAINS, chain, type ChainKey, CUTS, durFrames, f, type Media, S1, S2a, S2b, S3, S4, S5, S6, S7, S7b, S8, SOON } from './script'
 import { ShotMedia } from './Shot'
 import { B, C, FONT } from './theme'
 import { Check, Chip, shake, TitleBlock, Typewriter, useSlam, useSlide } from './ui'
@@ -23,10 +23,10 @@ export const Scene2a: React.FC = () => (
   </AbsoluteFill>
 )
 
-// ───────────────────────────── S2b THE OLD WAY — three prices
+// ───────────────────────────── S2b THE OLD WAY — different prices
 // Price labels in a row at the top of the frame, one above each grey copy.
 // Each ticks through its own prices (script.ts): green flash on an up-tick,
-// pink on a down-tick, cream otherwise. The three never agree.
+// pink on a down-tick, cream otherwise. The chips never agree.
 const num = (p: string) => Number(p.replace('$', ''))
 
 const PriceChip: React.FC<{ prices: readonly string[]; x: number; at: number; i: number }> = ({ prices, x, at, i }) => {
@@ -111,31 +111,56 @@ export const Scene3: React.FC<{ impactAtInClip: number }> = ({ impactAtInClip })
   )
 }
 
-// ───────────────────────────── S4 BORN EVERYWHERE
-const PANEL_W = 360
-const PANEL_H = Math.round((PANEL_W * 16) / 9)
-const Panel: React.FC<{ i: number; chain: ChainId; label: string; media: (typeof S4.panels)[number]['media']; at: number }> = ({
-  i,
-  chain,
-  label,
-  media,
-  at,
-}) => {
-  const { visible, scale } = useSlam(at, { from: 1.35 })
-  const chip = useSlam(at + 5, { from: 1.8 })
-  if (!visible) return null
-  const gap = 130
-  const left = 960 + (i - 1) * (PANEL_W + gap) - PANEL_W / 2
-  const rot = [-2.2, 1.2, -1.4][i]
+// ───────────────────────────── SOON (the one status marker)
+/** Small hot-pink "SOON" tag. Renders nothing for a live chain. */
+export const SoonTag: React.FC<{ id: ChainKey; size?: number; style?: React.CSSProperties }> = ({ id, size = 22, style }) => {
+  if (chain(id).status !== 'soon') return null
   return (
-    <div style={{ position: 'absolute', left, top: 300, width: PANEL_W, height: PANEL_H, transform: `rotate(${rot}deg) scale(${scale})` }}>
+    <div
+      style={{
+        display: 'inline-block',
+        background: C.hot,
+        color: C.ink,
+        fontFamily: FONT.mono,
+        fontWeight: 700,
+        fontSize: size,
+        lineHeight: 1,
+        letterSpacing: '0.1em',
+        padding: `${size * 0.28}px ${size * 0.45}px`,
+        border: `${Math.max(3, Math.round(size / 7))}px solid ${C.ink}`,
+        borderRadius: 8,
+        boxShadow: `3px 3px 0 ${C.ink}`,
+        whiteSpace: 'nowrap',
+        ...style,
+      }}
+    >
+      {SOON}
+    </div>
+  )
+}
+
+// ───────────────────────────── S4 BORN EVERYWHERE — six worlds
+const PANEL_W = 272
+const PANEL_H = Math.round((PANEL_W * 16) / 9) // 484
+const PANEL_GAP = 28
+const PANEL_TOP = 216
+const PANELS_LEFT = (1920 - (6 * PANEL_W + 5 * PANEL_GAP)) / 2
+
+const Panel: React.FC<{ i: number; id: ChainKey; media: Media; at: number }> = ({ i, id, media, at }) => {
+  const { visible, scale } = useSlam(at, { from: 1.35 })
+  const chip = useSlam(at + 4, { from: 1.5 })
+  if (!visible) return null
+  const left = PANELS_LEFT + i * (PANEL_W + PANEL_GAP)
+  const rot = [-2, 1.4, -1.4, 1.8, -1.6, 1.2][i]
+  return (
+    <div style={{ position: 'absolute', left, top: PANEL_TOP, width: PANEL_W, height: PANEL_H, transform: `rotate(${rot}deg) scale(${scale})` }}>
       <div
         style={{
           position: 'absolute',
           inset: 0,
           border: `${B.border}px solid ${C.ink}`,
           borderRadius: B.radius,
-          boxShadow: B.shadow(16),
+          boxShadow: B.shadow(12),
           overflow: 'hidden',
           background: C.void,
         }}
@@ -143,11 +168,14 @@ const Panel: React.FC<{ i: number; chain: ChainId; label: string; media: (typeof
         <ShotMedia media={media} duration={durFrames('S4')} />
       </div>
       {chip.visible && (
-        <div style={{ position: 'absolute', left: '50%', bottom: -34, transform: `translateX(-50%) scale(${chip.scale})` }}>
-          <Chip size={34} style={{ gap: 16, padding: '10px 28px 10px 12px' }}>
-            <ChainDisc id={chain} size={58} ring={4} />
-            {label}
-          </Chip>
+        <div style={{ position: 'absolute', left: '50%', bottom: -30, transform: `translateX(-50%) scale(${chip.scale})` }}>
+          <div style={{ position: 'relative' }}>
+            <Chip size={24} shadow={6} style={{ gap: 10, padding: '6px 16px 6px 6px', letterSpacing: '0.08em' }}>
+              <ChainDisc id={id} size={42} ring={3} />
+              {chain(id).label}
+            </Chip>
+            <SoonTag id={id} size={22} style={{ position: 'absolute', right: -14, top: -30, transform: 'rotate(6deg)' }} />
+          </div>
         </div>
       )}
     </div>
@@ -164,18 +192,18 @@ export const Scene4: React.FC = () => {
         variant="ink"
         size={92}
         rotate={0}
-        style={{ left: '50%', top: 26, translate: '-50% 0', whiteSpace: 'nowrap', boxShadow: B.shadow(10), transformOrigin: 'center' }}
+        style={{ left: '50%', top: 40, translate: '-50% 0', whiteSpace: 'nowrap', boxShadow: B.shadow(10), transformOrigin: 'center' }}
       />
+      {S4.panels.map((p, i) => (
+        <Panel key={p.chain} i={i} id={p.chain} media={p.media} at={f(p.at)} />
+      ))}
       {sub.visible && (
-        <div style={{ position: 'absolute', left: '50%', top: 172, transform: `translateX(-50%) rotate(-1deg) scale(${sub.scale})`, zIndex: 2 }}>
+        <div style={{ position: 'absolute', left: '50%', top: 846, transform: `translateX(-50%) rotate(-1deg) scale(${sub.scale})` }}>
           <Chip bg={C.lime} size={44}>
             {S4.sub.text}
           </Chip>
         </div>
       )}
-      {S4.panels.map((p, i) => (
-        <Panel key={p.chain} i={i} chain={p.chain} label={p.label} media={p.media} at={f(p.at)} />
-      ))}
     </AbsoluteFill>
   )
 }
@@ -292,14 +320,28 @@ export const Scene5: React.FC = () => {
           >
             {price}
           </div>
-          <div style={{ display: 'flex', gap: 22 }}>
-            {S5.trades.map((t) => (
-              <Chip key={t.chain} size={28} shadow={6} style={{ gap: 12, padding: '6px 18px 6px 6px', background: flashing ? C.lime : C.cream }}>
-                <ChainDisc id={t.chain} size={46} ring={3} />
-                {price}
-                <Check size={30} />
-              </Chip>
-            ))}
+          <div style={{ display: 'flex', gap: 14 }}>
+            {CHAINS.map((c) => {
+              const live = c.status === 'live'
+              return (
+                <Chip
+                  key={c.id}
+                  size={26}
+                  shadow={5}
+                  style={{
+                    gap: 10,
+                    padding: '5px 14px 5px 5px',
+                    letterSpacing: '0.02em',
+                    background: flashing && live ? C.lime : C.cream,
+                    opacity: live ? 1 : 0.55,
+                  }}
+                >
+                  <ChainDisc id={c.id} size={40} ring={3} />
+                  {price}
+                  {live ? <Check size={28} /> : <SoonTag id={c.id} size={16} style={{ boxShadow: 'none', borderWidth: 2 }} />}
+                </Chip>
+              )
+            })}
           </div>
         </div>
       )}
@@ -496,92 +538,32 @@ const LockIcon: React.FC = () => (
   </svg>
 )
 
-// ───────────────────────────── S7b THE MAP
+// ───────────────────────────── S7b THE DOORS
 const W = 1920
 const H = 1080
 
-const DoorChip: React.FC<{ chain: ChainId; label: string; x: number; at: number }> = ({ chain, label, x, at }) => {
-  const { visible, scale } = useSlam(at, { from: 1.45 })
+type Door = (typeof S7b.doors)[number]
+
+const DoorChip: React.FC<{ d: Door }> = ({ d }) => {
+  const { visible, scale } = useSlam(f(d.at), { from: 1.4 })
   if (!visible) return null
   return (
-    <div style={{ position: 'absolute', left: x * W, top: S7b.chipY * H, transform: `translateX(-50%) scale(${scale})` }}>
+    <div style={{ position: 'absolute', left: d.x * W, top: d.chipY * H, transform: `translateX(-50%) scale(${scale})` }}>
       <Chip size={26} shadow={6} style={{ gap: 10, padding: '6px 18px 6px 6px', letterSpacing: '0.08em' }}>
-        <ChainDisc id={chain} size={44} ring={3} />
-        {label}
+        <ChainDisc id={d.chain} size={44} ring={3} />
+        {chain(d.chain).label}
       </Chip>
     </div>
   )
 }
 
-const FloorTag: React.FC<{ text: string; x: number; at: number; bg?: string }> = ({ text, x, at, bg = C.cream }) => {
-  const { visible, scale } = useSlam(at, { from: 1.12 })
-  if (!visible) return null
+/** SOON on the door's blank paper sign (only for a 'soon' chain that has a sign). */
+const SignTag: React.FC<{ d: Door }> = ({ d }) => {
+  const { visible, scale } = useSlam(f(d.at), { from: 1.4, stiffness: 520, damping: 18 })
+  if (!visible || !('sign' in d)) return null
   return (
-    <div style={{ position: 'absolute', left: x * W, top: 952, transform: `translateX(-50%) scale(${scale})` }}>
-      <Chip bg={bg} size={28} shadow={6} style={{ letterSpacing: '0.06em', padding: '8px 18px' }}>
-        {text}
-      </Chip>
-    </div>
-  )
-}
-
-/** Lime bracket under the three doors of the omnichain universe, with its label. */
-const OmniBracket: React.FC = () => {
-  const frame = useCurrentFrame()
-  const { fps } = useVideoConfig()
-  const o = S7b.status.omni
-  const at = f(o.at)
-  if (frame < at) return null
-  const grow = spring({ frame: frame - at, fps, config: { stiffness: 320, damping: 22, mass: 0.6 } })
-  const x0 = o.from * W
-  const x1 = o.to * W
-  return (
-    <>
-      <div
-        style={{
-          position: 'absolute',
-          left: x0,
-          top: 912,
-          width: x1 - x0,
-          height: 30,
-          borderLeft: `8px solid ${C.lime}`,
-          borderRight: `8px solid ${C.lime}`,
-          borderBottom: `8px solid ${C.lime}`,
-          borderRadius: '0 0 6px 6px',
-          transform: `scaleX(${grow})`,
-          transformOrigin: 'left center',
-          filter: `drop-shadow(3px 3px 0 ${C.ink})`,
-        }}
-      />
-      <FloorTag text={o.text} x={(o.from + o.to) / 2} at={at + 3} bg={C.lime} />
-    </>
-  )
-}
-
-const NextTag: React.FC = () => {
-  const n = S7b.status.solana
-  const { visible, scale } = useSlam(f(n.at), { from: 1.4, stiffness: 520, damping: 18 })
-  if (!visible) return null
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        left: S7b.signAt.x * W,
-        top: S7b.signAt.y * H,
-        transform: `translate(-50%, -50%) rotate(-7deg) scale(${scale})`,
-        background: C.hot,
-        color: C.ink,
-        fontFamily: FONT.title,
-        fontSize: 64,
-        lineHeight: 1,
-        padding: '6px 22px 8px',
-        border: `${B.border}px solid ${C.ink}`,
-        borderRadius: B.radiusSm,
-        boxShadow: B.shadow(8),
-        letterSpacing: '0.04em',
-      }}
-    >
-      {n.text}
+    <div style={{ position: 'absolute', left: d.sign.x * W, top: d.sign.y * H, transform: `translate(-50%, -50%) rotate(-6deg) scale(${scale})` }}>
+      <SoonTag id={d.chain} size={30} style={{ boxShadow: B.shadow(5) }} />
     </div>
   )
 }
@@ -589,22 +571,27 @@ const NextTag: React.FC = () => {
 export const Scene7b: React.FC = () => {
   const frame = useCurrentFrame()
   const dur = durFrames('S7b')
-  // the overlays follow the clip's own push-in so they stay pinned to the doors
+  // the overlays follow the clip's camera (if any) so they stay pinned to the doors
   const k = interpolate(frame, [0, dur], S7b.follow.scale, { extrapolateRight: 'clamp' })
-  const st = S7b.status
   return (
     <AbsoluteFill>
       <ShotMedia media={S7b.media} duration={dur} />
       <AbsoluteFill style={{ transform: `scale(${k})`, transformOrigin: S7b.follow.origin }}>
         {S7b.doors.map((d) => (
-          <DoorChip key={d.chain} chain={d.chain} label={d.label} x={d.x} at={f(d.at)} />
+          <DoorChip key={d.chain} d={d} />
         ))}
-        <OmniBracket />
-        <FloorTag text={st.bnb.text} x={st.bnb.x} at={f(st.bnb.at)} />
-        <FloorTag text={st.ethereum.text} x={st.ethereum.x} at={f(st.ethereum.at)} />
-        <NextTag />
+        {S7b.doors.map((d) => (
+          <SignTag key={d.chain} d={d} />
+        ))}
       </AbsoluteFill>
-      <TitleBlock text={S7b.title.text} at={f(S7b.title.at)} variant="lime" size={88} rotate={-1} style={{ left: 64, top: 40 }} />
+      <TitleBlock
+        text={S7b.title.text}
+        at={f(S7b.title.at)}
+        variant="lime"
+        size={86}
+        rotate={-1}
+        style={{ left: '50%', bottom: 44, translate: '-50% 0', whiteSpace: 'nowrap', transformOrigin: 'center' }}
+      />
     </AbsoluteFill>
   )
 }
@@ -625,7 +612,7 @@ export const Scene8: React.FC = () => {
 
 const EndCard: React.FC = () => {
   const mark = useSlam(f(S8.mark.at), { from: 1.45 })
-  const word = useSlam(f(S8.wordmark.at), { from: 1.18 })
+  const word = useSlam(f(S8.wordmark.at), { from: 1.08 })
   const tag = useSlam(f(S8.tagline.at), { from: 1.3 })
   const url = useSlam(f(S8.url.at), { from: 1.3 })
   const status = useSlam(f(S8.status.at), { from: 1.2 })
