@@ -8,6 +8,10 @@ resolver = "2"
 overflow-checks = true
 lto = "fat"
 codegen-units = 1
+# Size over speed: the program's rent is paid per byte, its compute is not
+# the bottleneck (the LayerZero CPI cascade is). See NOTES.md for the numbers.
+opt-level = "z"
+strip = true
 [profile.release.build-override]
 opt-level = 3
 incremental = false

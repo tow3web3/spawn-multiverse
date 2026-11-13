@@ -1,15 +1,34 @@
-# Solana leg — phase 1 + 2a + 2b-local notes
+# Solana leg — notes
 
-Phase 1 shipped the toolchain and a deployable skeleton. **Phase 2a (done)
-turned it into a real LayerZero OApp skeleton**: the Store/Peer OApp
-pattern with endpoint registration, the byte-exact SPAWN! codec proven
-against EVM-generated cross vectors, and the full hub→solana receive path
-(SYNC_TOKEN → SPL replica mints, DELIVER, PAYOUT, FEE_DROP), LiteSVM-tested.
-**Phase 2b-local (done) added the send path and ran it against the REAL
-devnet LayerZero stack loaded locally** — see "Phase 2b-local" below.
-What remains is purely devnet: the funded deploy and the live wiring.
+**Where it stands (2026-11-13).** The program speaks **protocol v7** to the
+live Base hub and is mainnet-shaped: real USDC settlement, users paying for
+their messages and the replies, the whole wire, roles and pause. It is
+proven locally against the real **mainnet** LayerZero programs and state.
+It has **never been deployed, not even to devnet**, and is not audited.
 
-## Dependency matrix that builds (phase 2a — don't drift)
+The design, every constraint the immutable hub puts on Solana, the
+measurements, the deployment plan and the hub-side timelock calls are in
+**[V7.md](V7.md)**. This file is the working memory: how to build, what the
+pieces are, the facts and the traps.
+
+## Build and test
+
+```bash
+cd solana
+./tests/fetch-fixtures.sh mainnet   # once per clone: ~6 MB, gitignored, read-only RPC
+anchor build                        # must precede cargo test (tests load target/deploy/*.so)
+cargo test                          # 28 tests
+cargo test -- --nocapture           # with the CU, fee, size and rent numbers
+```
+
+`contracts/scripts/gen-codec-vectors.js` regenerates
+`tests/codec-vectors.json` (29 op vectors, 3 envelopes, 4 option vectors)
+with ethers — run it whenever the wire changes, on both sides.
+
+Nothing in the tests touches a wallet or a cluster: the fixtures are
+account reads and `solana program dump`.
+
+## Dependency matrix that builds — don't drift
 
 | Piece | Version | Why |
 |---|---|---|
@@ -18,218 +37,159 @@ What remains is purely devnet: the funded deploy and the live wiring.
 | `oapp` crate | `oapp-latest` 0.2.0, git `LayerZero-Labs/LayerZero-v2` rev `c09287a` | same pin as LayerZero's oapp-solana example |
 | solana-program line | 2.2.x (forced by dev-dep `solana-instruction = "=2.2.1"`) | litesvm 0.6's graph needs exactly 2.2 |
 | litesvm + solana-sdk (dev) | 0.6.1 / 2.2.1 | the 2.x-era pair that matches anchor 0.31 |
-| rustc / cargo | 1.95.0 (rust-toolchain 1.89.0) · solana-cli Agave 3.1.15 | unchanged; Agave 3.1 build-sbf compiles the 0.31 stack fine |
+| rustc / cargo | 1.95.0 (rust-toolchain 1.89.0) · solana-cli Agave 3.1.15 | Agave 3.1 build-sbf compiles the 0.31 stack fine |
 
-Two Anchor.toml settings are **load-bearing**: `[toolchain] anchor_version =
-"0.31.1"`, and `[features] resolution = false` — Anchor's IDL
-account-resolution pass cannot evaluate endpoint-interface's cross-account
-seed expressions and fails the IDL build with it on (LayerZero's example
-ships the same setting).
+Load-bearing settings:
 
-Deploy wallet: `solana/.keys/devnet.json` (gitignored), address
-`EzXiHeBppPFfLsWXQrQuSJKexPq8T3xKpizfTJ3EUEt`. Program keypair:
-`solana/target/deploy/spawn_gateway-keypair.json` (regenerate anywhere with
-`anchor build`; re-run `anchor keys sync` after).
+- Anchor.toml `[toolchain] anchor_version = "0.31.1"` and `[features]
+  resolution = false` — Anchor's IDL account-resolution pass cannot evaluate
+  endpoint-interface's cross-account seed expressions (LayerZero's example
+  ships the same setting).
+- Cargo.toml `[profile.release] opt-level = "z"`, `strip = true` — the
+  program is 766,792 bytes with them, 974,360 without (1 SOL of rent). The
+  price is ~35% more compute in the handlers, which is not the scarce
+  resource here.
 
-## Phase-2a status (current)
+Keys: `.keys/devnet.json` (gitignored) is the project wallet,
+`EzXiHeBppPFfLsWXQrQuSJKexPq8T3xKpizfTJ3EUEt` — it holds real mainnet SOL;
+no script or test here uses it. The **program keypair** is
+`target/deploy/spawn_gateway-keypair.json`: it lives in `target/`, so a
+`cargo clean` deletes it and with it the program id every address derives
+from. Copy it somewhere safe before any deploy.
 
-- Program id **`3mypQvfiLtRHQhWStYyQ6cUu6YC4hqUFBXcNNme3H95g`** (unchanged).
-- Instructions: `init_store` (Store PDA seeds `["Store"]` + LzReceiveTypes
-  PDA + `register_oapp` CPI), `set_peer_config` (Peer PDA per remote eid,
-  type-3 enforced options), `init_usd_mint` (oUSD stand-in, 6 decimals,
-  authority = store), `lz_receive` (clear-first + 4 hub→solana handlers),
-  `lz_receive_types_v2` / `lz_receive_types_info` (executor account
-  resolution, V2). Phase-1 `initialize`/`ping` are gone, so `app/smoke.cjs`
-  is STALE — phase 2b replaces it with a devnet OApp smoke.
-- **Codec** (`src/msg_codec.rs`): hand-rolled canonical ABI head/tail codec,
-  both directions, all 8 ops (OP_SPAWN 1, BUY 2, SELL 3, CLAIM 4,
-  SYNC_TOKEN 10, DELIVER 11, PAYOUT 12, FEE_DROP 13). Proven against
-  **19 cross vectors in `tests/codec-vectors.json`, generated by ethers'
-  AbiCoder** (`contracts/scripts/gen-codec-vectors.js`) — decode == fields,
-  re-encode == bytes, strict padding/offset checks, garbage rejected.
-- **Decimal bridge**: SPL mints use 6 decimals; EVM 1e18 amounts divide by
-  1e12 on receive (floor — sub-1e-6 dust is never minted) and multiply by
-  1e12 on send. 1B supply ⇒ 1e15 base units, far inside u64. Amounts that
-  cannot fit error (`AmountOverflow`), never wrap.
-- **Tests green**: `anchor build` (incl. IDL), `cargo test` → 4 codec unit
-  tests + 5 LiteSVM integration tests (replica+mint creation with authority
-  = store and decimals 6, idempotent re-sync, scaled DELIVER with oUSD
-  refund, PAYOUT, FEE_DROP into the store's vault ATA, and rejection of a
-  non-peer sender and a mismatched recipient).
-- **Test sentinel**: `init_store` accepts only the real endpoint id or
-  `Pubkey::default()`; under the default the endpoint CPIs (register, clear)
-  are skipped so LiteSVM can drive `lz_receive` directly. What the tests
-  therefore do NOT cover: the real clear()/register CPIs and the executor's
-  account-resolution round — that is exactly the devnet milestone of 2b.
-- **Recipient gap — RESOLVED (protocol v4)**: every account rider on the
-  wire is now `bytes32`, on ALL routes (not just Solana): token ids,
-  creators, recipients. EVM addresses ride left-padded and the EVM receivers
-  enforce a checked downcast (top 12 bytes zero or revert "PAD: bad
-  recipient"/"GW: bad recipient" — proven in the hardhat suite); Solana
-  consumes riders directly as `Pubkey`s (`WireAddr([u8;32])`). The interim
-  `pubkey[12..32]` truncation rule is gone and `lz_receive_types_v2` now
-  resolves DELIVER/PAYOUT accounts (recipient + both ATAs) from the wire.
-  Note the hub still STORES identities as `address`, so a Solana-held
-  position (creator/trader identity on the hub) needs its own evolution —
-  tracked under 2b's send-path work.
-- Devnet deploy still awaits faucet SOL (collector script running; the
-  program is now ~480KB ⇒ budget ~4.5 SOL):
-  `anchor deploy --provider.cluster devnet --provider.wallet .keys/devnet.json`.
+## The program
+
+Id `3mypQvfiLtRHQhWStYyQ6cUu6YC4hqUFBXcNNme3H95g` (unused on mainnet and
+devnet as of today). Sources under `programs/spawn-gateway/src/`:
+
+| File | What |
+|---|---|
+| `msg_codec.rs` | The wire: ops 1–5 (spawn, buy, sell, claim, pull fees) and 10–13 (sync, deliver, payout, fee drop), the envelope, the executor option bytes, the 18 ↔ 6 decimal split |
+| `state.rs` | `Store`, `PeerConfig`, `Replica` (+ its fee pool and dust carry), `UserAccount` (claim + parked deliveries), `Position` |
+| `instructions/admin.rs` | `init_store`, `init_vault`, `set_peer_config`, the three roles, pause, `set_fee_config`, `set_deposit_cap`, `recover_tank` |
+| `instructions/send_to_hub.rs` | `spawn_token`, `buy_token`, `sell_token`, `claim_fees`, `pull_fees`, `quote_send` |
+| `instructions/lz_receive.rs` | The four hub messages |
+| `instructions/lz_receive_types_v2.rs` | The account lists the executor asks for |
+| `instructions/user.rs` | `open_user_account`, `redeem_claim`, `claim_parked`, `stake`, `unstake`, `claim_rewards` |
+| `instructions/util.rs` | Pay-or-claim, rent-funded PDA creation, raw token-account checks |
+
+PDAs: store `["Store"]`, peer `["Peer", store, eid]`, vault `["Vault"]`,
+tank `["GasTank"]`, replica `["Replica", hub_token]`, mint
+`["Mint", hub_token]`, user `["User", owner]`, escrow `["Escrow",
+hub_token]`, position `["Pos", hub_token, owner]`, the executor's
+`["LzReceiveTypes", store]`.
+
+**Test sentinel.** `init_store` accepts the real endpoint id or
+`Pubkey::default()`. Under the default the endpoint CPIs (register, clear)
+are skipped so `tests/test_gateway.rs` can drive `lz_receive` directly;
+sends refuse to run. `tests/test_live_endpoint.rs` uses the real endpoint.
+
+## Tests
+
+- **Codec (7, in `msg_codec.rs`)** — the ethers vectors decoded and
+  re-encoded byte for byte, strict padding and offsets, garbage rejected,
+  the option bytes equal to the EVM adapters'.
+- **Handlers (12, `tests/test_gateway.rs`)** — sync from the tank and with a
+  dry tank, duplicates, exact deliveries with the carry, parking (before the
+  sync, missing or frozen token account, full), payouts as USDC or as claims
+  and their redemption, the fee pool, authentication, roles, the vault.
+- **Real stack (9, `tests/test_live_endpoint.rs`)** — registration and the
+  delegate; every send paid by the user through the real endpoint, ULN,
+  executor, price feed and DVNs; the sponsored mode; entry checks; LayerZero's
+  executor program delivering all four hub messages with zero value through
+  the real `clear`; a volunteer executing a dry-tank sync; the v0 + lookup
+  table transaction; our own verifier set; every delivery fitting one
+  transaction.
 
 ## LayerZero V2 on Solana — the facts (verified)
 
-- **EndpointV2 program id — `76y77prsiCMvXMjuoZ5VRrhG5qYBrUMYTE5WgHqgjEn6`**,
-  the SAME address on mainnet and devnet. Pulled from the authoritative
-  [LayerZero metadata API](https://metadata.layerzero-api.com/v1/metadata)
-  and confirmed executable on devnet with `solana account`. Executor:
-  `6doghB248px58JSSwG4qejQ46kFMW4AMj7vzJnWZHNZn`.
-- **eids**: Solana mainnet **30168**, Solana devnet (LayerZero calls it
-  "solana-testnet") **40168**. Our hub Base Sepolia is **40245**; OP Sepolia
-  40232, Arb Sepolia 40231, Ethereum Sepolia 40161, BSC testnet 40102.
-  So the pairing is: `spawn_gateway` (eid 40168) ⇄ hub adapter on Base
-  Sepolia (eid 40245).
-- **OApp programming model** ([Solana OApp reference](https://docs.layerzero.network/v2/developers/solana/oapp/overview)):
-  one crate, `oapp`, vendored from
-  [LayerZero-Labs/devtools](https://github.com/LayerZero-Labs/devtools)
-  (example: `examples/oapp-solana`; scaffold:
-  `LZ_ENABLE_SOLANA_OAPP_EXAMPLE=1 npx create-lz-oapp@latest`).
-  - **Register** (one-time, in init): `oapp::endpoint_cpi::register_oapp`
-    with the Store PDA as the OApp address and a `delegate` for config.
-  - **Send**: `oapp::endpoint_cpi` send path (see `examples/oft-solana` for
-    the full outbound flow + `msg_codec.rs` for byte-exact codecs).
-  - **Receive**: executor calls our `lz_receive`; FIRST
-    `oapp::endpoint_cpi::clear` (burns the nonce — replay protection),
-    THEN touch state. `lz_receive_types` /
-    `lz_receive_types_v2` instructions must exist so the executor can
-    resolve the account list (Solana has no dynamic account access — this
-    is the big mental shift from EVM).
-  - **Peers**: a Peer PDA per remote eid stores the 32-byte remote address
-    (same bytes32 convention as our EVM adapters).
+- **Program ids, the same on mainnet and devnet**: Endpoint
+  `76y77prsiCMvXMjuoZ5VRrhG5qYBrUMYTE5WgHqgjEn6`, ULN 302
+  `7a4WjyR8VZ7yZz5XJAKm39BUGn5iT9CKcv2pmG9tdXVH`, Executor
+  `6doghB248px58JSSwG4qejQ46kFMW4AMj7vzJnWZHNZn`, PriceFeed
+  `8ahPGPjEbpgGaZx2NV1iG5Shj7TDwvsjkEDcGWjt94TP`. From the
+  [LayerZero metadata API](https://metadata.layerzero-api.com/v1/metadata).
+- **eids**: Solana mainnet **30168**, Base **30184**; Solana devnet
+  **40168**, Base Sepolia **40245**.
+- **Verifiers on Solana mainnet** (config account ← its DVN program):
+  LayerZero Labs `4VDjp6XQaxoZf5RGwiPU9NR1EXSZn2TP4ATMmiSzLfhb` ←
+  `HtEYV4xB4wvsj5fgTkcfuChYpvGYzgzwvNhgDZQNh7wW`; Google
+  `F7gu9kLcpn4bSTZn183mhn2RXUuMy7zckdxJZdUjuALw` ←
+  `D5mVdHmD21yPS3p4utgp54wTUPqt7d7qCXt4oqCYsaBo`; Horizen
+  `HR9NQKK1ynW9NzgdM37dU5CBtqRHTukmbMKS7qkwSkHX` ←
+  `4Z436PCb83Ft9dMRtwZ2mK7ZQtqVhbFEC3BYna9qB7B9`; Twinstake
+  `GPjyWr8vCotGuFubDpTxDxy9Vj1ZeEN4F2dwRmFiaGab` ←
+  `4fs6aL12L18K5giDy9Dgxgrb3aNRYiuRV2a7JPPj3e7F`; Canary
+  `7jMeX5mzXnSSKYd8DxBDP4xMnkNFZZZm5W28FWUTbwU3` ←
+  `5KAALa8AEEKnW6p6AacdnqNDmGMpfhwR7AEyWs1gUvsT`. The pathway's default is
+  four required (LayerZero Labs, Canary, Twinstake, Horizen), 32
+  confirmations to Base, 10 from Base.
+- **The executor** (read from its source): `execute` requires the caller's
+  balance not to drop by more than the option's `value`. The option's `gas`
+  is the compute budget. A failed delivery aborts the transaction and leaves
+  the packet verified: anyone may execute it later.
+- **`clear`** burns the packet (replay protection) and must run before any
+  state change. Its eight accounts come first in `lz_receive`'s remaining
+  accounts.
+- **Sends**: the ULN charges the actual fee and requires only that it stays
+  within the `native_fee` it is handed — no on-chain quote is needed.
+- **Model**: an OApp is a Store PDA registered with the endpoint, a delegate
+  for its config, a Peer PDA per remote eid, and `lz_receive_types_v2` so
+  the executor can learn the accounts (Solana has no dynamic account
+  access). [Solana OApp reference](https://docs.layerzero.network/v2/developers/solana/oapp/overview).
 
-## Venue programs for the future curve adapter (devnet)
+## Traps, each one paid for
 
-- **Meteora Dynamic Bonding Curve** — `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN`,
-  listed for mainnet AND devnet, confirmed present on devnet on-chain. SDK:
-  `@meteora-ag/dynamic-bonding-curve-sdk`.
+- **No try/catch.** A CPI that fails takes the hub message down with it.
+  Check first, then transfer; what cannot be settled becomes a claim or is
+  parked.
+- **Heap.** A quote CPI followed by a send CPI over a mainnet pathway (one
+  executor + four DVNs) runs out of the 32 KB heap ("memory allocation
+  failed"). The send passes the caller's ceiling instead.
+- **The endpoint refuses writable accounts on a quote** while a send needs
+  them writable: `quote_send` passes read-only clones.
+- **Transaction size.** A send is 40 accounts, 1501 bytes as a legacy
+  transaction. Clients need v0 and a lookup table.
+- **Rent differs.** Mainnet charges (128 + bytes) × 5,080 lamports today
+  (`solana rent -u mainnet-beta`); LiteSVM and a local validator charge the
+  old 6,960. Never hard-code a rent figure.
+- **`lz_receive_types_v2` must unwrap the envelope** before reading the op —
+  the pre-v7 version read the op from the raw message.
+- **Fixtures are a snapshot.** The fees and verifier lists the tests print
+  are those of the day `fetch-fixtures.sh` ran.
+- **`app/smoke.cjs` is stale** (phase 1). Nothing outside the tests builds
+  these transactions yet.
+
+## Venue programs for a future curve adapter
+
+- **Meteora Dynamic Bonding Curve** —
+  `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN`, mainnet and devnet. SDK:
+  `@meteora-ag/dynamic-bonding-curve-sdk`. Its manual migrator works on
+  devnet.
 - **Raydium LaunchLab** — devnet candidate
-  `DRay6fNdQ5J82H7xV6uq2aV3mNrUZ1J4PgSKsWgptcm6` (a real devnet program,
-  "DRay" vanity matches Raydium's devnet convention, but NOT yet confirmed
-  as LaunchLab — confirm against the
-  [Raydium SDK program-addresses table](https://docs.raydium.io/raydium/build/ts-sdk-demo)
-  before building on it). SDK: `@raydium-io/raydium-sdk-v2` (LaunchLab IDL
-  bundled under `src/raydium/launchpad/`).
-- Meteora's manual migrator works on devnet too — useful to rehearse the
-  curve→AMM ascension on Solana rails.
+  `DRay6fNdQ5J82H7xV6uq2aV3mNrUZ1J4PgSKsWgptcm6`, NOT confirmed as LaunchLab:
+  check the [Raydium SDK program-addresses table](https://docs.raydium.io/raydium/build/ts-sdk-demo)
+  before building on it. SDK: `@raydium-io/raydium-sdk-v2`.
 
-## Phase 2b-local — DONE (send path + the real stack, locally)
+## History
 
-The five devnet binaries (endpoint, ULN 302, executor, price feed, LZ DVN)
-and their nine state accounts are snapshotted by
-`tests/fetch-fixtures.sh` (+ `tests/fetch-state.cjs`) into
-`tests/fixtures/` (gitignored, ~5.4MB — re-run the script after a clone)
-and loaded into LiteSVM. Against that REAL stack,
-`programs/spawn-gateway/tests/test_live_endpoint.rs` proves:
-
-- `init_store`'s `register_oapp` CPI succeeds on the real endpoint and the
-  OAppRegistry PDA carries our admin as delegate;
-- the delegate runs the real wiring dance directly against the endpoint:
-  `init_send_library`, `init_receive_library`, `init_nonce` — the same
-  three calls the devnet deploy will make;
-- **send works end-to-end for all four ops** (`spawn_token`, `buy_token`,
-  `sell_token`, `claim_fees`): the endpoint CPIs ULN → executor → price
-  feed → DVN, quotes a real fee (~0.00099 SOL per message with today's
-  devnet configs), the gas-tank PDA reimburses the payer, the ULN collects
-  worker fees, the outbound nonce increments and the emitted packet embeds
-  our codec's bytes verbatim (asserted via the event CPI) — since v5 the
-  ENVELOPED bytes, see below;
-- an underfunded tank refuses the send (`GW: gas tank cannot cover…`).
-
-Send-path surface (`src/instructions/send_to_hub.rs`):
-- Four instructions, each burning its SPL leg first (oUSD for buy/spawn
-  dev-buy, the replica for sell) then self-quoting and sending — no
-  client-side quote needed. The endpoint account list rides in
-  remaining_accounts, OFT-style; the exact 18+4×(1+N dvns) layout is
-  documented at the top of the file.
-- **Gas tank**: `[b"GasTank"]`, a zero-data system-owned PDA. Anyone funds
-  it with a plain transfer (the EVM adapters' `receive()` mirror); each
-  send moves the quoted fee tank→payer, then the ULN debits the payer — so
-  users pay ~nothing while the tank lasts.
-- Enforced options come from the Peer PDA (type-3, 4M gas — bit-identical
-  to the EVM OPTIONS constant), set at wiring time via `set_peer_config`.
-- Clients must attach a compute budget: the quote+send cascade runs ~200k+
-  CUs through five programs (tests set 1.4M).
-- Quote demotion gotcha: the endpoint REFUSES writable accounts on quote,
-  while send needs several of them writable — `send_to_hub` re-passes
-  read-only clones for the quote CPI.
-
-**Envelope (v5):** between transports every LZ message is
-`abi.encode(bytes32 srcSender, bytes32 dstAddr, bytes payload)` — both
-seats wide, so this store can be sender or target. The program wraps every
-send (`src = store key, dst = store.hub_pad`) and unwraps + authenticates
-every receive (`src_sender == store.hub_pad`, `dst_addr == store key`)
-before the op decode; the EVM adapters produce and consume the exact same
-layout (cross-proven by the `envelopes` section of codec-vectors.json).
-`Store` gained `hub_pad` (the hub PAD's padded address — the protocol-level
-identity; the hub ADAPTER stays the LZ-level peer in PeerConfig), set via
-`init_store`'s new `hub_pad` param.
-
-**Devnet-only checklist (all that's left):**
-1. Fund `.keys/devnet.json` — budget **~4.6 SOL** (~480KB program ≈ 4.5 +
-   wiring rent) **plus the gas tank** (~0.001 SOL per outbound message).
-2. `anchor deploy --provider.cluster devnet`, then exactly the local
-   sequence: `init_store` (real endpoint id **+ hub_pad = the live pad,
-   left-padded**), `set_peer_config` ×2 (hub
-   adapter + 4M options), `init_usd_mint`, the three endpoint wiring calls,
-   fund the tank.
-3. Hub side: `setRoute(1, 40168, <store PDA bytes32>)` on the Base Sepolia
-   adapter and `pad.setGateway(1, …)`.
-4. Live smoke both directions, watched on LayerZero Scan testnet — the only
-   thing no local test can prove: the REAL executor/DVN noticing and
-   delivering (plus `lz_receive_types_v2` driven by the real executor), and
-   (hub-side acceptance of Solana-origin identities is now in place — v5).
-5. Replaces the stale `app/smoke.cjs`.
-
-**Hub identity gap — RESOLVED EVM-side (protocol v5):** the hub now
-stores and authenticates ACTORS as `bytes32` end-to-end (Meta.creator,
-Trade/Spawned/DevClaimed events, claim auth), `pad.gateways` is
-`mapping(uint32 => bytes32)` so `setGateway(1, <store PDA>)` is now
-possible, and the only hub downcasts left are TOKEN ids (always hub EVM
-contracts). An EVM spoke still refuses to mint to a wide recipient
-("GW: bad recipient") — a wide identity can only cash out on its own
-chain. Proven in the hardhat suite (27 tests, incl. a wide creator
-spawning, earning and claiming with the payout packet inspected
-byte-for-byte).
-
-**Hub-side changes since v5 that the program must know about (protocol v7,
-EVM only so far — nothing here was changed in `solana/`):**
-
-- **Wire op 5 `OP_PULL_FEES` exists hub-side** (gateway → pad, payload
-  `(bytes32 token)`). It is ADDITIVE: ops 1–4 and 10–13 are byte-for-byte
-  unchanged, `tests/codec-vectors.json` was NOT regenerated (the Rust codec
-  does not know op 5 and its tests read that file — do not regenerate it
-  from `gen-codec-vectors.js` without adding op 5 to `msg_codec.rs` first),
-  and the program neither sends op 5 nor ever needs to receive it. Until it
-  sends it, holder fees for label 1 simply wait on the hub
-  (`pad.pendingDrop(token, 1)`): the hub no longer pushes OP_FEE_DROP to a
-  remote chain on its own.
-- The hub now REFUSES instead of reverting (a paused pad, a bad fee mode, an
-  unknown token id): a refused BUY/SPAWN comes back as an OP_DELIVER with
-  `tokens = 0` or as an OP_PAYOUT — both already handled here. A sell the
-  curve cannot price comes back as an OP_DELIVER of the same bag.
-- The EVM gateways now refuse at entry what the hub would refuse or choke
-  on: `feeMode > 3`, name > 64 / symbol > 16 / metaURI > 1024 bytes, buys
-  and sells under 1e12 wei (18-decimal units). The program must apply the
-  same limits before sending — the hub refunds a bad fee mode, but an
-  oversized spawn can exhaust the gas its message bought.
-- Still open on this side: F-2 (a DELIVER before its SYNC fails account
-  resolution — the EVM gateways now park it), F-3, F-4, and the v7 fee
-  model (prepaid reply budgets instead of the protocol GasTank).
+- **Phase 1** — toolchain and a deployable skeleton.
+- **Phase 2a** — the OApp skeleton, the byte-exact codec, the receive path
+  with a stand-in dollar mint.
+- **Phase 2b-local** — the send path against the devnet LayerZero stack
+  loaded locally; the protocol tank paid for every message.
+- **Protocol v4 / v5** (EVM side) — every account on the wire became
+  `bytes32`; the inter-adapter envelope; the hub stores actors as `bytes32`.
+- **v7 port (this state)** — USDC vault and claims instead of the stand-in
+  mint, users pay, op 5, parking, the stake-to-earn pool, roles and pause,
+  the mainnet fixtures. Removed: `init_usd_mint`, the enforced options in the
+  Peer PDA (the program builds its options from `set_fee_config`), the
+  on-chain quote before each send.
 
 ## Sources
 
-- [LayerZero metadata API](https://metadata.layerzero-api.com/v1/metadata) (endpoint ids, eids)
-- [Solana OApp reference](https://docs.layerzero.network/v2/developers/solana/oapp/overview)
-- [LayerZero devtools (examples)](https://docs.layerzero.network/v2/tools/devtools) · [GitHub](https://github.com/LayerZero-Labs/devtools)
-- [Solana SDK](https://docs.layerzero.network/v2/tools/sdks/solana-sdk)
-- [Raydium LaunchLab docs](https://docs.raydium.io/products/launchlab) · [code demos](https://docs.raydium.io/products/launchlab/code-demos)
-- [Meteora DBC SDK / addresses](https://skills.sh/sendaifun/skills/meteora)
+- [LayerZero metadata API](https://metadata.layerzero-api.com/v1/metadata) (program ids, eids, verifiers)
+- [Solana OApp reference](https://docs.layerzero.network/v2/developers/solana/oapp/overview) · [Solana FAQ](https://docs.layerzero.network/v2/developers/solana/troubleshooting/faq) (the option's gas is the compute limit; its value pays rent)
+- [LayerZero devtools](https://github.com/LayerZero-Labs/devtools) · [LayerZero-v2 programs](https://github.com/LayerZero-Labs/LayerZero-v2)
+- [Circle — CCTP on Solana](https://developers.circle.com/cctp/solana-programs) (V2 program ids, domain 5)
+- [Raydium LaunchLab docs](https://docs.raydium.io/products/launchlab) · [Meteora DBC SDK](https://skills.sh/sendaifun/skills/meteora)

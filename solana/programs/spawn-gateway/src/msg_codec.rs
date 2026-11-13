@@ -20,6 +20,8 @@ pub const OP_SPAWN: u8 = 1;
 pub const OP_BUY: u8 = 2;
 pub const OP_SELL: u8 = 3;
 pub const OP_CLAIM: u8 = 4;
+/// v7, additive: a chain asks the hub for its waiting holder fees.
+pub const OP_PULL_FEES: u8 = 5;
 pub const OP_SYNC_TOKEN: u8 = 10;
 pub const OP_DELIVER: u8 = 11;
 pub const OP_PAYOUT: u8 = 12;
@@ -72,6 +74,15 @@ impl U256 {
         u64::try_from(scaled).map_err(|_| GatewayError::AmountOverflow.into())
     }
 
+    /// Decimal bridge, EVM → SPL, keeping what the floor drops: whole SPL
+    /// units and the sub-unit remainder in 18-decimal wei.
+    pub fn split_spl(&self) -> Result<(u64, u128)> {
+        let v = self.as_u128().ok_or(GatewayError::AmountOverflow)?;
+        let units = u64::try_from(v / crate::EVM_TO_SPL_DIVISOR)
+            .map_err(|_| GatewayError::AmountOverflow)?;
+        Ok((units, v % crate::EVM_TO_SPL_DIVISOR))
+    }
+
     /// Decimal bridge, SPL → EVM: multiply by 1e12 (cannot overflow: u64 ×
     /// 1e12 < 2^104).
     pub fn from_spl_amount(amount: u64) -> Self {
@@ -89,6 +100,8 @@ pub enum SpawnMsg {
     Sell { hub_token: WireAddr, seller: WireAddr, tokens_in: U256 },
     /// (hubToken, claimer)
     Claim { hub_token: WireAddr, claimer: WireAddr },
+    /// (hubToken) — v7: bring this chain's waiting holder fees home
+    PullFees { hub_token: WireAddr },
     /// (hubToken, name, symbol)
     SyncToken { hub_token: WireAddr, name: String, symbol: String },
     /// (hubToken, to, tokens, refund)
@@ -174,6 +187,7 @@ impl SpawnMsg {
             SpawnMsg::Buy { .. } => OP_BUY,
             SpawnMsg::Sell { .. } => OP_SELL,
             SpawnMsg::Claim { .. } => OP_CLAIM,
+            SpawnMsg::PullFees { .. } => OP_PULL_FEES,
             SpawnMsg::SyncToken { .. } => OP_SYNC_TOKEN,
             SpawnMsg::Deliver { .. } => OP_DELIVER,
             SpawnMsg::Payout { .. } => OP_PAYOUT,
@@ -205,6 +219,9 @@ impl SpawnMsg {
             SpawnMsg::Claim { hub_token, claimer } => {
                 w.address(hub_token);
                 w.address(claimer);
+            }
+            SpawnMsg::PullFees { hub_token } => {
+                w.address(hub_token);
             }
             SpawnMsg::SyncToken { hub_token, name, symbol } => {
                 w.address(hub_token);
@@ -265,6 +282,7 @@ impl SpawnMsg {
                 tokens_in: r.uint_at(2)?,
             },
             OP_CLAIM => SpawnMsg::Claim { hub_token: r.address_at(0)?, claimer: r.address_at(1)? },
+            OP_PULL_FEES => SpawnMsg::PullFees { hub_token: r.address_at(0)? },
             OP_SYNC_TOKEN => SpawnMsg::SyncToken {
                 hub_token: r.address_at(0)?,
                 name: r.string_at(1)?,
@@ -313,6 +331,30 @@ impl Envelope {
             payload: r.bytes_at(2)?.to_vec(),
         })
     }
+}
+
+/* ------------------------------- options ------------------------------ */
+
+/// The executor options of one send (v7), bit-for-bit what the EVM adapters
+/// pack in `LayerZeroOmniMessenger._packet`: a type-3 container with ONE
+/// executor lzReceive option — `gas` for the destination's lzReceive, and,
+/// when non-zero, `value` in DESTINATION native currency delivered into the
+/// receiving adapter together with the message (the reply budget).
+pub fn lz_receive_options(gas: u128, value: u128) -> Vec<u8> {
+    let mut o = Vec::with_capacity(38);
+    o.extend_from_slice(&3u16.to_be_bytes()); // options type 3
+    o.push(1); // worker id: executor
+    if value == 0 {
+        o.extend_from_slice(&17u16.to_be_bytes()); // option size: type + gas
+        o.push(1); // option type: lzReceive
+        o.extend_from_slice(&gas.to_be_bytes());
+    } else {
+        o.extend_from_slice(&33u16.to_be_bytes()); // type + gas + value
+        o.push(1);
+        o.extend_from_slice(&gas.to_be_bytes());
+        o.extend_from_slice(&value.to_be_bytes());
+    }
+    o
 }
 
 /* ------------------------------- reader ------------------------------- */
@@ -409,7 +451,9 @@ mod tests {
         let raw = include_str!("../../../tests/codec-vectors.json");
         let file: serde_json::Value = serde_json::from_str(raw).unwrap();
         let vectors = file["ops"].as_array().unwrap();
-        assert!(vectors.len() >= 25, "vector file looks truncated");
+        assert!(vectors.len() >= 29, "vector file looks truncated");
+        // v7's additive op must be in the file
+        assert!(vectors.iter().any(|v| v["name"] == "PULL_FEES"));
         // the file must exercise wide (Solana-shaped) riders too
         assert!(vectors.iter().any(|v| v["wide"].as_bool() == Some(true)));
         for v in vectors {
@@ -427,6 +471,7 @@ mod tests {
                 "BUY" => SpawnMsg::Buy { hub_token: addr(&i[0]), buyer: addr(&i[1]), usd_in: uint(&i[2]) },
                 "SELL" => SpawnMsg::Sell { hub_token: addr(&i[0]), seller: addr(&i[1]), tokens_in: uint(&i[2]) },
                 "CLAIM" => SpawnMsg::Claim { hub_token: addr(&i[0]), claimer: addr(&i[1]) },
+                "PULL_FEES" => SpawnMsg::PullFees { hub_token: addr(&i[0]) },
                 "SYNC_TOKEN" => SpawnMsg::SyncToken { hub_token: addr(&i[0]), name: s(&i[1]), symbol: s(&i[2]) },
                 "DELIVER" => SpawnMsg::Deliver { hub_token: addr(&i[0]), to: addr(&i[1]), tokens: uint(&i[2]), refund: uint(&i[3]) },
                 "PAYOUT" => SpawnMsg::Payout { to: addr(&i[0]), usd_out: uint(&i[1]) },
@@ -492,6 +537,24 @@ mod tests {
             // and the payload inside is itself a decodable op
             assert!(SpawnMsg::decode(&decoded.payload).is_ok());
         }
+    }
+
+    /// The executor options must be the bytes the EVM adapters pack
+    /// (ethers' solidityPacked ≡ abi.encodePacked), with and without a
+    /// reply budget.
+    #[test]
+    fn option_vectors_match_the_evm_adapters() {
+        let raw = include_str!("../../../tests/codec-vectors.json");
+        let file: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let opts = file["options"].as_array().unwrap();
+        assert!(opts.len() >= 4, "option vectors missing");
+        for v in opts {
+            let gas: u128 = v["gas"].as_str().unwrap().parse().unwrap();
+            let value: u128 = v["value"].as_str().unwrap().parse().unwrap();
+            assert_eq!(lz_receive_options(gas, value), unhex(v["hex"].as_str().unwrap()), "option {}", v["idx"]);
+        }
+        assert_eq!(lz_receive_options(1, 0).len(), 22);
+        assert_eq!(lz_receive_options(1, 1).len(), 38);
     }
 
     /// The point of the bytes32 evolution: a full Solana pubkey rides the

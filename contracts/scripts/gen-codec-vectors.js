@@ -15,7 +15,7 @@
  */
 const fs = require('fs')
 const path = require('path')
-const { AbiCoder, zeroPadValue } = require('ethers')
+const { AbiCoder, zeroPadValue, solidityPacked } = require('ethers')
 
 const coder = AbiCoder.defaultAbiCoder()
 const env = (op, types, values) =>
@@ -38,6 +38,8 @@ const OPS = {
   BUY: { op: 2, types: ['bytes32', 'bytes32', 'uint256'] },
   SELL: { op: 3, types: ['bytes32', 'bytes32', 'uint256'] },
   CLAIM: { op: 4, types: ['bytes32', 'bytes32'] },
+  // v7, additive: a chain asks the hub for its waiting holder fees
+  PULL_FEES: { op: 5, types: ['bytes32'] },
   SYNC_TOKEN: { op: 10, types: ['bytes32', 'string', 'string'] },
   DELIVER: { op: 11, types: ['bytes32', 'bytes32', 'uint256', 'uint256'] },
   PAYOUT: { op: 12, types: ['bytes32', 'uint256'] },
@@ -60,6 +62,11 @@ const CASES = [
   ['CLAIM', [TOK, B1]],
   ['CLAIM', [B0, B0]],
   ['CLAIM', [TOK, SOL1], true],
+  ['PULL_FEES', [TOK]],
+  ['PULL_FEES', [B0]],
+  ['PULL_FEES', [BMAX]],
+  // the largest spawn a gateway admits (64 / 16 / 1024 bytes) — what the hub-bound gas must cover
+  ['SPAWN', [SOLMAX, 'N'.repeat(64), 'S'.repeat(16), 'm'.repeat(1024), 250n * E18, 3], true],
   ['SYNC_TOKEN', [TOK, 'OMNI TEST', 'OMNI']],
   ['SYNC_TOKEN', [B1, 'thirty-two bytes exactly roight!', 'S']],
   ['SYNC_TOKEN', [BMAX, '', '']],
@@ -113,7 +120,22 @@ const envelopes = ENVELOPES.map((e, i) => ({
   hex: envelope(e.src, e.dst, e.payload),
 }))
 
+// EXECUTOR OPTIONS (v7): the adapters build one type-3 lzReceive option per
+// send — abi.encodePacked(uint16 3, uint8 1, uint16 17|33, uint8 1, uint128
+// gas[, uint128 value]) (LayerZeroOmniMessenger._packet). The Solana program
+// builds the same bytes for its sends toward the hub.
+const optionBytes = (gas, value) =>
+  value === 0n
+    ? solidityPacked(['uint16', 'uint8', 'uint16', 'uint8', 'uint128'], [3, 1, 17, 1, gas])
+    : solidityPacked(['uint16', 'uint8', 'uint16', 'uint8', 'uint128', 'uint128'], [3, 1, 33, 1, gas, value])
+const options = [
+  [4_600_000n, 0n],
+  [4_600_000n, 200_000_000_000_000n], // one reply leg at 0.0002 ETH
+  [4_600_000n, 3n * 200_000_000_000_000n], // a spawn's three legs
+  [1n, (1n << 128n) - 1n],
+].map(([gas, value], idx) => ({ idx, gas: gas.toString(), value: value.toString(), hex: optionBytes(gas, value) }))
+
 const out = path.join(__dirname, '..', '..', 'solana', 'tests', 'codec-vectors.json')
 fs.mkdirSync(path.dirname(out), { recursive: true })
-fs.writeFileSync(out, JSON.stringify({ ops: vectors, envelopes }, null, 1))
-console.log(`${vectors.length} op vectors + ${envelopes.length} envelope vectors → ${path.relative(process.cwd(), out)}`)
+fs.writeFileSync(out, JSON.stringify({ ops: vectors, envelopes, options }, null, 1))
+console.log(`${vectors.length} op vectors + ${envelopes.length} envelope vectors + ${options.length} option vectors → ${path.relative(process.cwd(), out)}`)

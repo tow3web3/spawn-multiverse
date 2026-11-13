@@ -1,6 +1,6 @@
 use crate::*;
-use anchor_spl::{associated_token::get_associated_token_address, token};
 use anchor_lang::system_program;
+use anchor_spl::{associated_token::get_associated_token_address, token};
 use oapp::{
     common::{compact_accounts_with_alts, AccountMetaRef, AddressLocator, EXECUTION_CONTEXT_VERSION_1},
     endpoint::ID as ENDPOINT_ID,
@@ -24,7 +24,8 @@ impl LzReceiveTypesV2<'_> {
         params: &LzReceiveParams,
     ) -> Result<LzReceiveTypesV2Result> {
         let store_key = ctx.accounts.store.key();
-        let usd_mint = ctx.accounts.store.usd_mint;
+        let usdc_mint = ctx.accounts.store.usdc_mint;
+        let vault = ctx.accounts.store.vault;
         let program_id = ctx.program_id;
 
         let peer_seeds = [PEER_SEED, store_key.as_ref(), &params.src_eid.to_be_bytes()];
@@ -44,57 +45,49 @@ impl LzReceiveTypesV2<'_> {
         ));
 
         let meta = |key: Pubkey, writable: bool| AccountMetaRef { pubkey: key.into(), is_writable: writable };
-        match SpawnMsg::decode(&params.message)? {
+        let pda = |seeds: &[&[u8]]| Pubkey::find_program_address(seeds, program_id).0;
+        // the wire carries the op inside the inter-transport envelope (v5)
+        let env = msg_codec::Envelope::decode(&params.message)?;
+        match SpawnMsg::decode(&env.payload)? {
             SpawnMsg::SyncToken { hub_token, .. } => {
-                let (replica, _) = Pubkey::find_program_address(&[REPLICA_SEED, &hub_token.0], program_id);
-                let (mint, _) = Pubkey::find_program_address(&[MINT_SEED, &hub_token.0], program_id);
                 accounts.extend([
-                    meta(replica, true),
-                    meta(mint, true),
+                    meta(pda(&[REPLICA_SEED, &hub_token.0]), true),
+                    meta(pda(&[MINT_SEED, &hub_token.0]), true),
+                    meta(pda(&[GAS_TANK_SEED]), true),
                     meta(system_program::ID, false),
                     meta(token::ID, false),
-                ]);
-            }
-            SpawnMsg::FeeDrop { hub_token, .. } => {
-                let (replica, _) = Pubkey::find_program_address(&[REPLICA_SEED, &hub_token.0], program_id);
-                accounts.extend([
-                    meta(replica, false),
-                    meta(usd_mint, true),
-                    meta(get_associated_token_address(&store_key, &usd_mint), true),
-                    meta(system_program::ID, false),
-                    meta(token::ID, false),
-                    meta(anchor_spl::associated_token::ID, false),
                 ]);
             }
             // Wire riders are bytes32 (protocol v4): the recipient IS a
             // Solana pubkey, so the executor can resolve delivery accounts.
-            SpawnMsg::Deliver { hub_token, to, refund, .. } => {
-                let (replica, _) = Pubkey::find_program_address(&[REPLICA_SEED, &hub_token.0], program_id);
-                let (mint, _) = Pubkey::find_program_address(&[MINT_SEED, &hub_token.0], program_id);
+            SpawnMsg::Deliver { hub_token, to, .. } => {
+                let mint = pda(&[MINT_SEED, &hub_token.0]);
                 let recipient = to.pubkey();
-                let _ = refund; // refund ships to the same recipient's usd ATA
                 accounts.extend([
-                    meta(replica, false),
+                    meta(pda(&[REPLICA_SEED, &hub_token.0]), true),
                     meta(mint, true),
                     meta(recipient, false),
                     meta(get_associated_token_address(&recipient, &mint), true),
-                    meta(usd_mint, true),
-                    meta(get_associated_token_address(&recipient, &usd_mint), true),
-                    meta(system_program::ID, false),
+                    meta(pda(&[USER_SEED, recipient.as_ref()]), true),
+                    meta(usdc_mint, false),
+                    meta(vault, true),
+                    meta(get_associated_token_address(&recipient, &usdc_mint), true),
                     meta(token::ID, false),
-                    meta(anchor_spl::associated_token::ID, false),
                 ]);
             }
             SpawnMsg::Payout { to, .. } => {
                 let recipient = to.pubkey();
                 accounts.extend([
                     meta(recipient, false),
-                    meta(usd_mint, true),
-                    meta(get_associated_token_address(&recipient, &usd_mint), true),
-                    meta(system_program::ID, false),
+                    meta(pda(&[USER_SEED, recipient.as_ref()]), true),
+                    meta(usdc_mint, false),
+                    meta(vault, true),
+                    meta(get_associated_token_address(&recipient, &usdc_mint), true),
                     meta(token::ID, false),
-                    meta(anchor_spl::associated_token::ID, false),
                 ]);
+            }
+            SpawnMsg::FeeDrop { hub_token, .. } => {
+                accounts.push(meta(pda(&[REPLICA_SEED, &hub_token.0]), true));
             }
             _ => return Err(GatewayError::UnknownOp.into()),
         }

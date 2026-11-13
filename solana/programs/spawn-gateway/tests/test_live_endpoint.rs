@@ -1,704 +1,1274 @@
-//! Integration tests against the REAL LayerZero V2 devnet stack, loaded
-//! locally into LiteSVM: the endpoint, ULN, executor, price feed and DVN
-//! program binaries plus their devnet state accounts (fetched by
-//! `solana/tests/fetch-fixtures.sh` — run it once before `cargo test`).
+//! Integration tests against the REAL LayerZero V2 stack of Solana MAINNET,
+//! loaded locally into LiteSVM: the endpoint, ULN, executor and price feed
+//! binaries, every DVN program of the default Solana→Base pathway, and
+//! their live state accounts (fetched by `solana/tests/fetch-fixtures.sh`
+//! — run it once before `cargo test`), plus Circle's real USDC mint.
 //!
-//! What this file PROVES without a single devnet write:
-//!   - `init_store`'s register_oapp CPI succeeds against the real endpoint
-//!     and leaves the OAppRegistry PDA with our admin as delegate;
-//!   - the delegate can run the real wiring dance (init_send_library,
-//!     init_receive_library, init_nonce) exactly as the devnet deploy will;
-//!   - the self-quoting send path works end-to-end for all four ops: the
-//!     real ULN + executor + DVN + price feed quote a NONZERO fee from the
-//!     dumped devnet configs, the gas tank reimburses the payer, the
-//!     endpoint accepts the packet (outbound nonce increments) and the
-//!     emitted packet carries our codec's bytes verbatim.
+//! What this file PROVES without a single mainnet write:
+//!   - `init_store` registers the OApp with the real endpoint; an admin
+//!     hand-over moves the LayerZero delegate in the same instruction;
+//!   - every send (spawn, buy, sell, claim, pull) is PAID BY THE USER: the
+//!     real ULN, executor, price feed and DVNs quote it, the user's own
+//!     lamports pay it, the tank is untouched; the packet carries our
+//!     codec's bytes verbatim and the executor option carries the reply
+//!     budget (`return_unit × legs` of hub-chain native) — priced by the
+//!     real executor; `quote_send` returns exactly what a send then costs;
+//!   - the entry checks refuse before any money moves;
+//!   - the REAL EXECUTOR delivers hub messages through `lz_receive` and the
+//!     real endpoint's `clear` with `value = 0` — what the immutable hub
+//!     always sends — for all four inbound ops, using the account lists
+//!     `lz_receive_types_v2` returns; and refuses a delivery that would
+//!     spend its lamports (a SYNC with a dry tank), which then stays
+//!     executable;
+//!   - a send fits one v0 transaction with an address lookup table.
 //!
-//! What only devnet can still prove: the funded program deploy, and the
-//! live DVN/executor actually DELIVERING (they only watch the real chain).
+//! What only a live chain can still prove: the deploy itself, the real
+//! DVNs signing a packet both ways, and the executor's off-chain half.
+
+mod common;
 
 use {
-    anchor_lang::{AnchorSerialize, InstructionData, ToAccountMetas},
-    litesvm::LiteSVM,
+    anchor_lang::{AnchorDeserialize, AnchorSerialize, InstructionData, ToAccountMetas},
+    common::*,
+    oapp::{
+        common::AddressLocator,
+        lz_receive_types_v2::{Instruction as LzInstruction, LzReceiveTypesV2Accounts, LzReceiveTypesV2Result},
+        LzReceiveParams,
+    },
     solana_sdk::{
         account::Account,
-        hash::hash as sha256,
+        address_lookup_table::{
+            state::{AddressLookupTable, LookupTableMeta},
+            AddressLookupTableAccount,
+        },
+        compute_budget::ComputeBudgetInstruction,
         instruction::{AccountMeta, Instruction},
-        message::{Message, VersionedMessage},
+        keccak,
+        message::{v0, VersionedMessage},
         pubkey::Pubkey,
         signature::{Keypair, Signer},
         transaction::VersionedTransaction,
     },
-    spawn_gateway::msg_codec::{Envelope, SpawnMsg, U256, WireAddr},
-    std::path::Path,
+    spawn_gateway::{
+        msg_codec::{self, SpawnMsg, U256, WireAddr},
+        state::{Replica, UserAccount},
+    },
+    std::borrow::Cow,
 };
 
-const TOKEN_PROGRAM: Pubkey =
-    anchor_lang::solana_program::pubkey!("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
-const SYSTEM: Pubkey = anchor_lang::solana_program::pubkey!("11111111111111111111111111111111");
+const GAS_TO_HUB: u128 = 4_600_000;
+/// One reply leg: 0.0002 ETH (the hub's own initial `returnUnit`).
+const RETURN_UNIT: u128 = 200_000_000_000_000;
+const SPAWN_LEGS: u8 = 3;
+const TOK: u8 = 0x8b;
 
-const ENDPOINT: Pubkey =
-    anchor_lang::solana_program::pubkey!("76y77prsiCMvXMjuoZ5VRrhG5qYBrUMYTE5WgHqgjEn6");
-const ULN: Pubkey =
-    anchor_lang::solana_program::pubkey!("7a4WjyR8VZ7yZz5XJAKm39BUGn5iT9CKcv2pmG9tdXVH");
-const EXECUTOR: Pubkey =
-    anchor_lang::solana_program::pubkey!("6doghB248px58JSSwG4qejQ46kFMW4AMj7vzJnWZHNZn");
-const PRICEFEED: Pubkey =
-    anchor_lang::solana_program::pubkey!("8ahPGPjEbpgGaZx2NV1iG5Shj7TDwvsjkEDcGWjt94TP");
-const DVN: Pubkey =
-    anchor_lang::solana_program::pubkey!("HtEYV4xB4wvsj5fgTkcfuChYpvGYzgzwvNhgDZQNh7wW");
+/* ------------------------------- the world ---------------------------- */
 
-const HUB_EID: u32 = 40245; // Base Sepolia
-/// The live Base Sepolia LayerZeroOmniMessenger adapter (reused v2→v4).
-const HUB_ADAPTER: [u8; 20] = [
-    0x59, 0xB8, 0x88, 0xbE, 0xB9, 0xa9, 0xC0, 0x47, 0xe4, 0xa6, 0x03, 0xef, 0x52, 0x28, 0x1c,
-    0xBC, 0x0f, 0x04, 0x61, 0x00,
-];
-
-fn hub_peer() -> [u8; 32] {
-    let mut p = [0u8; 32];
-    p[12..].copy_from_slice(&HUB_ADAPTER);
-    p
-}
-
-/// The hub pad's wide identity: an arbitrary EVM-shaped word for the test.
-const HUB_PAD: [u8; 32] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xc3, 0x63, 0x0f, 0xa4, 0x9b, 0x56, 0x40, 0x31, 0x66,
-    0x9a, 0x0c, 0x14, 0x75, 0x09, 0x62, 0x0a, 0xe2, 0xfb, 0x1c, 0x77,
-];
-
-/// What the wire must carry (v5): the op payload inside the inter-transport
-/// envelope — the store as protocol sender, the hub pad as target.
-fn enveloped(store: &Pubkey, inner: Vec<u8>) -> Vec<u8> {
-    Envelope {
-        src_sender: WireAddr(store.to_bytes()),
-        dst_addr: WireAddr(HUB_PAD),
-        payload: inner,
+fn live() -> World {
+    let mut w = base_world();
+    let programs: Vec<serde_json::Value> = serde_json::from_slice(&fixture("programs.json")).unwrap();
+    for p in &programs {
+        let id: Pubkey = p["id"].as_str().unwrap().parse().unwrap();
+        w.svm.add_program(id, &fixture(p["file"].as_str().unwrap()));
     }
-    .encode()
-}
-
-/// Type-3 options paying the executor for 4M gas of lzReceive — bit-for-bit
-/// the OPTIONS constant of the EVM deploy script.
-fn options_4m() -> Vec<u8> {
-    let mut o = vec![0x00, 0x03, 0x01, 0x00, 0x11, 0x01];
-    o.extend_from_slice(&4_000_000u128.to_be_bytes());
-    o
-}
-
-fn fixture(name: &str) -> Vec<u8> {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../tests/fixtures/{name}"));
-    std::fs::read(&p).unwrap_or_else(|_| {
-        panic!("missing fixture {p:?} — run solana/tests/fetch-fixtures.sh first")
-    })
-}
-
-fn anchor_sighash(name: &str) -> [u8; 8] {
-    sha256(format!("global:{name}").as_bytes()).to_bytes()[..8].try_into().unwrap()
-}
-
-struct Live {
-    svm: LiteSVM,
-    payer: Keypair,
-    program: Pubkey,
-    store: Pubkey,
-    peer: Pubkey,
-    usd_mint: Pubkey,
-    gas_tank: Pubkey,
-    nonce: Pubkey,
-    /// from the dumped devnet default SendConfig
-    required_dvns: Vec<Pubkey>,
-    executor_cfg: Pubkey,
-    treasury: Option<Pubkey>,
-}
-
-impl Live {
-    fn send_tx(&mut self, ix: Instruction) -> std::result::Result<litesvm::types::TransactionMetadata, String> {
-        let blockhash = self.svm.latest_blockhash();
-        // the quote+send cascade through 5 real programs runs well past the
-        // 200k default — the devnet client sets the same budget
-        let budget =
-            solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
-        let msg =
-            Message::new_with_blockhash(&[budget, ix], Some(&self.payer.pubkey()), &blockhash);
-        let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&self.payer])
-            .map_err(|e| e.to_string())?;
-        let r = self
-            .svm
-            .send_transaction(tx)
-            .map_err(|e| format!("{:?}\nlogs:\n{}", e.err, e.meta.logs.join("\n")));
-        self.svm.expire_blockhash();
-        r
-    }
-
-    fn pda(&self, seeds: &[&[u8]], program: &Pubkey) -> Pubkey {
-        Pubkey::find_program_address(seeds, program).0
-    }
-
-    /// The endpoint-send account list in the exact order send_to_hub.rs
-    /// documents, with the writability each hop requires.
-    fn send_list(&self) -> Vec<AccountMeta> {
-        let slc = self.pda(
-            &[b"SendLibraryConfig", &self.store.to_bytes(), &HUB_EID.to_be_bytes()],
-            &ENDPOINT,
-        );
-        let dslc = self.pda(&[b"SendLibraryConfig", &HUB_EID.to_be_bytes()], &ENDPOINT);
-        let msglib = self.pda(&[b"MessageLib"], &ULN);
-        let sli = self.pda(&[b"MessageLib", &msglib.to_bytes()], &ENDPOINT);
-        let endpoint_settings = self.pda(&[b"Endpoint"], &ENDPOINT);
-        let ep_event = self.pda(&[b"__event_authority"], &ENDPOINT);
-        let send_cfg =
-            self.pda(&[b"SendConfig", &HUB_EID.to_be_bytes(), &self.store.to_bytes()], &ULN);
-        let default_send_cfg = self.pda(&[b"SendConfig", &HUB_EID.to_be_bytes()], &ULN);
-        let uln_event = self.pda(&[b"__event_authority"], &ULN);
-        let price_feed = self.pda(&[b"PriceFeed"], &PRICEFEED);
-
-        let mut v = vec![
-            AccountMeta::new_readonly(ENDPOINT, false),
-            AccountMeta::new_readonly(self.store, false),
-            AccountMeta::new_readonly(ULN, false),
-            AccountMeta::new_readonly(slc, false),
-            AccountMeta::new_readonly(dslc, false),
-            AccountMeta::new_readonly(sli, false), // MUST stay read-only
-            AccountMeta::new_readonly(endpoint_settings, false),
-            AccountMeta::new(self.nonce, false),
-            AccountMeta::new_readonly(ep_event, false),
-            AccountMeta::new_readonly(ENDPOINT, false),
-            AccountMeta::new_readonly(msglib, false), // uln settings (ULN_SEED == MessageLib)
-            AccountMeta::new_readonly(send_cfg, false),
-            AccountMeta::new_readonly(default_send_cfg, false),
-            AccountMeta::new(self.payer.pubkey(), true),
-            match self.treasury {
-                Some(t) => AccountMeta::new(t, false),
-                None => AccountMeta::new_readonly(ULN, false), // Anchor's None placeholder
-            },
-            AccountMeta::new_readonly(SYSTEM, false),
-            AccountMeta::new_readonly(uln_event, false),
-            AccountMeta::new_readonly(ULN, false),
-            // executor quad
-            AccountMeta::new_readonly(EXECUTOR, false),
-            AccountMeta::new(self.executor_cfg, false),
-            AccountMeta::new_readonly(PRICEFEED, false),
-            AccountMeta::new_readonly(price_feed, false),
-        ];
-        for dvn_cfg in &self.required_dvns {
-            v.push(AccountMeta::new_readonly(DVN, false));
-            v.push(AccountMeta::new(*dvn_cfg, false));
-            v.push(AccountMeta::new_readonly(PRICEFEED, false));
-            v.push(AccountMeta::new_readonly(price_feed, false));
-        }
-        v
-    }
-
-    fn outbound_nonce(&self) -> u64 {
-        let data = self.svm.get_account(&self.nonce).unwrap().data;
-        u64::from_le_bytes(data[9..17].try_into().unwrap())
-    }
-
-    /// Synthetic SPL token account (165 bytes) holding `amount` of `mint`.
-    fn plant_token_account(&mut self, mint: &Pubkey, owner: &Pubkey, amount: u64) -> Pubkey {
-        let addr = Pubkey::new_unique();
-        let mut data = vec![0u8; 165];
-        data[0..32].copy_from_slice(&mint.to_bytes());
-        data[32..64].copy_from_slice(&owner.to_bytes());
-        data[64..72].copy_from_slice(&amount.to_le_bytes());
-        data[108] = 1; // state = Initialized
-        self.svm
-            .set_account(
-                addr,
-                Account {
-                    lamports: 10_000_000,
-                    data,
-                    owner: TOKEN_PROGRAM,
-                    executable: false,
-                    rent_epoch: 0,
-                },
-            )
-            .unwrap();
-        addr
-    }
-
-    /// Bumps an SPL mint's supply so synthetic balances can be burned.
-    fn raise_mint_supply(&mut self, mint: &Pubkey, amount: u64) {
-        let mut acc = self.svm.get_account(mint).unwrap();
-        let cur = u64::from_le_bytes(acc.data[36..44].try_into().unwrap());
-        acc.data[36..44].copy_from_slice(&(cur + amount).to_le_bytes());
-        self.svm.set_account(*mint, acc).unwrap();
-    }
-}
-
-fn setup_live() -> Live {
-    let program = spawn_gateway::id();
-    let payer = Keypair::new();
-    let mut svm = LiteSVM::new();
-    svm.add_program(program, include_bytes!("../../../target/deploy/spawn_gateway.so"));
-    svm.add_program(ENDPOINT, &fixture("endpoint.so"));
-    svm.add_program(ULN, &fixture("uln.so"));
-    svm.add_program(EXECUTOR, &fixture("executor.so"));
-    svm.add_program(PRICEFEED, &fixture("pricefeed.so"));
-    svm.add_program(DVN, &fixture("dvn.so"));
-
-    // devnet state snapshots
-    let accounts: Vec<serde_json::Value> =
-        serde_json::from_slice(&fixture("accounts.json")).unwrap();
-    let mut uln_settings_data = Vec::new();
-    let mut default_send_cfg_data = Vec::new();
+    let accounts = fixture_accounts();
+    let (mut uln_settings, mut default_send_cfg) = (Vec::new(), Vec::new());
     for a in &accounts {
-        let pubkey: Pubkey = a["pubkey"].as_str().unwrap().parse().unwrap();
-        let owner: Pubkey = a["owner"].as_str().unwrap().parse().unwrap();
-        use base64::Engine;
-        let data =
-            base64::engine::general_purpose::STANDARD.decode(a["data_b64"].as_str().unwrap()).unwrap();
-        match a["name"].as_str().unwrap() {
-            "uln_settings" => uln_settings_data = data.clone(),
-            "default_send_config" => default_send_cfg_data = data.clone(),
+        match a.name.as_str() {
+            "uln_settings" => uln_settings = a.data.clone(),
+            "default_send_config" => default_send_cfg = a.data.clone(),
+            "usdc_mint" => continue, // already loaded
             _ => {}
         }
-        svm.set_account(
-            pubkey,
-            Account { lamports: a["lamports"].as_u64().unwrap(), data, owner, executable: false, rent_epoch: 0 },
-        )
-        .unwrap();
+        w.svm
+            .set_account(
+                a.pubkey,
+                Account { lamports: a.lamports, data: a.data.clone(), owner: a.owner, executable: false, rent_epoch: 0 },
+            )
+            .unwrap();
     }
 
     // UlnSettings: disc(8) eid(4) endpoint(32) endpoint_program(32) bump(1)
     // admin(32), then Option<Treasury>{ admin: Option<Pubkey>,
     // native_receiver, fee_bps, lz: Option }
     let treasury = {
-        let d = &uln_settings_data;
+        let d = &uln_settings;
         let mut off = 8 + 4 + 32 + 32 + 1 + 32;
         if d[off] == 1 {
             off += 1;
-            if d[off] == 1 { off += 33 } else { off += 1 } // treasury.admin
+            if d[off] == 1 {
+                off += 33
+            } else {
+                off += 1
+            }
             Some(Pubkey::new_from_array(d[off..off + 32].try_into().unwrap()))
         } else {
             None
         }
     };
-
     // SendConfig: disc(8) bump(1) UlnConfig{confirmations u64, counts u8×3,
     // required_dvns Vec<Pubkey>, optional_dvns Vec<Pubkey>} ExecutorConfig{
     // max_message_size u32, executor Pubkey}
-    let (required_dvns, executor_cfg) = {
-        let d = &default_send_cfg_data;
+    let (dvn_cfgs, executor_cfg) = {
+        let d = &default_send_cfg;
         let mut off = 8 + 1 + 8 + 3;
-        let n = u32::from_le_bytes(d[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        let required: Vec<Pubkey> = (0..n)
-            .map(|i| Pubkey::new_from_array(d[off + i * 32..off + (i + 1) * 32].try_into().unwrap()))
-            .collect();
-        off += n * 32;
-        let n_opt = u32::from_le_bytes(d[off..off + 4].try_into().unwrap()) as usize;
-        off += 4 + n_opt * 32 + 4; // optional dvns + max_message_size
-        let executor = Pubkey::new_from_array(d[off..off + 32].try_into().unwrap());
-        (required, executor)
+        let read = |off: &mut usize| {
+            let n = u32::from_le_bytes(d[*off..*off + 4].try_into().unwrap()) as usize;
+            *off += 4;
+            let v: Vec<Pubkey> =
+                (0..n).map(|i| Pubkey::new_from_array(d[*off + i * 32..*off + (i + 1) * 32].try_into().unwrap())).collect();
+            *off += n * 32;
+            v
+        };
+        let mut all = read(&mut off);
+        all.extend(read(&mut off));
+        off += 4; // max_message_size
+        (all, Pubkey::new_from_array(d[off..off + 32].try_into().unwrap()))
     };
+    assert!(dvn_cfgs.len() >= 2, "the mainnet default pathway names several DVNs");
+    let dvns: Vec<(Pubkey, Pubkey)> = dvn_cfgs
+        .iter()
+        .map(|cfg| (accounts.iter().find(|a| a.pubkey == *cfg).expect("dvn config fixture").owner, *cfg))
+        .collect();
 
-    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
-
-    let (store, _) = Pubkey::find_program_address(&[b"Store"], &program);
-    let (types_acc, _) = Pubkey::find_program_address(&[b"LzReceiveTypes", store.as_ref()], &program);
-    let (peer, _) =
-        Pubkey::find_program_address(&[b"Peer", store.as_ref(), &HUB_EID.to_be_bytes()], &program);
-    let (usd_mint, _) = Pubkey::find_program_address(&[b"UsdMint"], &program);
-    let (gas_tank, _) = Pubkey::find_program_address(&[b"GasTank"], &program);
-    let oapp_registry = Pubkey::find_program_address(&[b"OApp", store.as_ref()], &ENDPOINT).0;
-    let ep_event = Pubkey::find_program_address(&[b"__event_authority"], &ENDPOINT).0;
-    let nonce = Pubkey::find_program_address(
-        &[b"Nonce", store.as_ref(), &HUB_EID.to_be_bytes(), &hub_peer()],
-        &ENDPOINT,
-    )
-    .0;
-
-    let mut w = Live {
-        svm,
-        payer,
-        program,
-        store,
-        peer,
-        usd_mint,
-        gas_tank,
-        nonce,
-        required_dvns,
-        executor_cfg,
-        treasury,
-    };
+    let store = w.ids.store;
+    let oapp_registry = pda(&[b"OApp", store.as_ref()], &ENDPOINT);
+    let ep_event = pda(&[b"__event_authority"], &ENDPOINT);
+    let nonce = pda(&[b"Nonce", store.as_ref(), &HUB_EID.to_be_bytes(), &hub_peer()], &ENDPOINT);
 
     // ---- init_store with the REAL endpoint: register_oapp CPI runs live
-    let mut metas = spawn_gateway::accounts::InitStore {
-        payer: w.payer.pubkey(),
-        store,
-        lz_receive_types_accounts: types_acc,
-        alt: None,
+    let ix = init_store_ix(
+        &w,
+        ENDPOINT,
+        vec![
+            AccountMeta::new_readonly(ENDPOINT, false),
+            AccountMeta::new(w.admin.pubkey(), true),
+            AccountMeta::new_readonly(store, false),
+            AccountMeta::new(oapp_registry, false),
+            AccountMeta::new_readonly(SYSTEM, false),
+            AccountMeta::new_readonly(ep_event, false),
+            AccountMeta::new_readonly(ENDPOINT, false),
+        ],
+    );
+    w.send(&[ix], &[]).expect("init_store + register_oapp against the real mainnet endpoint");
+    wire_store(&mut w);
+
+    // ---- the delegate's wiring dance, straight against the real endpoint
+    let slc = pda(&[b"SendLibraryConfig", store.as_ref(), &HUB_EID.to_be_bytes()], &ENDPOINT);
+    let rlc = pda(&[b"ReceiveLibraryConfig", store.as_ref(), &HUB_EID.to_be_bytes()], &ENDPOINT);
+    let pending = pda(&[b"PendingNonce", store.as_ref(), &HUB_EID.to_be_bytes(), &hub_peer()], &ENDPOINT);
+    for (name, extra, tail) in [
+        ("init_send_library", vec![AccountMeta::new(slc, false)], vec![]),
+        ("init_receive_library", vec![AccountMeta::new(rlc, false)], vec![]),
+        ("init_nonce", vec![AccountMeta::new(nonce, false), AccountMeta::new(pending, false)], hub_peer().to_vec()),
+    ] {
+        let mut data = anchor_sighash(name).to_vec();
+        data.extend_from_slice(&store.to_bytes());
+        data.extend_from_slice(&HUB_EID.to_le_bytes());
+        data.extend_from_slice(&tail);
+        let mut metas = vec![AccountMeta::new(w.admin.pubkey(), true), AccountMeta::new_readonly(oapp_registry, false)];
+        metas.extend(extra);
+        metas.push(AccountMeta::new_readonly(SYSTEM, false));
+        w.send(&[Instruction::new_with_bytes(ENDPOINT, &data, metas)], &[]).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+
+    // ---- the operator's settings: mainnet-shaped
+    w.set_fee_config(GAS_TO_HUB, RETURN_UNIT, 1, SPAWN_LEGS);
+    w.set_deposit_cap(25_000 * ONE_USDC);
+    w.lz = Some(Lz { nonce, oapp_registry, dvns, executor_cfg, treasury });
+    w
+}
+
+/// The endpoint-send account list in the exact order send_to_hub.rs
+/// documents, with `payer` at index 13 — for the pathway's default DVNs.
+fn send_list(w: &World, payer: &Pubkey) -> Vec<AccountMeta> {
+    let dvns = w.lz.as_ref().unwrap().dvns.clone();
+    send_list_with(w, payer, &dvns)
+}
+
+/// …or for a DVN set of our own: (program, config account), in the order
+/// the OApp's send config names them (required first, then optional).
+fn send_list_with(w: &World, payer: &Pubkey, dvns: &[(Pubkey, Pubkey)]) -> Vec<AccountMeta> {
+    let lz = w.lz.as_ref().unwrap();
+    let store = w.ids.store;
+    let eid = HUB_EID.to_be_bytes();
+    let msglib = pda(&[b"MessageLib"], &ULN);
+    let price_feed = pda(&[b"PriceFeed"], &PRICEFEED);
+    let mut v = vec![
+        AccountMeta::new_readonly(ENDPOINT, false),
+        AccountMeta::new_readonly(store, false),
+        AccountMeta::new_readonly(ULN, false),
+        AccountMeta::new_readonly(pda(&[b"SendLibraryConfig", store.as_ref(), &eid], &ENDPOINT), false),
+        AccountMeta::new_readonly(pda(&[b"SendLibraryConfig", &eid], &ENDPOINT), false),
+        AccountMeta::new_readonly(pda(&[b"MessageLib", msglib.as_ref()], &ENDPOINT), false), // MUST stay read-only
+        AccountMeta::new_readonly(pda(&[b"Endpoint"], &ENDPOINT), false),
+        AccountMeta::new(lz.nonce, false),
+        AccountMeta::new_readonly(pda(&[b"__event_authority"], &ENDPOINT), false),
+        AccountMeta::new_readonly(ENDPOINT, false),
+        AccountMeta::new_readonly(msglib, false), // uln settings (ULN_SEED == MessageLib)
+        AccountMeta::new_readonly(pda(&[b"SendConfig", &eid, store.as_ref()], &ULN), false),
+        AccountMeta::new_readonly(pda(&[b"SendConfig", &eid], &ULN), false),
+        AccountMeta::new(*payer, true),
+        match lz.treasury {
+            Some(t) => AccountMeta::new(t, false),
+            None => AccountMeta::new_readonly(ULN, false), // Anchor's None placeholder
+        },
+        AccountMeta::new_readonly(SYSTEM, false),
+        AccountMeta::new_readonly(pda(&[b"__event_authority"], &ULN), false),
+        AccountMeta::new_readonly(ULN, false),
+        // executor quad
+        AccountMeta::new_readonly(EXECUTOR, false),
+        AccountMeta::new(lz.executor_cfg, false),
+        AccountMeta::new_readonly(PRICEFEED, false),
+        AccountMeta::new_readonly(price_feed, false),
+    ];
+    for (program, cfg) in dvns {
+        v.push(AccountMeta::new_readonly(*program, false));
+        v.push(AccountMeta::new(*cfg, false));
+        v.push(AccountMeta::new_readonly(PRICEFEED, false));
+        v.push(AccountMeta::new_readonly(price_feed, false));
+    }
+    v
+}
+
+fn outbound_nonce(w: &World) -> u64 {
+    let data = w.svm.get_account(&w.lz.as_ref().unwrap().nonce).unwrap().data;
+    u64::from_le_bytes(data[9..17].try_into().unwrap())
+}
+
+/// The `SentToHub` event of a send: (op, native_fee, legs, sponsored).
+fn sent_event(meta: &litesvm::types::TransactionMetadata) -> (u8, u64, u8, bool) {
+    use base64::Engine;
+    let disc = &solana_sdk::hash::hash(b"event:SentToHub").to_bytes()[..8];
+    for l in &meta.logs {
+        if let Some(b64) = l.strip_prefix("Program data: ") {
+            let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else { continue };
+            if raw.len() >= 51 && &raw[..8] == disc {
+                return (raw[8], u64::from_le_bytes(raw[41..49].try_into().unwrap()), raw[49], raw[50] == 1);
+            }
+        }
+    }
+    panic!("no SentToHub event in:\n{}", meta.logs.join("\n"));
+}
+
+/// The emitted packet must carry `bytes` verbatim. The endpoint's
+/// PacketSentEvent rides an event-CPI (an inner instruction), so scan every
+/// inner instruction's data.
+fn packet_carries(meta: &litesvm::types::TransactionMetadata, bytes: &[u8]) -> bool {
+    meta.inner_instructions.iter().flatten().any(|ix| ix.instruction.data.windows(bytes.len()).any(|w| w == bytes))
+}
+
+fn enveloped(w: &World, msg: &SpawnMsg) -> Vec<u8> {
+    msg_codec::Envelope {
+        src_sender: WireAddr(w.ids.store.to_bytes()),
+        dst_addr: WireAddr(hub_pad()),
+        payload: msg.encode(),
+    }
+    .encode()
+}
+
+/* --------------------------- send instructions ------------------------ */
+
+fn spawn_ix(w: &World, user: &Pubkey, name: &str, symbol: &str, meta_uri: &str, dev_buy: u64, fee_mode: u8, max_fee: u64) -> Instruction {
+    let mut metas = spawn_gateway::accounts::SpawnToken {
+        user: *user,
+        store: w.ids.store,
+        peer: w.ids.peer,
+        gas_tank: w.ids.tank,
+        user_account: w.ids.user(user),
+        usdc_mint: USDC,
+        user_usdc: ata_of(user, &USDC),
+        vault: w.ids.vault,
+        token_program: TOKEN_PROGRAM,
+        associated_token_program: ATA_PROGRAM,
         system_program: SYSTEM,
     }
     .to_account_metas(None);
-    metas.extend([
-        AccountMeta::new_readonly(ENDPOINT, false),
-        AccountMeta::new(w.payer.pubkey(), true),
-        AccountMeta::new_readonly(store, false),
-        AccountMeta::new(oapp_registry, false),
-        AccountMeta::new_readonly(SYSTEM, false),
-        AccountMeta::new_readonly(ep_event, false),
-        AccountMeta::new_readonly(ENDPOINT, false),
-    ]);
-    w.send_tx(Instruction::new_with_bytes(
-        program,
-        &spawn_gateway::instruction::InitStore {
-            params: spawn_gateway::instructions::InitStoreParams {
-                admin: w.payer.pubkey(),
-                endpoint: ENDPOINT,
-                hub_eid: HUB_EID,
-                hub_pad: HUB_PAD,
+    metas.extend(send_list(w, user));
+    Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::SpawnToken {
+            params: spawn_gateway::instructions::SpawnTokenParams {
+                name: name.into(),
+                symbol: symbol.into(),
+                meta_uri: meta_uri.into(),
+                dev_buy_usdc: dev_buy,
+                fee_mode,
+                max_native_fee: max_fee,
             },
         }
         .data(),
         metas,
-    ))
-    .expect("init_store + register_oapp against the real endpoint");
+    )
+}
 
-    // ---- peer + enforced options + oUSD mint
-    for config in [
-        spawn_gateway::instructions::PeerConfigParam::PeerAddress(hub_peer()),
-        spawn_gateway::instructions::PeerConfigParam::EnforcedOptions {
-            send: options_4m(),
-            send_and_call: options_4m(),
-        },
-    ] {
-        w.send_tx(Instruction::new_with_bytes(
-            program,
-            &spawn_gateway::instruction::SetPeerConfig {
-                params: spawn_gateway::instructions::SetPeerConfigParams {
-                    remote_eid: HUB_EID,
-                    config,
-                },
-            }
-            .data(),
-            spawn_gateway::accounts::SetPeerConfig {
-                admin: w.payer.pubkey(),
-                peer,
-                store,
-                system_program: SYSTEM,
-            }
-            .to_account_metas(None),
-        ))
-        .unwrap();
+fn buy_accounts(w: &World, user: &Pubkey, t: &[u8; 32]) -> Vec<AccountMeta> {
+    let mint = w.ids.mint(t);
+    spawn_gateway::accounts::BuyToken {
+        user: *user,
+        store: w.ids.store,
+        peer: w.ids.peer,
+        gas_tank: w.ids.tank,
+        replica: w.ids.replica(t),
+        mint,
+        user_token: ata_of(user, &mint),
+        user_account: w.ids.user(user),
+        usdc_mint: USDC,
+        user_usdc: ata_of(user, &USDC),
+        vault: w.ids.vault,
+        token_program: TOKEN_PROGRAM,
+        associated_token_program: ATA_PROGRAM,
+        system_program: SYSTEM,
     }
-    w.send_tx(Instruction::new_with_bytes(
-        program,
-        &spawn_gateway::instruction::InitUsdMint {}.data(),
-        spawn_gateway::accounts::InitUsdMint {
-            admin: w.payer.pubkey(),
-            store,
-            usd_mint,
-            system_program: SYSTEM,
-            token_program: TOKEN_PROGRAM,
+    .to_account_metas(None)
+}
+
+fn buy_ix(w: &World, user: &Pubkey, tag: u8, usdc_in: u64, max_fee: u64) -> Instruction {
+    let t = token_id(tag);
+    let mut metas = buy_accounts(w, user, &t);
+    metas.extend(send_list(w, user));
+    Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::BuyToken {
+            params: spawn_gateway::instructions::BuyTokenParams { hub_token: t, usdc_in, max_native_fee: max_fee },
         }
-        .to_account_metas(None),
-    ))
-    .unwrap();
-
-    // ---- the delegate's wiring dance, straight against the real endpoint
-    let slc = w.pda(
-        &[b"SendLibraryConfig", &store.to_bytes(), &HUB_EID.to_be_bytes()],
-        &ENDPOINT,
-    );
-    let rlc = w.pda(
-        &[b"ReceiveLibraryConfig", &store.to_bytes(), &HUB_EID.to_be_bytes()],
-        &ENDPOINT,
-    );
-    let pending = w.pda(
-        &[b"PendingNonce", &store.to_bytes(), &HUB_EID.to_be_bytes(), &hub_peer()],
-        &ENDPOINT,
-    );
-
-    let mut data = anchor_sighash("init_send_library").to_vec();
-    data.extend_from_slice(&store.to_bytes());
-    data.extend_from_slice(&HUB_EID.to_le_bytes());
-    w.send_tx(Instruction::new_with_bytes(
-        ENDPOINT,
-        &data,
-        vec![
-            AccountMeta::new(w.payer.pubkey(), true),
-            AccountMeta::new_readonly(oapp_registry, false),
-            AccountMeta::new(slc, false),
-            AccountMeta::new_readonly(SYSTEM, false),
-        ],
-    ))
-    .expect("init_send_library");
-
-    let mut data = anchor_sighash("init_receive_library").to_vec();
-    data.extend_from_slice(&store.to_bytes());
-    data.extend_from_slice(&HUB_EID.to_le_bytes());
-    w.send_tx(Instruction::new_with_bytes(
-        ENDPOINT,
-        &data,
-        vec![
-            AccountMeta::new(w.payer.pubkey(), true),
-            AccountMeta::new_readonly(oapp_registry, false),
-            AccountMeta::new(rlc, false),
-            AccountMeta::new_readonly(SYSTEM, false),
-        ],
-    ))
-    .expect("init_receive_library");
-
-    let mut data = anchor_sighash("init_nonce").to_vec();
-    data.extend_from_slice(&store.to_bytes());
-    data.extend_from_slice(&HUB_EID.to_le_bytes());
-    data.extend_from_slice(&hub_peer());
-    w.send_tx(Instruction::new_with_bytes(
-        ENDPOINT,
-        &data,
-        vec![
-            AccountMeta::new(w.payer.pubkey(), true),
-            AccountMeta::new_readonly(oapp_registry, false),
-            AccountMeta::new(w.nonce, false),
-            AccountMeta::new(pending, false),
-            AccountMeta::new_readonly(SYSTEM, false),
-        ],
-    ))
-    .expect("init_nonce");
-
-    // ---- fund the gas tank (anyone can: plain transfer / airdrop)
-    w.svm.airdrop(&gas_tank, 10_000_000_000).unwrap();
-    w
+        .data(),
+        metas,
+    )
 }
 
-/// Runs one outbound op and returns (quoted-fee-paid-by-tank, tx metadata).
-fn run_send(
-    w: &mut Live,
-    data: Vec<u8>,
-    business: Vec<AccountMeta>,
-) -> (u64, litesvm::types::TransactionMetadata) {
-    let mut metas = business;
-    metas.extend(w.send_list());
-    let tank_before = w.svm.get_account(&w.gas_tank).unwrap().lamports;
-    let meta = w
-        .send_tx(Instruction::new_with_bytes(w.program, &data, metas))
-        .expect("send op against the real endpoint stack");
-    let tank_after = w.svm.get_account(&w.gas_tank).unwrap().lamports;
-    (tank_before - tank_after, meta)
+fn sell_ix(w: &World, user: &Pubkey, tag: u8, amount: u64) -> Instruction {
+    let t = token_id(tag);
+    let mint = w.ids.mint(&t);
+    let mut metas = spawn_gateway::accounts::SellToken {
+        user: *user,
+        store: w.ids.store,
+        peer: w.ids.peer,
+        gas_tank: w.ids.tank,
+        replica: w.ids.replica(&t),
+        mint,
+        user_token: ata_of(user, &mint),
+        user_account: w.ids.user(user),
+        usdc_mint: USDC,
+        user_usdc: ata_of(user, &USDC),
+        token_program: TOKEN_PROGRAM,
+        associated_token_program: ATA_PROGRAM,
+        system_program: SYSTEM,
+    }
+    .to_account_metas(None);
+    metas.extend(send_list(w, user));
+    Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::SellToken {
+            params: spawn_gateway::instructions::SellTokenParams { hub_token: t, amount, max_native_fee: 0 },
+        }
+        .data(),
+        metas,
+    )
 }
 
-/// The emitted packet must carry our codec's bytes verbatim. The endpoint's
-/// PacketSentEvent rides an event-CPI (an inner instruction), so scan every
-/// inner instruction's data for the exact message bytes.
-fn assert_packet_carries(meta: &litesvm::types::TransactionMetadata, message: &[u8]) {
-    let found = meta.inner_instructions.iter().flatten().any(|ix| {
-        ix.instruction.data.windows(message.len()).any(|wnd| wnd == message)
-    });
-    assert!(found, "emitted packet does not embed the encoded message");
+fn claim_ix(w: &World, user: &Pubkey, tag: u8) -> Instruction {
+    let t = token_id(tag);
+    let mut metas = spawn_gateway::accounts::ClaimFees {
+        user: *user,
+        store: w.ids.store,
+        peer: w.ids.peer,
+        gas_tank: w.ids.tank,
+        replica: w.ids.replica(&t),
+        user_account: w.ids.user(user),
+        usdc_mint: USDC,
+        user_usdc: ata_of(user, &USDC),
+        token_program: TOKEN_PROGRAM,
+        associated_token_program: ATA_PROGRAM,
+        system_program: SYSTEM,
+    }
+    .to_account_metas(None);
+    metas.extend(send_list(w, user));
+    Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::ClaimFees {
+            params: spawn_gateway::instructions::TokenMsgParams { hub_token: t, max_native_fee: 0 },
+        }
+        .data(),
+        metas,
+    )
 }
+
+fn pull_ix(w: &World, user: &Pubkey, tag: u8) -> Instruction {
+    let t = token_id(tag);
+    let mut metas = spawn_gateway::accounts::PullFees {
+        user: *user,
+        store: w.ids.store,
+        peer: w.ids.peer,
+        gas_tank: w.ids.tank,
+        replica: w.ids.replica(&t),
+        system_program: SYSTEM,
+    }
+    .to_account_metas(None);
+    metas.extend(send_list(w, user));
+    Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::PullFees {
+            params: spawn_gateway::instructions::TokenMsgParams { hub_token: t, max_native_fee: 0 },
+        }
+        .data(),
+        metas,
+    )
+}
+
+fn quote(w: &mut World, op: u8, name: &str, symbol: &str, meta_uri: &str, with_dev_buy: bool) -> u64 {
+    let mut metas =
+        spawn_gateway::accounts::QuoteSend { store: w.ids.store, peer: w.ids.peer }.to_account_metas(None);
+    // the same list as a send; nothing in it needs to sign for a quote
+    let admin = w.admin.pubkey();
+    metas.extend(send_list(w, &admin));
+    let ix = Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::QuoteSend {
+            params: spawn_gateway::instructions::QuoteSendParams {
+                op,
+                name: name.into(),
+                symbol: symbol.into(),
+                meta_uri: meta_uri.into(),
+                with_dev_buy,
+            },
+        }
+        .data(),
+        metas,
+    );
+    let ret = w.simulate(ix).expect("quote_send");
+    u64::from_le_bytes(ret[..8].try_into().unwrap())
+}
+
+/* ------------------------ the hub's side of the wire ------------------ */
+
+/// Plants a VERIFIED inbound packet in the real endpoint's state — what the
+/// DVNs' verification and the ULN's commit leave behind: the payload hash
+/// account, and an inbound nonce that covers it.
+fn plant_verified(w: &mut World, nonce: u64, guid: [u8; 32], message: &[u8]) {
+    let store = w.ids.store;
+    let (ph, bump) = Pubkey::find_program_address(
+        &[b"PayloadHash", store.as_ref(), &HUB_EID.to_be_bytes(), &hub_peer(), &nonce.to_be_bytes()],
+        &ENDPOINT,
+    );
+    let mut data = account_disc("PayloadHash").to_vec();
+    data.extend_from_slice(&keccak::hashv(&[&guid, message]).to_bytes());
+    data.push(bump);
+    w.svm
+        .set_account(ph, Account { lamports: 1_200_000, data, owner: ENDPOINT, executable: false, rent_epoch: 0 })
+        .unwrap();
+    let nonce_acc = w.lz.as_ref().unwrap().nonce;
+    let mut acc = w.svm.get_account(&nonce_acc).unwrap();
+    let inbound = u64::from_le_bytes(acc.data[17..25].try_into().unwrap());
+    if inbound < nonce {
+        acc.data[17..25].copy_from_slice(&nonce.to_le_bytes());
+        w.svm.set_account(nonce_acc, acc).unwrap();
+    }
+}
+
+fn payload_hash_exists(w: &World, nonce: u64) -> bool {
+    let ph = pda(
+        &[b"PayloadHash", w.ids.store.as_ref(), &HUB_EID.to_be_bytes(), &hub_peer(), &nonce.to_be_bytes()],
+        &ENDPOINT,
+    );
+    w.lamports(&ph) > 0
+}
+
+/// Lets the test's `exec` key act as a LayerZero executor: swaps it into
+/// the real ExecutorConfig's `executors` list (the only edit made to
+/// mainnet state — the executor program itself is the real binary).
+fn enlist_executor(w: &mut World) {
+    let cfg = w.lz.as_ref().unwrap().executor_cfg;
+    let mut acc = w.svm.get_account(&cfg).unwrap();
+    let d = &mut acc.data;
+    // disc(8) bump(1) owner(32) acl{allow Vec, deny Vec} admins Vec executors Vec
+    let mut off = 8 + 1 + 32;
+    for _ in 0..3 {
+        let n = u32::from_le_bytes(d[off..off + 4].try_into().unwrap()) as usize;
+        off += 4 + n * 32;
+    }
+    let n = u32::from_le_bytes(d[off..off + 4].try_into().unwrap()) as usize;
+    assert!(n >= 1, "the mainnet executor config lists no executor");
+    d[off + 4..off + 36].copy_from_slice(w.exec.pubkey().as_ref());
+    w.svm.set_account(cfg, acc).unwrap();
+}
+
+/// Asks the program — as LayerZero's executor does, off-chain — which
+/// accounts `lz_receive` needs for this packet, and resolves them.
+fn resolve_lz_receive(w: &mut World, params: &LzReceiveParams) -> Vec<AccountMeta> {
+    // 1. the versioning handshake
+    let ix = Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::LzReceiveTypesInfo { params: params.clone() }.data(),
+        spawn_gateway::accounts::LzReceiveTypesInfo { store: w.ids.store, lz_receive_types_accounts: w.ids.types_acc }
+            .to_account_metas(None),
+    );
+    let ret = w.simulate(ix).expect("lz_receive_types_info");
+    let (version, info) = <(u8, LzReceiveTypesV2Accounts)>::deserialize(&mut &ret[..]).unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(info.accounts, vec![w.ids.store]);
+    // 2. the account list
+    let ix = Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::LzReceiveTypesV2 { params: params.clone() }.data(),
+        info.accounts.iter().map(|k| AccountMeta::new_readonly(*k, false)).collect(),
+    );
+    let ret = w.simulate(ix).expect("lz_receive_types_v2");
+    let result = LzReceiveTypesV2Result::deserialize(&mut &ret[..]).unwrap();
+    assert!(result.alts.is_empty());
+    assert_eq!(result.instructions.len(), 1);
+    let LzInstruction::LzReceive { accounts } = &result.instructions[0] else { panic!("not an lz_receive") };
+    accounts
+        .iter()
+        .map(|a| match &a.pubkey {
+            AddressLocator::Payer => AccountMeta::new(w.exec.pubkey(), true),
+            AddressLocator::Address(k) if a.is_writable => AccountMeta::new(*k, false),
+            AddressLocator::Address(k) => AccountMeta::new_readonly(*k, false),
+            _ => panic!("unexpected locator"),
+        })
+        .collect()
+}
+
+/// Borsh of the executor's `ExecuteParams { receiver, lz_receive, value,
+/// compute_units }`.
+fn execute_params(receiver: &Pubkey, lz_receive: &LzReceiveParams, value: u64, compute_units: u64) -> Vec<u8> {
+    let mut data = receiver.to_bytes().to_vec();
+    lz_receive.serialize(&mut data).unwrap();
+    data.extend_from_slice(&value.to_le_bytes());
+    data.extend_from_slice(&compute_units.to_le_bytes());
+    data
+}
+
+/// Delivers a hub message the way mainnet does: the REAL executor program's
+/// `execute` → our `lz_receive` → the real endpoint's `clear`, with the
+/// `value` the packet's options bought (the hub always buys 0).
+fn execute(w: &mut World, nonce: u64, msg: &SpawnMsg, value: u64) -> TxResult {
+    let message = w.wire(msg);
+    let guid = keccak::hashv(&[b"guid", &nonce.to_be_bytes()]).to_bytes();
+    if !payload_hash_exists(w, nonce) {
+        plant_verified(w, nonce, guid, &message);
+    }
+    let params = LzReceiveParams { src_eid: HUB_EID, sender: hub_peer(), nonce, guid, message, extra_data: vec![] };
+    let lz_accounts = resolve_lz_receive(w, &params);
+
+    let mut data = anchor_sighash("execute").to_vec();
+    data.extend_from_slice(&execute_params(&w.ids.store, &params, value, 400_000));
+    let mut metas = vec![
+        AccountMeta::new(w.exec.pubkey(), true),
+        AccountMeta::new_readonly(w.lz.as_ref().unwrap().executor_cfg, false),
+        AccountMeta::new_readonly(ENDPOINT, false),
+        AccountMeta::new_readonly(pda(&[b"__event_authority"], &ENDPOINT), false),
+        // #[event_cpi]
+        AccountMeta::new_readonly(pda(&[b"__event_authority"], &EXECUTOR), false),
+        AccountMeta::new_readonly(EXECUTOR, false),
+        // remaining: the receiver program, then lz_receive's accounts
+        AccountMeta::new_readonly(w.ids.program, false),
+    ];
+    metas.extend(lz_accounts);
+    let exec = w.exec.insecure_clone();
+    w.send(&[Instruction::new_with_bytes(EXECUTOR, &data, metas)], &[&exec])
+}
+
+fn sync_msg(tag: u8) -> SpawnMsg {
+    SpawnMsg::SyncToken { hub_token: WireAddr(token_id(tag)), name: "CANARY".into(), symbol: "CANARY".into() }
+}
+
+/// A token that exists here, and a user who holds USDC.
+fn world_with_token_and_user(usdc: u64) -> (World, Keypair) {
+    let mut w = live();
+    enlist_executor(&mut w);
+    let tank = w.ids.tank;
+    w.fund(&tank, 1_000_000_000);
+    execute(&mut w, 1, &sync_msg(TOK), 0).expect("SYNC through the real executor");
+    let u = w.new_user();
+    w.give_usdc(&u.pubkey(), usdc);
+    (w, u)
+}
+
+/* --------------------------------- tests ------------------------------ */
 
 #[test]
-fn registers_against_real_endpoint() {
-    let w = setup_live();
-    let oapp_registry =
-        Pubkey::find_program_address(&[b"OApp", w.store.as_ref()], &ENDPOINT).0;
-    let acc = w.svm.get_account(&oapp_registry).expect("OAppRegistry created");
+fn registers_with_the_real_endpoint_and_a_new_admin_becomes_the_delegate() {
+    let mut w = live();
+    let registry = w.lz.as_ref().unwrap().oapp_registry;
+    let acc = w.svm.get_account(&registry).expect("OAppRegistry created");
     assert_eq!(acc.owner, ENDPOINT);
     // OAppRegistry: disc(8) + delegate(32) + bump
-    assert_eq!(&acc.data[8..40], w.payer.pubkey().to_bytes().as_slice(), "delegate");
-    // the wiring dance left the outbound nonce account live at zero
-    assert_eq!(w.outbound_nonce(), 0);
+    assert_eq!(&acc.data[8..40], w.admin.pubkey().as_ref(), "the admin is the LayerZero delegate");
+    assert_eq!(outbound_nonce(&w), 0);
+
+    // admin hand-over: the nominee accepts and is the delegate at once — the
+    // old admin keeps no say over the DVN set
+    let nominee = w.new_user();
+    let admin = w.admin.insecure_clone();
+    w.govern(spawn_gateway::instruction::TransferAdmin { nominee: nominee.pubkey() }.data(), &admin).unwrap();
+    let mut metas =
+        spawn_gateway::accounts::Govern { authority: nominee.pubkey(), store: w.ids.store }.to_account_metas(None);
+    metas.extend([
+        AccountMeta::new_readonly(ENDPOINT, false),
+        AccountMeta::new_readonly(w.ids.store, false),
+        AccountMeta::new(registry, false),
+        AccountMeta::new_readonly(pda(&[b"__event_authority"], &ENDPOINT), false),
+        AccountMeta::new_readonly(ENDPOINT, false),
+    ]);
+    let ix = Instruction::new_with_bytes(w.ids.program, &spawn_gateway::instruction::AcceptAdmin {}.data(), metas);
+    w.send(&[ix], &[&nominee]).expect("accept_admin + set_delegate on the real endpoint");
+    assert_eq!(w.store().admin, nominee.pubkey());
+    let acc = w.svm.get_account(&registry).unwrap();
+    assert_eq!(&acc.data[8..40], nominee.pubkey().as_ref(), "the delegate moved with the admin");
 }
 
 #[test]
-fn spawn_quotes_pays_and_emits() {
-    let mut w = setup_live();
-    let user_usd = w.plant_token_account(&w.usd_mint.clone(), &w.payer.pubkey(), 50_000_000);
-    w.raise_mint_supply(&w.usd_mint.clone(), 50_000_000);
+fn users_pay_for_their_messages_and_for_the_replies() {
+    let (mut w, u) = world_with_token_and_user(1_000 * ONE_USDC);
+    let user = u.pubkey();
+    let t = token_id(TOK);
+    let tank_before = w.lamports(&w.ids.tank);
 
-    let params = spawn_gateway::instructions::SpawnTokenParams {
-        name: "OMNI SOL".into(),
-        symbol: "OSOL".into(),
-        meta_uri: "{\"leg\":\"solana\"}".into(),
-        dev_buy_usd: 5_000_000, // $5
-        fee_mode: 1,
-    };
-    let data = spawn_gateway::instruction::SpawnToken { params: params.clone() }.data();
-    let business = spawn_gateway::accounts::SpawnToken {
-        user: w.payer.pubkey(),
-        store: w.store,
-        peer: w.peer,
-        gas_tank: w.gas_tank,
-        usd_mint: w.usd_mint,
-        user_usd,
-        token_program: TOKEN_PROGRAM,
-        system_program: SYSTEM,
-    }
-    .to_account_metas(None);
-    let (fee, meta) = run_send(&mut w, data, business);
+    // ---- BUY: USDC into the vault, OP_BUY out, the user pays the fee
+    let quoted = quote(&mut w, msg_codec::OP_BUY, "", "", "", false);
+    let ix = buy_ix(&w, &user, TOK, 250 * ONE_USDC, 0);
+    let meta = w.send(&[ix], &[&u]).expect("buy against the real mainnet stack");
+    println!("CU buy_token (first: creates the token account and the user account): {}", meta.compute_units_consumed);
+    let (op, fee, legs, sponsored) = sent_event(&meta);
+    assert_eq!((op, legs, sponsored), (msg_codec::OP_BUY, 1, false));
+    assert_eq!(fee, quoted, "quote_send returns exactly what the send costs");
+    println!("fee of a buy (1 reply leg of 0.0002 ETH): {} lamports", fee);
+    assert_eq!(w.token_amount(&w.ids.vault), 250 * ONE_USDC);
+    assert_eq!(w.token_amount(&ata_of(&user, &USDC)), 750 * ONE_USDC);
+    assert_eq!(outbound_nonce(&w), 1);
+    let expected = SpawnMsg::Buy { hub_token: WireAddr(t), buyer: WireAddr::from_pubkey(&user), usd_in: U256::from_spl_amount(250 * ONE_USDC) };
+    assert!(packet_carries(&meta, &enveloped(&w, &expected)), "the packet embeds the enveloped BUY");
+    // the executor option the packet rides on: gas for the hub + the reply budget
+    assert!(packet_carries(&meta, &msg_codec::lz_receive_options(GAS_TO_HUB, RETURN_UNIT)));
+    // the buyer's own accounts now exist — the DELIVER will need no rent
+    assert!(w.exists(&ata_of(&user, &w.ids.mint(&t))));
+    let ua: UserAccount = w.read(&w.ids.user(&user));
+    assert_eq!(ua.owner, user);
 
-    assert!(fee > 0, "real devnet configs must quote a nonzero fee");
-    assert_eq!(w.outbound_nonce(), 1);
+    // a second buy creates nothing: the user's lamports drop by the fee, exactly
+    let before = w.lamports(&user);
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    println!("CU buy_token: {}", meta.compute_units_consumed);
+    let (_, fee2, _, _) = sent_event(&meta);
+    assert_eq!(before - w.lamports(&user), fee2, "the user paid the LayerZero fee, to the lamport");
+
+    // ---- SELL: the replicas burn, OP_SELL out (the bag: straight from the hub)
+    execute(
+        &mut w,
+        2,
+        &SpawnMsg::Deliver { hub_token: WireAddr(t), to: WireAddr::from_pubkey(&user), tokens: U256::from_u128(1_000_000 * E18), refund: U256::from_u128(0) },
+        0,
+    )
+    .unwrap();
+    let bag = ata_of(&user, &w.ids.mint(&t));
+    assert_eq!(w.token_amount(&bag), 1_000_000 * ONE_TOKEN);
+    let ix = sell_ix(&w, &user, TOK, 400_000 * ONE_TOKEN);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    println!("CU sell_token: {}", meta.compute_units_consumed);
+    assert_eq!(w.token_amount(&bag), 600_000 * ONE_TOKEN);
+    let expected = SpawnMsg::Sell { hub_token: WireAddr(t), seller: WireAddr::from_pubkey(&user), tokens_in: U256::from_spl_amount(400_000 * ONE_TOKEN) };
+    assert!(packet_carries(&meta, &enveloped(&w, &expected)));
+
+    // ---- CLAIM and PULL: pure messages
+    let ix = claim_ix(&w, &user, TOK);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    println!("CU claim_fees: {}", meta.compute_units_consumed);
+    let expected = SpawnMsg::Claim { hub_token: WireAddr(t), claimer: WireAddr::from_pubkey(&user) };
+    assert!(packet_carries(&meta, &enveloped(&w, &expected)));
+    let quoted = quote(&mut w, msg_codec::OP_PULL_FEES, "", "", "", false);
+    let ix = pull_ix(&w, &user, TOK);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    println!("CU pull_fees: {}", meta.compute_units_consumed);
+    assert_eq!(sent_event(&meta).1, quoted);
+    let expected = SpawnMsg::PullFees { hub_token: WireAddr(t) };
+    assert!(packet_carries(&meta, &enveloped(&w, &expected)), "op 5 on the wire");
+
+    // ---- SPAWN with a dev buy: 3 SYNC legs + the DELIVER leg, all prepaid
+    let (name, symbol, uri) = ("SOLANA BORN", "SOLB", "{\"image\":\"/img/00\"}");
+    let quoted = quote(&mut w, msg_codec::OP_SPAWN, name, symbol, uri, true);
+    let ix = spawn_ix(&w, &user, name, symbol, uri, 50 * ONE_USDC, 1, 0);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    println!("CU spawn_token (dev buy): {}", meta.compute_units_consumed);
+    let (op, fee_spawn, legs, _) = sent_event(&meta);
+    assert_eq!((op, legs), (msg_codec::OP_SPAWN, SPAWN_LEGS + 1));
+    assert_eq!(fee_spawn, quoted);
+    println!("fee of a spawn with a dev buy (4 reply legs): {} lamports", fee_spawn);
+    assert!(fee_spawn > fee, "four reply legs cost more than one");
+    assert!(packet_carries(&meta, &msg_codec::lz_receive_options(GAS_TO_HUB, RETURN_UNIT * 4)));
     let expected = SpawnMsg::Spawn {
-        creator: WireAddr::from_pubkey(&w.payer.pubkey()),
-        name: "OMNI SOL".into(),
-        symbol: "OSOL".into(),
-        meta_uri: "{\"leg\":\"solana\"}".into(),
-        dev_buy_usd: U256::from_spl_amount(5_000_000),
+        creator: WireAddr::from_pubkey(&user),
+        name: name.into(),
+        symbol: symbol.into(),
+        meta_uri: uri.into(),
+        dev_buy_usd: U256::from_spl_amount(50 * ONE_USDC),
         fee_mode: 1,
-    }
-    .encode();
-    let expected = enveloped(&w.store, expected);
-    assert_packet_carries(&meta, &expected);
-    // the $5 dev buy burned
-    let bal = u64::from_le_bytes(
-        w.svm.get_account(&user_usd).unwrap().data[64..72].try_into().unwrap(),
-    );
-    assert_eq!(bal, 45_000_000);
-}
-
-#[test]
-fn buy_sell_claim_round_the_nonce() {
-    let mut w = setup_live();
-    let hub_token = [0x8bu8; 32];
-
-    // --- buy: burn oUSD, ship OP_BUY
-    let user_usd = w.plant_token_account(&w.usd_mint.clone(), &w.payer.pubkey(), 9_000_000);
-    w.raise_mint_supply(&w.usd_mint.clone(), 9_000_000);
-    let data = spawn_gateway::instruction::BuyToken {
-        params: spawn_gateway::instructions::BuyTokenParams { hub_token, usd_in: 5_000_000 },
-    }
-    .data();
-    let business = spawn_gateway::accounts::BuyToken {
-        user: w.payer.pubkey(),
-        store: w.store,
-        peer: w.peer,
-        gas_tank: w.gas_tank,
-        usd_mint: w.usd_mint,
-        user_usd,
-        token_program: TOKEN_PROGRAM,
-        system_program: SYSTEM,
-    }
-    .to_account_metas(None);
-    let (fee, meta) = run_send(&mut w, data, business);
-    assert!(fee > 0);
-    assert_eq!(w.outbound_nonce(), 1);
-    let expected = SpawnMsg::Buy {
-        hub_token: WireAddr(hub_token),
-        buyer: WireAddr::from_pubkey(&w.payer.pubkey()),
-        usd_in: U256::from_spl_amount(5_000_000),
-    }
-    .encode();
-    let expected = enveloped(&w.store, expected);
-    assert_packet_carries(&meta, &expected);
-
-    // --- sell: plant a synced replica + bag, burn it, ship OP_SELL
-    let (replica_pda, replica_bump) =
-        Pubkey::find_program_address(&[b"Replica", &hub_token], &w.program);
-    let (mint_pda, _) = Pubkey::find_program_address(&[b"Mint", &hub_token], &w.program);
-    // SPL mint: COption tag(4) + authority(32) + supply u64 @36 + decimals @44 + initialized @45
-    let mut mint_data = vec![0u8; 82];
-    mint_data[0..4].copy_from_slice(&1u32.to_le_bytes());
-    mint_data[4..36].copy_from_slice(&w.store.to_bytes());
-    mint_data[36..44].copy_from_slice(&800_000_000_000u64.to_le_bytes());
-    mint_data[44] = 6;
-    mint_data[45] = 1;
-    w.svm
-        .set_account(
-            mint_pda,
-            Account { lamports: 10_000_000, data: mint_data, owner: TOKEN_PROGRAM, executable: false, rent_epoch: 0 },
-        )
-        .unwrap();
-    let replica = spawn_gateway::state::Replica {
-        hub_token,
-        mint: mint_pda,
-        name: "OMNI SOL".into(),
-        symbol: "OSOL".into(),
-        bump: replica_bump,
     };
-    let mut replica_data = Vec::new();
-    use anchor_lang::Discriminator;
-    replica_data.extend_from_slice(spawn_gateway::state::Replica::DISCRIMINATOR);
-    replica.serialize(&mut replica_data).unwrap();
-    replica_data.resize(spawn_gateway::state::Replica::SIZE, 0);
-    w.svm
-        .set_account(
-            replica_pda,
-            Account { lamports: 10_000_000, data: replica_data, owner: w.program, executable: false, rent_epoch: 0 },
-        )
-        .unwrap();
-    let user_token = w.plant_token_account(&mint_pda, &w.payer.pubkey(), 800_000_000_000);
+    assert!(packet_carries(&meta, &enveloped(&w, &expected)));
+    assert_eq!(w.token_amount(&w.ids.vault), 301 * ONE_USDC);
+    assert_eq!(outbound_nonce(&w), 6);
 
-    let data = spawn_gateway::instruction::SellToken {
-        params: spawn_gateway::instructions::SellTokenParams { hub_token, amount: 123_456_789 },
-    }
-    .data();
-    let business = spawn_gateway::accounts::SellToken {
-        user: w.payer.pubkey(),
-        store: w.store,
-        peer: w.peer,
-        gas_tank: w.gas_tank,
-        replica: replica_pda,
-        mint: mint_pda,
-        user_token,
-        token_program: TOKEN_PROGRAM,
-        system_program: SYSTEM,
-    }
-    .to_account_metas(None);
-    let (fee, meta) = run_send(&mut w, data, business);
-    assert!(fee > 0);
-    assert_eq!(w.outbound_nonce(), 2);
-    let expected = SpawnMsg::Sell {
-        hub_token: WireAddr(hub_token),
-        seller: WireAddr::from_pubkey(&w.payer.pubkey()),
-        tokens_in: U256::from_spl_amount(123_456_789),
-    }
-    .encode();
-    let expected = enveloped(&w.store, expected);
-    assert_packet_carries(&meta, &expected);
+    // nobody but the users paid: the tank is exactly where it was
+    assert_eq!(w.lamports(&w.ids.tank), tank_before);
 
-    // --- claim: pure message
-    let data = spawn_gateway::instruction::ClaimFees {
-        params: spawn_gateway::instructions::ClaimFeesParams { hub_token },
-    }
-    .data();
-    let business = spawn_gateway::accounts::ClaimFees {
-        user: w.payer.pubkey(),
-        store: w.store,
-        peer: w.peer,
-        gas_tank: w.gas_tank,
-        system_program: SYSTEM,
-    }
-    .to_account_metas(None);
-    let (fee, meta) = run_send(&mut w, data, business);
-    assert!(fee > 0);
-    assert_eq!(w.outbound_nonce(), 3);
-    let expected = SpawnMsg::Claim {
-        hub_token: WireAddr(hub_token),
-        claimer: WireAddr::from_pubkey(&w.payer.pubkey()),
-    }
-    .encode();
-    let expected = enveloped(&w.store, expected);
-    assert_packet_carries(&meta, &expected);
+    // what the reply budget costs: the same buy with no reply leg
+    w.set_fee_config(GAS_TO_HUB, 0, 1, SPAWN_LEGS);
+    let bare = quote(&mut w, msg_codec::OP_BUY, "", "", "", false);
+    println!("fee of a buy with NO reply budget: {} lamports (the budget costs {})", bare, fee - bare);
+    assert!(bare < fee, "the real executor prices the forwarded value");
 }
 
 #[test]
-fn empty_tank_blocks_the_send() {
-    let mut w = setup_live();
-    // drain the tank below any plausible quote
-    let tank = w.gas_tank;
-    let mut acc = w.svm.get_account(&tank).unwrap();
-    acc.lamports = 1;
-    w.svm.set_account(tank, acc).unwrap();
+fn a_sponsored_store_pays_from_the_tank_and_an_empty_tank_stops_it() {
+    let (mut w, u) = world_with_token_and_user(100 * ONE_USDC);
+    let admin = w.admin.insecure_clone();
+    w.govern(spawn_gateway::instruction::SetSponsored { on: true }.data(), &admin).unwrap();
+    // first buy creates the user's accounts; measure on the second
+    let ix = buy_ix(&w, &u.pubkey(), TOK, ONE_USDC, 0);
+    w.send(&[ix], &[&u]).unwrap();
+    let (user_before, tank_before) = (w.lamports(&u.pubkey()), w.lamports(&w.ids.tank));
+    let ix = buy_ix(&w, &u.pubkey(), TOK, ONE_USDC, 0);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    let (_, fee, _, sponsored) = sent_event(&meta);
+    assert!(sponsored && fee > 0);
+    assert_eq!(w.lamports(&u.pubkey()), user_before, "a sponsored user pays nothing");
+    assert_eq!(tank_before - w.lamports(&w.ids.tank), fee);
 
-    let data = spawn_gateway::instruction::ClaimFees {
-        params: spawn_gateway::instructions::ClaimFeesParams { hub_token: [9u8; 32] },
+    let tank = w.ids.tank;
+    w.set_lamports(&tank, 900_000);
+    let ix = buy_ix(&w, &u.pubkey(), TOK, ONE_USDC, 0);
+    let err = w.send(&[ix], &[&u]).unwrap_err();
+    assert!(err.contains("TankTooPoor"), "{err}");
+}
+
+#[test]
+fn entry_checks_refuse_before_any_money_moves() {
+    let (mut w, u) = world_with_token_and_user(1_000 * ONE_USDC);
+    let user = u.pubkey();
+    let vault = w.ids.vault;
+    let refused = |w: &mut World, ix: Instruction, what: &str| {
+        let err = w.send(&[ix], &[&u]).unwrap_err();
+        assert!(err.contains(what), "expected {what}, got: {err}");
+    };
+
+    // what the hub would refuse or choke on
+    let ix = spawn_ix(&w, &user, "X", "X", "", 0, 4, 0);
+    refused(&mut w, ix, "BadFeeMode");
+    let ix = spawn_ix(&w, &user, &"N".repeat(65), "X", "", 0, 0, 0);
+    refused(&mut w, ix, "StringTooLong");
+    let ix = spawn_ix(&w, &user, "X", &"S".repeat(17), "", 0, 0, 0);
+    refused(&mut w, ix, "StringTooLong");
+    // (a 1025-byte metaURI cannot even be sent: it does not fit a transaction)
+    // an unknown token: its replica does not exist here
+    let ix = buy_ix(&w, &user, 0x44, ONE_USDC, 0);
+    refused(&mut w, ix, "AccountNotInitialized");
+    let ix = buy_ix(&w, &user, TOK, 0, 0);
+    refused(&mut w, ix, "ZeroAmount");
+    // the caller's ceiling on the fee
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 1);
+    refused(&mut w, ix, "InsufficientFee");
+    // the deposit cap
+    w.set_deposit_cap(10 * ONE_USDC);
+    let ix = buy_ix(&w, &user, TOK, 11 * ONE_USDC, 0);
+    refused(&mut w, ix, "DepositCap");
+    let ix = spawn_ix(&w, &user, "X", "X", "", 11 * ONE_USDC, 0, 0);
+    refused(&mut w, ix, "DepositCap");
+    // a fee payer that is not the user
+    let other = w.new_user();
+    let t = token_id(TOK);
+    let mut metas = buy_accounts(&w, &user, &t);
+    metas.extend(send_list(&w, &other.pubkey()));
+    let ix = Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::BuyToken {
+            params: spawn_gateway::instructions::BuyTokenParams { hub_token: t, usdc_in: ONE_USDC, max_native_fee: 0 },
+        }
+        .data(),
+        metas,
+    );
+    let err = w.send(&[ix], &[&u, &other]).unwrap_err();
+    assert!(err.contains("BadFeePayer"), "{err}");
+
+    // paused: no new exposure…
+    let admin = w.admin.insecure_clone();
+    w.govern(spawn_gateway::instruction::Pause {}.data(), &admin).unwrap();
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    refused(&mut w, ix, "Paused");
+    let ix = spawn_ix(&w, &user, "X", "X", "", 0, 0, 0);
+    refused(&mut w, ix, "Paused");
+    assert_eq!(w.token_amount(&vault), 0, "nothing reached the vault");
+    assert_eq!(w.token_amount(&ata_of(&user, &USDC)), 1_000 * ONE_USDC);
+    assert_eq!(outbound_nonce(&w), 0, "nothing was sent");
+
+    // …but every exit stays open: sell, claim, pull
+    execute(
+        &mut w,
+        2,
+        &SpawnMsg::Deliver { hub_token: WireAddr(t), to: WireAddr::from_pubkey(&user), tokens: U256::from_u128(10 * E18), refund: U256::from_u128(0) },
+        0,
+    )
+    .unwrap_err(); // the user never opened a token account: nowhere to park yet
+    w.open_user_account(&user);
+    execute(
+        &mut w,
+        2,
+        &SpawnMsg::Deliver { hub_token: WireAddr(t), to: WireAddr::from_pubkey(&user), tokens: U256::from_u128(10 * E18), refund: U256::from_u128(0) },
+        0,
+    )
+    .expect("the same packet, executable again once there is somewhere to park");
+    let mint = w.ids.mint(&t);
+    let i = Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::ClaimParked { hub_token: t }.data(),
+        spawn_gateway::accounts::ClaimParked {
+            user,
+            store: w.ids.store,
+            user_account: w.ids.user(&user),
+            replica: w.ids.replica(&t),
+            mint,
+            user_token: ata_of(&user, &mint),
+            token_program: TOKEN_PROGRAM,
+            associated_token_program: ATA_PROGRAM,
+            system_program: SYSTEM,
+        }
+        .to_account_metas(None),
+    );
+    w.send(&[i], &[&u]).unwrap();
+    for ix in [sell_ix(&w, &user, TOK, 4 * ONE_TOKEN), claim_ix(&w, &user, TOK), pull_ix(&w, &user, TOK)] {
+        w.send(&[ix], &[&u]).expect("exits are never paused");
     }
-    .data();
-    let mut metas = spawn_gateway::accounts::ClaimFees {
-        user: w.payer.pubkey(),
-        store: w.store,
-        peer: w.peer,
-        gas_tank: w.gas_tank,
-        system_program: SYSTEM,
+    assert_eq!(outbound_nonce(&w), 3);
+}
+
+#[test]
+fn the_real_executor_delivers_every_hub_message_with_zero_value() {
+    let mut w = live();
+    enlist_executor(&mut w);
+    let tank = w.ids.tank;
+    let t = token_id(TOK);
+    let exec = w.exec.pubkey();
+
+    // ---- SYNC with a DRY tank: lz_receive would have to spend the
+    // executor's SOL on rent. The hub's options buy value = 0, so the real
+    // executor refuses — and the packet stays verified, executable later.
+    let err = execute(&mut w, 1, &sync_msg(TOK), 0).unwrap_err();
+    assert!(err.contains("InsufficientBalance"), "expected the executor's own balance check, got: {err}");
+    assert!(err.contains(&format!("Program {EXECUTOR} failed")), "the refusal must come from the executor program");
+    assert!(payload_hash_exists(&w, 1), "the message was not consumed");
+    assert!(!w.exists(&w.ids.replica(&t)));
+
+    // ---- the tank is topped up (anyone can): the same packet goes through
+    w.fund(&tank, 100_000_000);
+    let before = w.lamports(&exec);
+    let meta = execute(&mut w, 1, &sync_msg(TOK), 0).expect("SYNC, rent from the tank");
+    println!("CU executor→lz_receive SYNC (real clear): {}", meta.compute_units_consumed);
+    assert_eq!(w.lamports(&exec), before, "the executor's balance is untouched");
+    let replica: Replica = w.read(&w.ids.replica(&t));
+    assert_eq!(replica.name, "CANARY");
+    assert!(!payload_hash_exists(&w, 1), "clear() consumed the packet");
+    // replay: the endpoint has nothing left to clear
+    assert!(execute_again(&mut w, 1, &sync_msg(TOK)).is_err());
+
+    // ---- a user who bought here: their accounts exist (they paid for them)
+    let u = w.new_user();
+    let user = u.pubkey();
+    w.give_usdc(&user, 300 * ONE_USDC);
+    let ix = buy_ix(&w, &user, TOK, 260 * ONE_USDC, 0);
+    w.send(&[ix], &[&u]).unwrap();
+
+    // ---- DELIVER (a FAIR GENESIS-clamped buy: a bag + a $10 refund)
+    let before = w.lamports(&exec);
+    let meta = execute(
+        &mut w,
+        2,
+        &SpawnMsg::Deliver {
+            hub_token: WireAddr(t),
+            to: WireAddr::from_pubkey(&user),
+            tokens: U256::from_u128(30_451_115_339_459_940_893_081_251),
+            refund: U256::from_u128(10 * E18),
+        },
+        0,
+    )
+    .expect("DELIVER through the real executor");
+    println!("CU executor→lz_receive DELIVER + refund (real clear): {}", meta.compute_units_consumed);
+    assert_eq!(w.token_amount(&ata_of(&user, &w.ids.mint(&t))), 30_451_115_339_459);
+    assert_eq!(w.token_amount(&ata_of(&user, &USDC)), 50 * ONE_USDC);
+    assert_eq!(w.token_amount(&w.ids.vault), 250 * ONE_USDC);
+
+    // ---- PAYOUT (a sell)
+    let meta = execute(&mut w, 3, &SpawnMsg::Payout { to: WireAddr::from_pubkey(&user), usd_out: U256::from_u128(87_997_407 * E12) }, 0)
+        .expect("PAYOUT through the real executor");
+    println!("CU executor→lz_receive PAYOUT (real clear): {}", meta.compute_units_consumed);
+    assert_eq!(w.token_amount(&ata_of(&user, &USDC)), 50 * ONE_USDC + 87_997_407);
+
+    // ---- FEE_DROP (the reply to a pull)
+    let meta = execute(&mut w, 4, &SpawnMsg::FeeDrop { hub_token: WireAddr(t), amount: U256::from_u128(37_819_431 * E12) }, 0)
+        .expect("FEE_DROP through the real executor");
+    println!("CU executor→lz_receive FEE_DROP (real clear): {}", meta.compute_units_consumed);
+    assert_eq!(w.store().pool_total, 37_819_431);
+
+    // ---- out of order: nonce 6 before nonce 5 — delivery is unordered
+    execute(&mut w, 6, &SpawnMsg::Payout { to: WireAddr::from_pubkey(&user), usd_out: U256::from_u128(E18) }, 0).unwrap();
+    execute(&mut w, 5, &SpawnMsg::Payout { to: WireAddr::from_pubkey(&user), usd_out: U256::from_u128(E18) }, 0).unwrap();
+
+    // across every delivery the executor spent nothing but its own fees
+    assert_eq!(w.lamports(&exec), before, "a hub message cost the executor lamports");
+
+    // ---- backing, as far as this chain can see it: the vault covers what
+    // this chain owes on the spot
+    let s = w.store();
+    assert!(w.token_amount(&w.ids.vault) >= s.claims_total + s.pool_total);
+}
+
+/// Re-submits a packet whose payload hash is gone (no re-planting).
+fn execute_again(w: &mut World, nonce: u64, msg: &SpawnMsg) -> TxResult {
+    let message = w.wire(msg);
+    let guid = keccak::hashv(&[b"guid", &nonce.to_be_bytes()]).to_bytes();
+    let params = LzReceiveParams { src_eid: HUB_EID, sender: hub_peer(), nonce, guid, message, extra_data: vec![] };
+    let lz_accounts = resolve_lz_receive(w, &params);
+    let mut metas = spawn_gateway::accounts::LzReceive { payer: w.exec.pubkey(), store: w.ids.store, peer: w.ids.peer }
+        .to_account_metas(None);
+    metas.extend(lz_accounts.into_iter().skip(3));
+    let ix = Instruction::new_with_bytes(w.ids.program, &spawn_gateway::instruction::LzReceive { params }.data(), metas);
+    let exec = w.exec.insecure_clone();
+    w.send(&[ix], &[&exec])
+}
+
+#[test]
+fn a_dry_tank_sync_can_be_executed_by_anyone_willing_to_pay_the_rent() {
+    let mut w = live();
+    let t = token_id(TOK);
+    // no tank, no executor: a user runs the verified packet themselves
+    let msg = sync_msg(TOK);
+    let message = w.wire(&msg);
+    let guid = [7u8; 32];
+    plant_verified(&mut w, 1, guid, &message);
+    let params = LzReceiveParams { src_eid: HUB_EID, sender: hub_peer(), nonce: 1, guid, message, extra_data: vec![] };
+    let u = w.new_user();
+    let mut accounts = resolve_lz_receive(&mut w, &params);
+    accounts[0] = AccountMeta::new(u.pubkey(), true); // the payer is the user
+    let before = w.lamports(&u.pubkey());
+    let ix = Instruction::new_with_bytes(w.ids.program, &spawn_gateway::instruction::LzReceive { params }.data(), accounts);
+    w.send(&[ix], &[&u]).expect("permissionless execution of a verified packet");
+    let replica: Replica = w.read(&w.ids.replica(&t));
+    assert_eq!(replica.symbol, "CANARY");
+    assert!(before - w.lamports(&u.pubkey()) > 3_000_000, "the user funded the replica's rent");
+}
+
+#[test]
+fn a_send_fits_one_v0_transaction_with_a_lookup_table() {
+    let (mut w, u) = world_with_token_and_user(100 * ONE_USDC);
+    let user = u.pubkey();
+    let ix = buy_ix(&w, &user, TOK, 5 * ONE_USDC, 0);
+    let budget = ComputeBudgetInstruction::set_compute_unit_limit(600_000);
+
+    // a legacy transaction cannot carry it
+    let legacy = solana_sdk::message::Message::new(&[budget.clone(), ix.clone()], Some(&user));
+    let legacy_len = 1 + 64 + legacy.serialize().len();
+    println!("buy_token as a legacy transaction: {} bytes (limit 1232), {} accounts", legacy_len, legacy.account_keys.len());
+    assert!(legacy_len > 1232, "if this fits, the lookup table is no longer needed");
+
+    // the static part — everything that is not this user's — goes in a table
+    let static_keys: Vec<Pubkey> = ix
+        .accounts
+        .iter()
+        .map(|m| m.pubkey)
+        .filter(|k| {
+            *k != user
+                && *k != ata_of(&user, &USDC)
+                && *k != ata_of(&user, &w.ids.mint(&token_id(TOK)))
+                && *k != w.ids.user(&user)
+        })
+        .fold(Vec::new(), |mut v, k| {
+            if !v.contains(&k) {
+                v.push(k)
+            }
+            v
+        });
+    let table = Pubkey::new_unique();
+    let state = AddressLookupTable {
+        meta: LookupTableMeta { deactivation_slot: u64::MAX, last_extended_slot: 0, last_extended_slot_start_index: 0, authority: None, _padding: 0 },
+        addresses: Cow::Owned(static_keys.clone()),
+    };
+    w.svm
+        .set_account(
+            table,
+            Account {
+                lamports: 10_000_000,
+                data: state.serialize_for_tests().unwrap(),
+                owner: solana_sdk::address_lookup_table::program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    w.svm.warp_to_slot(100);
+
+    let blockhash = w.svm.latest_blockhash();
+    let msg = v0::Message::try_compile(
+        &user,
+        &[budget, ix],
+        &[AddressLookupTableAccount { key: table, addresses: static_keys }],
+        blockhash,
+    )
+    .unwrap();
+    let tx = VersionedTransaction::try_new(VersionedMessage::V0(msg), &[&u]).unwrap();
+    let len = 1 + 64 + tx.message.serialize().len();
+    println!("buy_token as a v0 transaction with a lookup table: {} bytes", len);
+    assert!(len <= 1232, "a buy must fit one transaction: {len} bytes");
+    let meta = w.svm.send_transaction(tx).map_err(|e| format!("{:?}\n{}", e.err, e.meta.logs.join("\n"))).expect("the v0 buy");
+    println!("CU buy_token (v0, first): {}", meta.compute_units_consumed);
+    assert_eq!(w.token_amount(&w.ids.vault), 5 * ONE_USDC);
+}
+
+/* ------------------------- our own verifier set ----------------------- */
+
+/// The DVN config account of one of OUR verifiers (fixture label), and the
+/// program that owns it.
+fn our_dvn(name: &str) -> (Pubkey, Pubkey) {
+    let a = fixture_accounts()
+        .into_iter()
+        .find(|a| a.dvn.as_deref().map(|d| d.ends_with(&format!("|{name}"))).unwrap_or(false))
+        .unwrap_or_else(|| panic!("no fixture for DVN {name}"));
+    (a.owner, a.pubkey)
+}
+
+fn borsh_uln_config(confirmations: u64, required: &[Pubkey], optional: &[Pubkey], threshold: u8) -> Vec<u8> {
+    let mut d = confirmations.to_le_bytes().to_vec();
+    d.extend_from_slice(&[required.len() as u8, optional.len() as u8, threshold]);
+    for list in [required, optional] {
+        d.extend_from_slice(&(list.len() as u32).to_le_bytes());
+        for k in list {
+            d.extend_from_slice(k.as_ref());
+        }
     }
-    .to_account_metas(None);
-    metas.extend(w.send_list());
-    let err = w
-        .send_tx(Instruction::new_with_bytes(w.program, &data, metas))
-        .unwrap_err();
-    assert!(err.contains("TankTooPoor") || err.contains("Error"), "unexpected: {err}");
+    d
+}
+
+/// The EVM side runs its own verifier set — LayerZero Labs + Google
+/// required, 1 of Horizen / Twinstake optional (contracts/config/
+/// profiles.js). Both ends of a pathway must name the SAME set, so the
+/// Solana OApp must be able to set it too. The delegate (the admin) does it
+/// straight on the real endpoint and ULN; the send then pays those four
+/// verifiers instead of the pathway's default set.
+#[test]
+fn the_delegate_sets_our_own_verifier_set_and_sends_ride_it() {
+    let (mut w, u) = world_with_token_and_user(100 * ONE_USDC);
+    let user = u.pubkey();
+    let store = w.ids.store;
+    let eid = HUB_EID.to_be_bytes();
+    let msglib = pda(&[b"MessageLib"], &ULN);
+    let msglib_info = pda(&[b"MessageLib", msglib.as_ref()], &ENDPOINT);
+    let send_cfg = pda(&[b"SendConfig", &eid, store.as_ref()], &ULN);
+    let recv_cfg = pda(&[b"ReceiveConfig", &eid, store.as_ref()], &ULN);
+    let registry = w.lz.as_ref().unwrap().oapp_registry;
+
+    // what the default set costs
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    let default_fee = sent_event(&w.send(&[ix], &[&u]).unwrap()).1;
+
+    // sorted, as the ULN demands
+    let mut required = vec![our_dvn("LayerZero Labs"), our_dvn("Google")];
+    let mut optional = vec![our_dvn("Horizen"), our_dvn("Twinstake")];
+    required.sort_by_key(|d| d.1);
+    optional.sort_by_key(|d| d.1);
+    let keys = |v: &[(Pubkey, Pubkey)]| v.iter().map(|d| d.1).collect::<Vec<_>>();
+
+    let endpoint_head = |signer: &Pubkey| {
+        vec![
+            AccountMeta::new_readonly(*signer, true),
+            AccountMeta::new_readonly(registry, false),
+            AccountMeta::new_readonly(msglib_info, false),
+            AccountMeta::new_readonly(msglib, false),
+            AccountMeta::new_readonly(ULN, false),
+        ]
+    };
+    // 1. init_config: the OApp's own send/receive config accounts on the ULN
+    let mut data = anchor_sighash("init_config").to_vec();
+    data.extend_from_slice(store.as_ref());
+    data.extend_from_slice(&HUB_EID.to_le_bytes());
+    let mut metas = endpoint_head(&w.admin.pubkey());
+    metas.extend([
+        AccountMeta::new(w.admin.pubkey(), true),
+        AccountMeta::new_readonly(msglib, false),
+        AccountMeta::new(send_cfg, false),
+        AccountMeta::new(recv_cfg, false),
+        AccountMeta::new_readonly(SYSTEM, false),
+    ]);
+    w.send(&[Instruction::new_with_bytes(ENDPOINT, &data, metas)], &[]).expect("endpoint.init_config");
+
+    // 2. set_config: the send side (type 2) and the receive side (type 3)
+    let set_config = |w: &mut World, signer: &Keypair, config_type: u32, config: Vec<u8>| {
+        let mut data = anchor_sighash("set_config").to_vec();
+        data.extend_from_slice(store.as_ref());
+        data.extend_from_slice(&HUB_EID.to_le_bytes());
+        data.extend_from_slice(&config_type.to_le_bytes());
+        data.extend_from_slice(&(config.len() as u32).to_le_bytes());
+        data.extend_from_slice(&config);
+        let mut metas = endpoint_head(&signer.pubkey());
+        metas.extend([
+            AccountMeta::new_readonly(msglib, false),
+            AccountMeta::new(send_cfg, false),
+            AccountMeta::new(recv_cfg, false),
+            AccountMeta::new_readonly(pda(&[b"SendConfig", &eid], &ULN), false),
+            AccountMeta::new_readonly(pda(&[b"ReceiveConfig", &eid], &ULN), false),
+            AccountMeta::new_readonly(pda(&[b"__event_authority"], &ULN), false),
+            AccountMeta::new_readonly(ULN, false),
+        ]);
+        w.send(&[Instruction::new_with_bytes(ENDPOINT, &data, metas)], &[signer])
+    };
+    let cfg = borsh_uln_config(32, &keys(&required), &keys(&optional), 1);
+    // nobody but the delegate can touch the verifier set
+    let stranger = w.new_user();
+    assert!(set_config(&mut w, &stranger, 2, cfg.clone()).is_err());
+    let admin = w.admin.insecure_clone();
+    set_config(&mut w, &admin, 2, cfg.clone()).expect("send ULN config");
+    set_config(&mut w, &admin, 3, cfg.clone()).expect("receive ULN config");
+
+    // read back: the OApp's send config names exactly our set
+    let d = w.svm.get_account(&send_cfg).unwrap().data;
+    assert_eq!(&d[9..17], &32u64.to_le_bytes(), "confirmations");
+    assert_eq!((d[17], d[18], d[19]), (2, 2, 1), "2 required, 2 optional, threshold 1");
+    assert_eq!(&d[24..56], required[0].1.as_ref());
+
+    // 3. a send now rides our four verifiers, in the config's order
+    let mut dvns = required.clone();
+    dvns.extend(optional.clone());
+    let t = token_id(TOK);
+    let mut metas = buy_accounts(&w, &user, &t);
+    metas.extend(send_list_with(&w, &user, &dvns));
+    let ix = Instruction::new_with_bytes(
+        w.ids.program,
+        &spawn_gateway::instruction::BuyToken {
+            params: spawn_gateway::instructions::BuyTokenParams { hub_token: t, usdc_in: ONE_USDC, max_native_fee: 0 },
+        }
+        .data(),
+        metas,
+    );
+    let meta = w.send(&[ix], &[&u]).expect("a buy over our own verifier set");
+    let fee = sent_event(&meta).1;
+    println!("fee of a buy over the DEFAULT set: {default_fee} lamports; over OUR set: {fee} lamports");
+    println!("CU buy_token over our set: {}", meta.compute_units_consumed);
+    assert!(fee < default_fee, "our set must not cost more than the default one");
+    // the default list no longer matches the OApp's config
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    assert!(w.send(&[ix], &[&u]).is_err(), "the default DVN list must be refused once ours is set");
+
+    // What the whole wiring locks in rent — the deployment plan's number.
+    // Mainnet's rate on 2026-11-13 (`solana rent -u mainnet-beta`):
+    // (128 + bytes) × 5,080 lamports.
+    let hub = hub_peer();
+    let named = [
+        ("store", w.ids.store),
+        ("lz_receive_types", w.ids.types_acc),
+        ("peer (hub)", w.ids.peer),
+        ("vault (USDC token account)", w.ids.vault),
+        ("gas tank (0 bytes, its floor)", w.ids.tank),
+        ("endpoint: oapp registry", registry),
+        ("endpoint: nonce", pda(&[b"Nonce", store.as_ref(), &eid, &hub], &ENDPOINT)),
+        ("endpoint: pending nonce", pda(&[b"PendingNonce", store.as_ref(), &eid, &hub], &ENDPOINT)),
+        ("endpoint: send library config", pda(&[b"SendLibraryConfig", store.as_ref(), &eid], &ENDPOINT)),
+        ("endpoint: receive library config", pda(&[b"ReceiveLibraryConfig", store.as_ref(), &eid], &ENDPOINT)),
+        ("uln: send config", send_cfg),
+        ("uln: receive config", recv_cfg),
+    ];
+    let mut total = 0u64;
+    for (name, key) in named {
+        let len = w.svm.get_account(&key).map(|a| a.data.len()).unwrap_or(0) as u64;
+        let rent = (128 + len) * 5_080;
+        total += rent;
+        println!("wiring rent — {name}: {len} bytes → {rent} lamports");
+    }
+    let alt = (128 + 56 + 32 * 32) * 5_080u64;
+    println!("wiring rent — lookup table (32 addresses): {alt} lamports");
+    println!("wiring rent — TOTAL at mainnet rates: {} lamports", total + alt);
+}
+
+/* --------------------- what fits a Solana transaction ------------------ */
+
+/// The v0 size of the transaction that executes one hub message, with a
+/// lookup table holding everything that is not specific to the packet, its
+/// token or its recipient — what an OApp's own table (`init_store`'s `alt`)
+/// would hold.
+fn executor_tx_size(w: &mut World, nonce: u64, msg: &SpawnMsg) -> (usize, usize) {
+    let message = w.wire(msg);
+    let wire_len = message.len();
+    let guid = [3u8; 32];
+    let params = LzReceiveParams { src_eid: HUB_EID, sender: hub_peer(), nonce, guid, message, extra_data: vec![] };
+    let lz_accounts = resolve_lz_receive(w, &params);
+    let mut data = anchor_sighash("execute").to_vec();
+    data.extend_from_slice(&execute_params(&w.ids.store, &params, 0, 400_000));
+    let lz = w.lz.as_ref().unwrap();
+    let mut metas = vec![
+        AccountMeta::new(w.exec.pubkey(), true),
+        AccountMeta::new_readonly(lz.executor_cfg, false),
+        AccountMeta::new_readonly(ENDPOINT, false),
+        AccountMeta::new_readonly(pda(&[b"__event_authority"], &ENDPOINT), false),
+        AccountMeta::new_readonly(pda(&[b"__event_authority"], &EXECUTOR), false),
+        AccountMeta::new_readonly(EXECUTOR, false),
+        AccountMeta::new_readonly(w.ids.program, false),
+    ];
+    metas.extend(lz_accounts);
+    let ix = Instruction::new_with_bytes(EXECUTOR, &data, metas);
+    let static_keys = vec![
+        lz.executor_cfg,
+        ENDPOINT,
+        pda(&[b"__event_authority"], &ENDPOINT),
+        pda(&[b"__event_authority"], &EXECUTOR),
+        w.ids.program,
+        w.ids.store,
+        w.ids.peer,
+        lz.oapp_registry,
+        lz.nonce,
+        pda(&[b"Endpoint"], &ENDPOINT),
+        USDC,
+        w.ids.vault,
+        w.ids.tank,
+        SYSTEM,
+        TOKEN_PROGRAM,
+    ];
+    let msg = v0::Message::try_compile(
+        &w.exec.pubkey(),
+        &[ComputeBudgetInstruction::set_compute_unit_limit(400_000), ix],
+        &[AddressLookupTableAccount { key: Pubkey::new_unique(), addresses: static_keys }],
+        w.svm.latest_blockhash(),
+    )
+    .unwrap();
+    (wire_len, 1 + 64 + VersionedMessage::V0(msg).serialize().len())
+}
+
+/// The hub's messages are abi-encoded twice over (envelope + op + tuple):
+/// 288 to 480 bytes on the wire. LayerZero's DEFAULT executor config for
+/// Base→Solana admits 200 (read from Base mainnet, 2026-11-13) — so the hub
+/// adapter's executor config for eid 30168 must be raised by its delegate —
+/// and the real ceiling is Solana's 1232-byte transaction. This measures it.
+#[test]
+fn every_hub_message_fits_one_executor_transaction() {
+    let mut w = live();
+    let u = w.new_user();
+    let t = token_id(TOK);
+    let worst_sync = SpawnMsg::SyncToken { hub_token: WireAddr(t), name: "N".repeat(64), symbol: "S".repeat(16) };
+    let cases: Vec<(&str, SpawnMsg)> = vec![
+        ("SYNC (64/16-byte strings)", worst_sync),
+        ("SYNC (CANARY)", sync_msg(TOK)),
+        ("DELIVER", SpawnMsg::Deliver { hub_token: WireAddr(t), to: WireAddr::from_pubkey(&u.pubkey()), tokens: U256::from_u128(E18), refund: U256::from_u128(E18) }),
+        ("PAYOUT", SpawnMsg::Payout { to: WireAddr::from_pubkey(&u.pubkey()), usd_out: U256::from_u128(E18) }),
+        ("FEE_DROP", SpawnMsg::FeeDrop { hub_token: WireAddr(t), amount: U256::from_u128(E18) }),
+    ];
+    for (i, (name, msg)) in cases.iter().enumerate() {
+        let (wire, tx) = executor_tx_size(&mut w, 10 + i as u64, msg);
+        println!("{name}: {wire} bytes on the wire → a {tx}-byte executor transaction (limit 1232)");
+        assert!(wire > 200, "{name} is under LayerZero's default 200-byte cap — the hub-side step would be moot");
+        assert!(tx <= 1232, "{name} cannot be delivered in one Solana transaction: {tx} bytes");
+    }
+    // the Solana side's own cap on what it SENDS toward the hub
+    let cfg = fixture_accounts().into_iter().find(|a| a.name == "default_send_config").unwrap().data;
+    let mut off = 8 + 1 + 8 + 3;
+    for _ in 0..2 {
+        off += 4 + 32 * u32::from_le_bytes(cfg[off..off + 4].try_into().unwrap()) as usize;
+    }
+    let max = u32::from_le_bytes(cfg[off..off + 4].try_into().unwrap());
+    println!("Solana→Base default max message size: {max} bytes");
+    assert!(max >= 2_000, "the largest spawn this chain can physically send must be admitted");
 }
