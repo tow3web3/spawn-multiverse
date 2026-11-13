@@ -1,8 +1,12 @@
 const { expect } = require('chai')
 const { ethers } = require('hardhat')
+const { time } = require('@nomicfoundation/hardhat-network-helpers')
 const { deployWorld } = require('../scripts/lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
+// FAIR GENESIS (v6): most suites test steady-state economics, so they hop
+// past the 10-minute anti-snipe window; the window itself has its own suite.
+const pastGenesis = () => time.increase(601)
 
 describe('SPAWN! omnichain protocol', () => {
   let world, user, user2
@@ -14,6 +18,7 @@ describe('SPAWN! omnichain protocol', () => {
 
   async function spawnVia(chain, name = 'GLOOP SUPREME', sym = 'GLOOP', dev = 0n, feeMode = 0) {
     await (await chain.gateway.connect(user).spawnToken(name, sym, '{"face":"frog"}', dev, feeMode)).wait()
+    await pastGenesis()
     const len = await world.pad.tokensLength()
     return world.pad.allTokens(len - 1n)
   }
@@ -174,6 +179,7 @@ describe('SPAWN! omnichain protocol', () => {
   it('takes 1% on every trade and routes it per the launch fee mode', async () => {
     const c = world.chains[1]
     await (await c.gateway.connect(user).spawnToken('FEE GOBLIN', 'FGOB', '{}', 0, 1)).wait() // 50/50
+    await pastGenesis()
     const token = await world.pad.allTokens(0)
     await (await c.usd.faucet(user, E(1_000))).wait()
     await (await c.gateway.connect(user).buyToken(token, E(100))).wait()
@@ -195,6 +201,7 @@ describe('SPAWN! omnichain protocol', () => {
   it('the dev claims their fee share on the chain of their choice', async () => {
     const home = world.chains[0]
     await (await home.gateway.connect(user).spawnToken('FEE KING', 'KING', '{}', 0, 2)).wait() // 100% dev
+    await pastGenesis()
     const token = await world.pad.allTokens(0)
     const away = world.chains[3]
     await (await away.usd.faucet(user2, E(500))).wait()
@@ -217,6 +224,7 @@ describe('SPAWN! omnichain protocol', () => {
   it('burn mode buys back on the curve and burns — global supply shrinks', async () => {
     const c = world.chains[2]
     await (await c.gateway.connect(user).spawnToken('PYRO', 'PYRO', '{}', 0, 3)).wait()
+    await pastGenesis()
     const token = await world.pad.allTokens(0)
     await (await c.usd.faucet(user, E(2_000))).wait()
     await (await c.gateway.connect(user).buyToken(token, E(500))).wait() // $5 fee -> trigger
@@ -309,6 +317,7 @@ describe('SPAWN! omnichain protocol', () => {
       [1, coder.encode(['bytes32', 'string', 'string', 'string', 'uint256', 'uint8'], [wideCreator, 'SOL GLOOP', 'SGLP', '{}', 0, 2])],
     )
     await (await world.pad.connect(msgr).onOmniMessage(1, srcId, spawn)).wait()
+    await pastGenesis()
     const token = await world.pad.allTokens(0)
     expect((await world.pad.metas(token)).creator).to.equal(wideCreator)
 

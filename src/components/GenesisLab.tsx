@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks, type FeeMode } from '../store'
 import { CHAINS } from '../lib/chains'
-import { randomChain } from '../engine/market'
 import { fmtNum, fmtPrice } from '../lib/format'
 import { cleanLinks, LINK_META } from '../lib/links'
 import { Sparkle } from './bits'
@@ -39,7 +38,7 @@ export function GenesisLab({
   onClose: () => void
   onSpawned: (num: number) => void
 }) {
-  const { spawn, trade, connect, onchain } = useStore()
+  const { spawn, connect, onchain } = useStore()
   const liveChains = onchain?.chains ? CHAINS.filter((c) => onchain.chains!.includes(c.id)) : CHAINS
   const [name, setName] = useState('')
   const [ticker, setTicker] = useState('')
@@ -76,18 +75,21 @@ export function GenesisLab({
     setBusy(true)
     setSpawnErr(null)
     try {
+      // The dev buy rides INSIDE the spawn — the one FAIR GENESIS exemption.
+      const devBuy = Number.parseFloat(devBuyStr) || 0
+      let devBuyUsd = 0
+      if (devBuy > 0) {
+        const w = await connect()
+        devBuyUsd = Math.min(devBuy, w.balance)
+      }
       const c = await spawn({
         name: name.trim(),
         ticker: ticker.trim(),
         image,
         links: cleanLinks(links),
         feeMode,
+        devBuyUsd,
       })
-      const devBuy = Number.parseFloat(devBuyStr) || 0
-      if (devBuy > 0) {
-        const w = await connect()
-        await trade(c.num, 'buy', Math.min(devBuy, w.balance), randomChain())
-      }
       onClose()
       onSpawned(c.num)
     } catch {
@@ -324,6 +326,12 @@ export function GenesisLab({
                 STRAIGHT FROM YOUR WALLET
               </span>
             </div>
+            <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
+              🛡 <span className="text-lime">FAIR GENESIS:</span> your launch is snipe-protected —
+              block 0 accepts no buys, then for 10 minutes buys pay a snipe tax decaying 30%→1%
+              (routed like your fees) with a $250 cap per wallet. Your dev buy rides inside the
+              spawn itself and is the one disclosed exemption.
+            </p>
 
             <button
               onClick={() => void submit()}

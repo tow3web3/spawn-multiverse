@@ -19,6 +19,7 @@ import {
   formatEther,
   getAddress,
   http,
+  pad as padHex,
   parseAbi,
   parseEther,
   parseEventLogs,
@@ -237,6 +238,8 @@ export function OnchainProvider({
   /** Unclaimed holder rewards: creature num -> chain id -> wei. */
   const rewardsByChainRef = useRef<Map<number, Record<string, bigint>>>(new Map())
   const rewardsRef = useRef<Record<number, number>>({})
+  /** v6 FAIR GENESIS: creature num -> live window state for the connected wallet. */
+  const fairGenesisRef = useRef<Record<number, { endsAt: number; spentUsd: number; capUsd: number }>>({})
   const lastBlockRef = useRef(0n)
   const connectedRef = useRef(false)
   const costsRef = useRef<Record<number, number>>({})
@@ -354,6 +357,8 @@ export function OnchainProvider({
             chainTokens: {},
             balances: new Map(),
             fees: emptyFees(parsed.feeMode ?? 'holders'),
+            spawnTs: Number(spawnedAt) * 1000,
+            genesisSpent: new Map(),
           },
         }
         entriesRef.current.set(num, entry)
@@ -520,6 +525,26 @@ export function OnchainProvider({
         if (sum > 0n) positions[num] = { tokens: ef(sum), cost: costsRef.current[num] ?? 0 }
       }
       rewardsRef.current = rewards
+
+      // protocol v6: live FAIR GENESIS window state, for tokens still inside
+      // (or near) their window — one cheap hub read each, skipped once closed
+      const fg: Record<number, { endsAt: number; spentUsd: number; capUsd: number }> = {}
+      for (const [num, entry] of entriesRef.current) {
+        if (Date.now() > entry.meta.spawnedAt + 660_000) continue
+        try {
+          const [endsAt, , spentUsd, capUsd] = (await hub.readContract({
+            address: m.pad,
+            abi: padAbi,
+            functionName: 'fairGenesisOf',
+            args: [entry.token, padHex(addr, { size: 32 })],
+          })) as readonly [bigint, bigint, bigint, bigint]
+          fg[num] = { endsAt: Number(endsAt) * 1000, spentUsd: ef(spentUsd), capUsd: ef(capUsd) }
+        } catch {
+          /* pre-v6 pad — no window to report */
+        }
+      }
+      fairGenesisRef.current = fg
+
       const totalUsd = Object.values(usdByChain).reduce((a, b) => a + b, 0n)
       setWallet({ address: addr, balance: ef(totalUsd), positions })
     }
@@ -984,7 +1009,8 @@ export function OnchainProvider({
           input.name.toUpperCase(),
           input.ticker.toUpperCase(),
           metaURI,
-          0n,
+          // the dev buy rides inside the spawn — FAIR GENESIS exempts it
+          parseEther(String(input.devBuyUsd ?? 0)),
           FEE_MODE_INDEX[input.feeMode ?? 'holders'],
         ],
         chain: c.chain,
@@ -1147,6 +1173,7 @@ export function OnchainProvider({
         disconnect,
         holderRewards: rewardsRef.current,
         claimHolderRewards,
+        fairGenesis: fairGenesisRef.current,
       },
     }),
     [creatures, wallet, connect, spawn, trade, claimFees, getQuote, getMarket, justSpawned, status, airdrop, walletSource, disconnect, claimHolderRewards],

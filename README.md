@@ -8,6 +8,9 @@ A launchpad prototype where every meme token launches on **all six chains at onc
   duplicated per chain.
 - **One price** — every chain reads the same global price reference, so the token
   costs the same everywhere, always.
+- **No block 0** — FAIR GENESIS: the spawn block refuses every buy, then a
+  10-minute snipe tax (30%→1%, paid to the token's fee stream) and a $250
+  per-wallet cap make sniping fund the room instead of draining it.
 
 Three modes, same UI (toggle in the nav):
 

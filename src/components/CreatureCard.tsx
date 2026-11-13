@@ -1,4 +1,4 @@
-import { type Creature } from '../store'
+import { GENESIS_WINDOW_MS, type Creature } from '../store'
 import {
   creatureNum,
   fmtChange,
@@ -15,6 +15,14 @@ function StatusBadge({ c }: { c: Creature }) {
     return (
       <span className="rounded-full border-2 border-ink bg-grape px-2.5 py-1 font-mono text-[9px] font-bold tracking-wide shadow-brutal-sm">
         ⬆ ASCENDED
+      </span>
+    )
+  }
+  // FAIR GENESIS: still inside the anti-snipe window — snipers pay the tax
+  if (Date.now() < c.spawnedAt + GENESIS_WINDOW_MS) {
+    return (
+      <span className="rounded-full border-2 border-ink bg-lime px-2.5 py-1 font-mono text-[9px] font-bold tracking-wide shadow-brutal-sm">
+        🛡 FAIR GENESIS
       </span>
     )
   }

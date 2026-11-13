@@ -59,6 +59,12 @@ claimable) or `FEE_BURN` (auto buyback & burn). Because there is only one
 market, fees from all six chains land in **one oUSD pot on the hub** — no
 per-chain reconciliation:
 
+- **FAIR GENESIS (v6, live)** — block 0 accepts no buys at all, then for 10
+  minutes every buy pays a snipe tax decaying 30%→1% (routed through the
+  token's fee mode: snipers pay everyone else) with a $250/wallet cap; the
+  guard **clamps and refunds, never reverts** — a refused cross-chain buy
+  rides home in the ordinary `OP_DELIVER`. The dev buy inside the spawn is
+  the one disclosed exemption. See SPEC §8.
 - **Dev claim** — `gateway.claimFees(token)` from ANY chain; the hub verifies
   the creator and pays out there via the ordinary `OP_PAYOUT` path.
 - **Buyback & burn** — once the pot passes $4 the pad executes a REAL buy on

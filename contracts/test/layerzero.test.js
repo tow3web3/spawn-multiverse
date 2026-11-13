@@ -1,5 +1,6 @@
 const { expect } = require('chai')
 const { ethers } = require('hardhat')
+const { time } = require('@nomicfoundation/hardhat-network-helpers')
 const { deployWorldAsync } = require('../scripts/lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
@@ -20,6 +21,7 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
   async function spawnVia(chain) {
     await (await chain.gateway.connect(user).spawnToken('GLOOP SUPREME', 'GLOOP', '{}', 0, 0)).wait()
     await world.deliverAll()
+    await time.increase(601) // past the FAIR GENESIS window
     return world.pad.allTokens((await world.pad.tokensLength()) - 1n)
   }
 
@@ -138,6 +140,7 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
     const token = await world.pad.allTokens(0)
     expect((await world.pad.metas(token)).creator).to.equal(wideCreator)
     await world.deliverAll() // SYNC_TOKEN fan-out
+    await time.increase(601) // past the FAIR GENESIS window
 
     // EVM users trade; the wide dev's pot fills
     const base = world.chains[2]

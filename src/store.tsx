@@ -17,6 +17,7 @@ import {
   type Quote,
 } from './engine/curve'
 import {
+  GENESIS_BLOCK_MS,
   createMarket,
   emptyFees,
   execute,
@@ -25,6 +26,7 @@ import {
   priceOf,
   quote as marketQuote,
   randomBotTrade,
+  randomChain,
   simulateLife,
   type FeeMode,
   type Fees,
@@ -36,7 +38,15 @@ import {
 } from './engine/market'
 
 export { TOTAL_SUPPLY as GLOBAL_SUPPLY, START_PRICE } from './engine/curve'
-export { FEE_RATE, BURNER } from './engine/market'
+export {
+  FEE_RATE,
+  BURNER,
+  GENESIS_WINDOW_MS,
+  GENESIS_BLOCK_MS,
+  GENESIS_MAX_USD,
+  SNIPE_MAX_RATE,
+  genesisTax,
+} from './engine/market'
 export type { Side, Trade, PricePoint, Market, FeeMode, Fees } from './engine/market'
 
 export type Status = 'live' | 'hot' | 'ascended'
@@ -271,6 +281,11 @@ function buildWorld(wallet: Wallet | null): World {
           history: sc.history?.length ? sc.history : [{ ts: sc.meta.spawnedAt, price: START_PRICE }],
           fees: sc.fees ?? emptyFees(sc.meta.feeMode ?? 'holders'),
           ascendedAt: sc.ascendedAt,
+          // FAIR GENESIS: restored markets re-key window spend from scratch —
+          // a reload mid-window keeps the clock (spawnedAt) but not per-wallet
+          // tallies, which only matters for the 10-minute opening.
+          spawnTs: sc.meta.spawnedAt,
+          genesisSpent: new Map(),
         })
       }
     }
@@ -366,6 +381,9 @@ export interface SpawnInput {
   links?: CreatureLinks
   /** Fee routing, picked once at launch. Defaults to 'holders'. */
   feeMode?: FeeMode
+  /** Dev buy riding inside the spawn itself — the one FAIR GENESIS
+   * exemption (no block-0 rule, no snipe tax, no cap), disclosed in the UI. */
+  devBuyUsd?: number
 }
 
 export type TradeResult =
@@ -403,6 +421,9 @@ export interface StoreValue {
     holderRewards?: Record<number, number>
     /** Claim this creature's holder rewards on every chain holding any; returns USD claimed. */
     claimHolderRewards?: (num: number) => Promise<number>
+    /** FAIR GENESIS (v6): per creature num, the hub's live window state for
+     * the connected wallet — absent on pre-v6 deployments. */
+    fairGenesis?: Record<number, { endsAt: number; spentUsd: number; capUsd: number }>
   }
 }
 
@@ -515,9 +536,34 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
     world.metas.set(num, meta)
     const m = createMarket(meta.spawnedAt, meta.feeMode)
-    // A couple of instant snipes so a fresh spawn isn't lonely.
-    randomBotTrade(m, { buyBias: 0.95 })
-    randomBotTrade(m, { buyBias: 0.95 })
+
+    // The dev buy rides inside the spawn — the one FAIR GENESIS exemption.
+    const devBuy = input.devBuyUsd ?? 0
+    const w = walletRef.current
+    if (devBuy > 0 && w) {
+      const r = execute(m, {
+        side: 'buy',
+        usd: Math.min(devBuy, w.balance),
+        chain: randomChain(),
+        trader: w.address,
+        genesisBuy: true,
+        ts: meta.spawnedAt,
+      })
+      if (r.ok) {
+        const nw: Wallet = {
+          ...w,
+          balance: w.balance - r.usd,
+          positions: { ...w.positions, [num]: { tokens: r.tokens, cost: r.usd } },
+        }
+        walletRef.current = nw
+        setWallet(nw)
+      }
+    }
+
+    // A couple of instant snipes so a fresh spawn isn't lonely — they clear
+    // the 2s "block 0" and pay the full ~30% FAIR GENESIS tax for the honor.
+    randomBotTrade(m, { buyBias: 0.95, ts: meta.spawnedAt + GENESIS_BLOCK_MS + 400 })
+    randomBotTrade(m, { buyBias: 0.95, ts: meta.spawnedAt + GENESIS_BLOCK_MS + 1100 })
     world.markets.set(num, m)
     persistCustoms(world)
     setJustSpawned(num)

@@ -64,6 +64,9 @@ export interface Market {
   balances: Map<string, number>
   fees: Fees
   ascendedAt?: number
+  /** FAIR GENESIS: when this market opened, and per-wallet window spend. */
+  spawnTs: number
+  genesisSpent: Map<string, number>
 }
 
 const MAX_TRADES = 30
@@ -75,6 +78,27 @@ export const FEE_RATE = 0.01
 const BURN_TRIGGER = 4
 /** The protocol's buyback executor, visible on the tape. */
 export const BURNER = 'SPAWN·BURNER'
+
+/* FAIR GENESIS (protocol v6) — mirrors the hub contract exactly:
+ * for 10 minutes after spawn every buy pays 1% + a snipe tax decaying
+ * linearly from 29% to 0, each wallet may spend at most $250, and the
+ * first beats after spawn ("block 0" — 2s stands in for one hub block)
+ * accept no buys at all. Bots are subject to it like everyone: a sniping
+ * bot pays the tax into the token's fee stream.
+ * One deliberate SIM divergence: on-chain a refused buy BOUNCES (refund via
+ * DELIVER, never a revert); the SIM simply rejects with a reason — there is
+ * no in-flight value to strand in a browser. */
+export const GENESIS_WINDOW_MS = 600_000
+export const SNIPE_MAX_RATE = 0.29
+export const GENESIS_MAX_USD = 250
+export const GENESIS_BLOCK_MS = 2_000
+
+/** The extra fee rate a buy pays right now (0 once the window closes). */
+export function genesisTax(m: Market, ts: number = Date.now()): number {
+  const end = m.spawnTs + GENESIS_WINDOW_MS
+  if (ts >= end) return 0
+  return (SNIPE_MAX_RATE * (end - ts)) / GENESIS_WINDOW_MS
+}
 
 let tradeId = 1
 
@@ -92,6 +116,8 @@ export function createMarket(spawnTs: number, feeMode: FeeMode = 'holders'): Mar
     chainTokens: {},
     balances: new Map(),
     fees: emptyFees(feeMode),
+    spawnTs,
+    genesisSpent: new Map(),
   }
 }
 
@@ -139,6 +165,8 @@ export interface ExecInput {
   chain: string
   trader: string
   ts?: number
+  /** The dev buy inside the spawn — the one disclosed FAIR GENESIS exemption. */
+  genesisBuy?: boolean
 }
 
 export type ExecResult =
@@ -193,13 +221,31 @@ export function execute(m: Market, input: ExecInput): ExecResult {
   const ts = input.ts ?? Date.now()
 
   if (input.side === 'buy') {
-    const usd = input.usd ?? 0
+    let usd = input.usd ?? 0
     if (usd <= 0) return { ok: false, reason: 'Nothing to buy.' }
-    const feeIn = usd * FEE_RATE
+
+    // FAIR GENESIS gate — same rules as the hub, for everyone but the dev buy.
+    let feeRate = FEE_RATE
+    if (input.genesisBuy !== true) {
+      if (ts < m.spawnTs + GENESIS_BLOCK_MS)
+        return { ok: false, reason: 'FAIR GENESIS — block 0 does not exist. Wait a beat.' }
+      const tax = genesisTax(m, ts)
+      if (tax > 0) {
+        const spent = m.genesisSpent.get(input.trader) ?? 0
+        const room = GENESIS_MAX_USD - spent
+        if (room <= 0)
+          return { ok: false, reason: 'FAIR GENESIS — $250 cap reached until the window ends.' }
+        if (usd > room) usd = room
+        feeRate = FEE_RATE + tax
+        m.genesisSpent.set(input.trader, spent + usd)
+      }
+    }
+
+    const feeIn = usd * feeRate
     const r = applyBuy(m.state, usd - feeIn)
     if (r.tokens <= 0) return { ok: false, reason: 'Curve is out of tokens.' }
     // If the curve capped the buy, the fee shrinks with it.
-    const fee = r.usd < usd - feeIn - 1e-9 ? r.usd * FEE_RATE : feeIn
+    const fee = r.usd < usd - feeIn - 1e-9 ? r.usd * feeRate : feeIn
     m.state = r.state
     if (r.ascended) m.ascendedAt = ts
     m.balances.set(input.trader, (m.balances.get(input.trader) ?? 0) + r.tokens)

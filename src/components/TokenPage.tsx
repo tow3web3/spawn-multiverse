@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useStore, shortAddr, BURNER, type Side, type FeeMode } from '../store'
+import {
+  useStore,
+  shortAddr,
+  BURNER,
+  FEE_RATE,
+  GENESIS_MAX_USD,
+  GENESIS_WINDOW_MS,
+  SNIPE_MAX_RATE,
+  type Side,
+  type FeeMode,
+} from '../store'
 import { CHAINS } from '../lib/chains'
 import { LINK_META, linkHref } from '../lib/links'
 import {
@@ -53,6 +63,13 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
     window.scrollTo(0, 0)
   }, [num])
 
+  // One ticking clock, for the FAIR GENESIS countdown & live tax readout.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+
   const pos = wallet?.positions[num]
   const usd = Number.parseFloat(usdStr) || 0
   const sellTokens = pos ? (pos.tokens * pct) / 100 : 0
@@ -83,6 +100,19 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   const pnl = Math.abs(rawPnl) < 0.005 ? 0 : rawPnl
   const fees = c.fees
   const feeMode = c.feeMode ?? fees?.mode
+
+  // FAIR GENESIS (v6): the anti-snipe window, mirrored from the hub's rules.
+  const fgChain = onchain?.fairGenesis?.[num]
+  const fgEndsAt = fgChain?.endsAt ?? c.spawnedAt + GENESIS_WINDOW_MS
+  const fgActive = now < fgEndsAt
+  const fgTax = fgActive ? (SNIPE_MAX_RATE * (fgEndsAt - now)) / GENESIS_WINDOW_MS : 0
+  const fgSpent =
+    fgChain?.spentUsd ??
+    (wallet ? (market.genesisSpent?.get(wallet.address) ?? 0) : 0)
+  const fgCap = fgChain?.capUsd ?? GENESIS_MAX_USD
+  const fgRoom = Math.max(0, fgCap - fgSpent)
+  const fgLeft = Math.max(0, Math.ceil((fgEndsAt - now) / 1000))
+  const fgCountdown = `${Math.floor(fgLeft / 60)}:${String(fgLeft % 60).padStart(2, '0')}`
 
   const doTrade = async () => {
     if (busy) return
@@ -158,6 +188,11 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               {c.status === 'hot' && (
                 <span className="rounded-full border-2 border-ink bg-tang px-2.5 py-1 font-mono text-[9px] font-bold shadow-brutal-sm">
                   🔥 HOT
+                </span>
+              )}
+              {fgActive && (
+                <span className="rounded-full border-2 border-ink bg-lime px-2.5 py-1 font-mono text-[9px] font-bold shadow-brutal-sm tabular-nums">
+                  🛡 FAIR GENESIS {fgCountdown}
                 </span>
               )}
             </div>
@@ -388,6 +423,25 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
         {/* right column — trade */}
         <div className="space-y-4">
+          {fgActive && (
+            <div className="rounded-2xl border-3 border-ink bg-lime p-3.5 shadow-brutal-sm">
+              <div className="flex items-center justify-between gap-2">
+                <p className="font-mono text-[10px] font-bold tracking-[0.15em]">
+                  🛡 FAIR GENESIS — ANTI-SNIPE ON
+                </p>
+                <span className="rounded-lg border-2 border-ink bg-white px-2 py-0.5 font-mono text-[12px] font-bold tabular-nums">
+                  {fgCountdown}
+                </span>
+              </div>
+              <p className="mt-1.5 font-mono text-[9px] font-bold leading-relaxed opacity-75">
+                BLOCK 0 DOES NOT EXIST — THE SPAWN BLOCK REFUSES EVERY BUY. UNTIL THE CLOCK
+                RUNS OUT, BUYS PAY A {((FEE_RATE + fgTax) * 100).toFixed(1)}% FEE (DECAYS TO
+                1%) ROUTED LIKE EVERY FEE{feeMode ? ` — ${FEE_LABEL[feeMode]}` : ''} · MAX $
+                {GENESIS_MAX_USD}/WALLET{fgSpent > 0 ? ` (${fmtUsd(fgSpent)} USED)` : ''}.
+                SNIPERS PAY EVERYONE ELSE.
+              </p>
+            </div>
+          )}
           <div className="rounded-2xl border-3 border-ink bg-white p-4 shadow-brutal">
             <div className="flex items-center justify-between gap-3">
               <div className="flex overflow-hidden rounded-xl border-3 border-ink">
@@ -489,6 +543,12 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   : `≈ ${fmtUsd(q.usd)} BACK · IMPACT ${(q.impact * 100).toFixed(2)}%`
                 : '—'}
             </p>
+            {fgActive && side === 'buy' && (
+              <p className="mt-1 font-mono text-[9px] font-bold tracking-wide text-down">
+                🛡 FAIR GENESIS TAX {((FEE_RATE + fgTax) * 100).toFixed(1)}% APPLIES
+                {usd > fgRoom ? ` · CAPPED AT ${fmtUsd(fgRoom)} FOR YOUR WALLET` : ''}
+              </p>
+            )}
 
             <button
               onClick={() => void doTrade()}

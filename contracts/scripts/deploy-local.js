@@ -69,6 +69,10 @@ async function main() {
     const token = await world.pad.allTokens((await world.pad.tokensLength()) - 1n)
     console.log(`  spawned ${def.sym.padEnd(6)} ${token}`)
 
+    // hop the FAIR GENESIS window (v6) so the pit seeds at steady-state fees
+    await ethers.provider.send('evm_increaseTime', [601])
+    await ethers.provider.send('evm_mine', [])
+
     for (let i = 0; i < def.buys; i++) {
       await buy(token, rand(...def.size))
       if (def.sellEvery && i > 3 && i % def.sellEvery === 0) await sellSome(token)

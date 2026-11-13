@@ -1,4 +1,4 @@
-# SPAWN! protocol specification (v5)
+# SPAWN! protocol specification (v6)
 
 Audience: a security auditor opening this repo cold. Everything below is
 written from the code at the commit that introduced it, with
@@ -209,6 +209,49 @@ was built; quantify the bound.
 State keyed by the calling token contract, so a rogue token can only corrupt
 its own key and can never make `claim` pay more than its own dropped funds
 (`FeeDistributor.sol:33-35` comment, `handleTransfer`).
+
+### FAIR GENESIS (v6) — the anti-snipe opening
+
+Constants (`SpawnPad.sol`): `GENESIS_WINDOW = 600` seconds,
+`SNIPE_MAX_BPS = 2900`, `GENESIS_MAX_USD = 250e18`. State:
+`spawnBlock[token]` (set in `_spawn`) and `genesisSpent[token][actor]` —
+keyed by the **wide** actor, so a Solana sniper and an EVM sniper are
+capped identically. UI view: `fairGenesisOf(token, actor)`.
+
+Rules, applied by `_genesisGate` to every OP_BUY (never to the spawn's own
+dev buy — `genesisBuy = true`, the one exemption, disclosed in the UI):
+
+1. **Block 0 does not exist.** `block.number <= spawnBlock[token]` ⇒
+   spendable 0 — the whole `usdIn` rides home as a refund. LayerZero
+   executor batching CAN land OP_SPAWN and OP_BUY in the same hub block,
+   which is exactly why this is a clamp and not a revert.
+2. **Decaying snipe tax.** Inside the window the buy fee rate is
+   `FEE_BPS + SNIPE_MAX_BPS·(end − now)/GENESIS_WINDOW`: 30% total at t=0,
+   linear to 1% at window end. The whole fee flows through `_accrueFee`
+   under the token's launch-locked mode — snipers pay the holders, the dev,
+   or the burn, like every other fee, just much more of it.
+3. **Per-wallet cap.** Cumulative window spend per actor is clamped to
+   `GENESIS_MAX_USD`; the excess refunds. The clamped *intent* is what
+   counts against the cap (conservative under the curve-cap edge).
+
+**Clamp-not-revert invariant.** The gate never reverts on the message
+path: the spoke burned the buyer's oUSD before the message flew, and a hub
+revert would strand that value (the adapter has no retry). Every refusal
+re-uses the ordinary `OP_DELIVER(out=0, refund=…)`, so the §7 value
+conservation holds through every guard action. `GenesisGuard(token, actor,
+taxBps, taxUsd, refundedUsd)` logs guard actions; `Trade` is emitted only
+when `spend + fee > 0`, so a full bounce leaves no phantom trade on the
+tape (indexers wanting bounce analytics watch `GenesisGuard`).
+
+**Wire compatibility.** No new ops, no payload changes — v6 is hub-only
+logic; gateways, adapters and the Solana program are untouched.
+
+**Sybil caveat (honest).** The $250 cap is per-identity and trivially
+sybil-able by funding N wallets; treat it as a speed bump. The defenses
+that survive sybils are the tax — every wallet pays the same decaying
+rate, so splitting a snipe N ways saves nothing — and the structural one:
+cross-chain buys ride ~1–2 minutes of LayerZero latency, so a same-second
+multichain snipe is physically impossible on this architecture.
 
 ## 9. Curve math (InternalCurveVenue)
 

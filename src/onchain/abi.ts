@@ -9,6 +9,8 @@ export const padAbi = parseAbi([
   'function getToken(uint256 i) view returns (address token, string name, string symbol, string metaURI, bytes32 creator, uint64 spawnedAt, uint32 homeChain, uint256 vBase, uint256 vTokens, uint256 sold, bool ascended, uint256 price)',
   'function feesOf(address token) view returns (uint8 mode, uint256 total, uint256 holders, uint256 dev, uint256 devClaimed, uint256 burnPot, uint256 burnedUsd, uint256 burnedTokens, uint256 holdersPaid)',
   'function distributor() view returns (address)',
+  // v6 FAIR GENESIS: the live anti-snipe window state for one actor.
+  'function fairGenesisOf(address token, bytes32 actor) view returns (uint64 endsAt, uint256 snipeBpsNow, uint256 spentUsd, uint256 capUsd)',
   'event Spawned(address indexed token, bytes32 indexed creator, uint32 homeChain, string name, string symbol, string metaURI)',
   'event Trade(address indexed token, uint32 indexed chain, bytes32 indexed trader, bool isBuy, uint256 usd, uint256 tokens, uint256 priceAfter, uint64 ts)',
   'event Ascended(address indexed token, uint256 raisedUsd, uint64 ts)',

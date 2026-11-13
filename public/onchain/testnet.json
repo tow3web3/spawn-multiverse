@@ -1,28 +1,28 @@
 {
   "chainId": 84532,
   "rpc": "https://sepolia.base.org",
-  "pad": "0x7ABb22F75FE7c092439Cb751DE6e3AE3a688E7D7",
-  "venue": "0xFDf332794da0d35c4C2C8518DB475548433CA41F",
-  "hubUsd": "0x9E9433B78Ab015d7F797c8df91d78F52B416eE4c",
-  "fromBlock": 56655436,
+  "pad": "0x1edC76592bc2Ec78A247f65eC2C6c93558B63A83",
+  "venue": "0x568D114c7bA8E1990A399c79a8E1C2a03Cc5349c",
+  "hubUsd": "0xF3E9F846Cff29f893783502F386F632445C4FB97",
+  "fromBlock": 58070436,
   "gasDrip": "/.netlify/functions/gas-drip",
   "chains": [
     {
       "label": 6,
       "id": "optimism",
-      "gateway": "0x6ca105Caf5c697f809e197efeE1A20375D5f7caA",
-      "usd": "0x580623D2155eA41fA27e7A59Aee09014f1d0bbE0",
+      "gateway": "0xFDf332794da0d35c4C2C8518DB475548433CA41F",
+      "usd": "0x7ABb22F75FE7c092439Cb751DE6e3AE3a688E7D7",
       "chainId": 11155420,
       "rpc": "https://sepolia.optimism.io"
     },
     {
       "label": 5,
       "id": "arbitrum",
-      "gateway": "0x6a09d237967Ee7c6f148Bd847FFDB8E464B023D6",
-      "usd": "0x5f39C4A84193c41e921d7b208F92Efab58d8c4a5",
+      "gateway": "0x6ca105Caf5c697f809e197efeE1A20375D5f7caA",
+      "usd": "0x580623D2155eA41fA27e7A59Aee09014f1d0bbE0",
       "chainId": 421614,
       "rpc": "https://sepolia-rollup.arbitrum.io/rpc"
     }
   ],
-  "deployedAt": 1794335380428
+  "deployedAt": 1794536095069
 }

@@ -31,6 +31,16 @@ contract SpawnPad is IOmniReceiver {
     /// Holder modes distribute in chunks too — cross-chain drops aren't free.
     uint256 public constant DIST_TRIGGER = 2e18;
 
+    /// FAIR GENESIS (v6) — the anti-snipe opening. For GENESIS_WINDOW seconds
+    /// after spawn every buy pays FEE_BPS plus a snipe tax that starts at
+    /// SNIPE_MAX_BPS and decays linearly to zero, each actor may spend at most
+    /// GENESIS_MAX_USD, and the spawn block itself accepts no buys at all
+    /// ("block 0 does not exist"). The tax rides the token's fee mode like any
+    /// other fee — snipers pay everyone else.
+    uint256 public constant GENESIS_WINDOW = 600;
+    uint256 public constant SNIPE_MAX_BPS = 2900;
+    uint256 public constant GENESIS_MAX_USD = 250e18;
+
     // Fee modes (locked at launch, forever)
     uint8 public constant FEE_HOLDERS = 0; // 100% streams to holders
     uint8 public constant FEE_SPLIT = 1; // 50/50 holders & dev
@@ -95,6 +105,11 @@ contract SpawnPad is IOmniReceiver {
     /// inventory) is not circulating, so Σ over labels ≡ supply sold out of
     /// the curve and still alive.
     mapping(address => mapping(uint32 => uint256)) public supplyByChain;
+    /// FAIR GENESIS bookkeeping: the hub block each token spawned in (its
+    /// "block 0", where buys bounce) and what each wide actor has spent
+    /// during the token's genesis window.
+    mapping(address => uint256) public spawnBlock;
+    mapping(address => mapping(bytes32 => uint256)) public genesisSpent;
 
     // Actors in events are wide (v5): an EVM actor shows up left-padded, a
     // Solana one as its raw 32-byte key. Token addresses stay `address` —
@@ -122,6 +137,16 @@ contract SpawnPad is IOmniReceiver {
     event BuybackBurn(address indexed token, uint256 usd, uint256 tokens);
     event DevClaimed(address indexed token, bytes32 indexed dev, uint256 amount);
     event HoldersDistributed(address indexed token, uint256 amount);
+    /// A FAIR GENESIS action: a snipe tax collected and/or a clamped or
+    /// bounced spend refunded. `refundedUsd` is only the guard's own clamp
+    /// (cap/block-0), not a curve-cap refund.
+    event GenesisGuard(
+        address indexed token,
+        bytes32 indexed actor,
+        uint256 taxBps,
+        uint256 taxUsd,
+        uint256 refundedUsd
+    );
 
     constructor(IOmniMessenger _messenger, OmniUSD _usd) {
         messenger = _messenger;
@@ -204,6 +229,22 @@ contract SpawnPad is IOmniReceiver {
         );
     }
 
+    /// FAIR GENESIS, in one call for the UI: when the window ends, the snipe
+    /// tax right now, and how much of the per-wallet cap this actor has used.
+    function fairGenesisOf(address token, bytes32 actor)
+        external
+        view
+        returns (uint64 endsAt, uint256 snipeBpsNow, uint256 spentUsd, uint256 capUsd)
+    {
+        uint64 spawnedAt = metas[token].spawnedAt;
+        endsAt = spawnedAt + uint64(GENESIS_WINDOW);
+        if (spawnedAt != 0 && block.timestamp < endsAt) {
+            snipeBpsNow = (SNIPE_MAX_BPS * (endsAt - block.timestamp)) / GENESIS_WINDOW;
+        }
+        spentUsd = genesisSpent[token][actor];
+        capUsd = GENESIS_MAX_USD;
+    }
+
     /* -------------------------- messaging -------------------------- */
 
     /// WIRE CONVENTION (v5): every account rider in a cross-chain payload is
@@ -246,7 +287,7 @@ contract SpawnPad is IOmniReceiver {
                 (bytes32, bytes32, uint256)
             );
             // token: hub-local, downcast; buyer: actor, wide
-            _buy(srcChain, _addr(token), buyer, usdIn);
+            _buy(srcChain, _addr(token), buyer, usdIn, false);
         } else if (op == OP_SELL) {
             (bytes32 token, bytes32 seller, uint256 tokensIn) = abi.decode(
                 data,
@@ -282,6 +323,7 @@ contract SpawnPad is IOmniReceiver {
         );
         allTokens.push(address(token));
         metas[address(token)] = Meta(name, symbol, metaURI, creator, uint64(block.timestamp), srcChain);
+        spawnBlock[address(token)] = block.number;
         feesOf[address(token)].mode = feeMode;
         venue.openMarket(address(token));
         emit Spawned(address(token), creator, srcChain, name, symbol, metaURI);
@@ -298,26 +340,64 @@ contract SpawnPad is IOmniReceiver {
             );
         }
 
-        if (devBuyUsd > 0) _buy(srcChain, address(token), creator, devBuyUsd);
+        // The dev buy is part of the spawn itself — the one disclosed FAIR
+        // GENESIS exemption (no block-0 rule, no tax, no cap).
+        if (devBuyUsd > 0) _buy(srcChain, address(token), creator, devBuyUsd, true);
     }
 
-    function _buy(uint32 srcChain, address token, bytes32 buyer, uint256 usdIn) internal {
+    /// Decides how much of a buy may touch the curve and at what snipe tax.
+    /// Pure clamp semantics: 0 spendable = full bounce, NEVER a revert — the
+    /// spoke already burned the buyer's oUSD, so refusal must ride home as a
+    /// refund, not strand value in a reverted message.
+    function _genesisGate(address token, bytes32 buyer, uint256 usdIn, bool genesisBuy)
+        internal
+        returns (uint256 spendable, uint256 snipeBps)
+    {
+        if (genesisBuy) return (usdIn, 0);
+        // Block 0 does not exist: a buy landing in the spawn block bounces
+        // whole. Executor batching CAN land OP_SPAWN and OP_BUY in the same
+        // hub block, which is exactly why this clamps instead of reverting.
+        if (block.number <= spawnBlock[token]) return (0, 0);
+        uint256 end = metas[token].spawnedAt + GENESIS_WINDOW;
+        if (block.timestamp >= end) return (usdIn, 0);
+        snipeBps = (SNIPE_MAX_BPS * (end - block.timestamp)) / GENESIS_WINDOW;
+        uint256 spent = genesisSpent[token][buyer];
+        uint256 room = spent >= GENESIS_MAX_USD ? 0 : GENESIS_MAX_USD - spent;
+        spendable = usdIn <= room ? usdIn : room;
+        // The whole clamped intent counts against the cap even if the curve
+        // later caps the spend further (ascension edge): simpler, and
+        // strictly tighter against snipers.
+        if (spendable > 0) genesisSpent[token][buyer] = spent + spendable;
+    }
+
+    function _buy(uint32 srcChain, address token, bytes32 buyer, uint256 usdIn, bool genesisBuy) internal {
         // The spoke burned the buyer's OmniUSD; the value re-materializes here.
         usd.bridgeMint(address(this), usdIn);
 
-        // 1% fee off the top; price discovery is the venue's job.
-        uint256 feeIn = (usdIn * FEE_BPS) / 10_000;
-        (uint256 out, uint256 spend, bool ascendedNow) = venue.execBuy(token, usdIn - feeIn);
-        // If the curve capped the buy, the fee shrinks with it.
-        uint256 fee = spend < usdIn - feeIn ? (spend * FEE_BPS) / 10_000 : feeIn;
-        uint256 refund = usdIn - spend - fee;
-        if (ascendedNow) {
-            emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
+        (uint256 spendable, uint256 snipeBps) = _genesisGate(token, buyer, usdIn, genesisBuy);
+        uint256 feeRate = FEE_BPS + snipeBps;
+
+        // Fee off the top; price discovery is the venue's job.
+        uint256 out;
+        uint256 spend;
+        uint256 fee;
+        if (spendable > 0) {
+            uint256 feeIn = (spendable * feeRate) / 10_000;
+            bool ascendedNow;
+            (out, spend, ascendedNow) = venue.execBuy(token, spendable - feeIn);
+            // If the curve capped the buy, the fee shrinks with it.
+            fee = spend < spendable - feeIn ? (spend * feeRate) / 10_000 : feeIn;
+            if (ascendedNow) {
+                emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
+            }
         }
+        uint256 refund = usdIn - spend - fee;
 
         // Ship the creature to the buyer's chain (burn hub-side, mint spoke-side).
-        SpawnToken(token).bridgeBurn(address(this), out);
-        supplyByChain[token][srcChain] += out;
+        if (out > 0) {
+            SpawnToken(token).bridgeBurn(address(this), out);
+            supplyByChain[token][srcChain] += out;
+        }
         if (refund > 0) usd.bridgeBurn(address(this), refund);
         messenger.send(
             srcChain,
@@ -326,7 +406,12 @@ contract SpawnPad is IOmniReceiver {
             abi.encode(OP_DELIVER, abi.encode(_b32(token), buyer, out, refund))
         );
 
-        emit Trade(token, srcChain, buyer, true, spend + fee, out, venue.spotPrice(token), uint64(block.timestamp));
+        if (snipeBps > 0 || usdIn > spendable) {
+            emit GenesisGuard(token, buyer, snipeBps, (fee * snipeBps) / feeRate, usdIn - spendable);
+        }
+        if (spend + fee > 0) {
+            emit Trade(token, srcChain, buyer, true, spend + fee, out, venue.spotPrice(token), uint64(block.timestamp));
+        }
         _accrueFee(token, fee);
     }
 

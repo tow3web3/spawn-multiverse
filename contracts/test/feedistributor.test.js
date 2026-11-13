@@ -1,8 +1,12 @@
 const { expect } = require('chai')
 const { ethers } = require('hardhat')
+const { time } = require('@nomicfoundation/hardhat-network-helpers')
 const { deployWorld, deployWorldAsync } = require('../scripts/lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
+// Hop past the FAIR GENESIS window (v6) — these suites test the fee stream
+// at the steady-state 1%, not the anti-snipe opening.
+const pastGenesis = () => time.increase(601)
 const DUST = E(0.000001) // magnified-dividend rounding, a few wei per drop
 
 describe('Holder fee distribution (protocol v3)', () => {
@@ -85,6 +89,7 @@ describe('Holder fee distribution (protocol v3)', () => {
     it('holders mode: the pot distributes to where the supply lives and a holder claims locally', async () => {
       const c = world.chains[1] // ethereum
       await (await c.gateway.connect(user).spawnToken('YIELD CAT', 'YCAT', '{}', 0, 0)).wait()
+      await pastGenesis()
       const token = await world.pad.allTokens(0)
       await (await c.usd.faucet(user, E(1_000))).wait()
 
@@ -113,6 +118,7 @@ describe('Holder fee distribution (protocol v3)', () => {
     it('split mode: holders stream distributes, the dev claim stays intact', async () => {
       const c = world.chains[3] // bnb
       await (await c.gateway.connect(user).spawnToken('HALFSIES', 'HALF', '{}', 0, 1)).wait()
+      await pastGenesis()
       const token = await world.pad.allTokens(0)
       await (await c.usd.faucet(user2, E(1_000))).wait()
       await (await c.gateway.connect(user2).buyToken(token, E(600))).wait() // $6 fee: 3/3
@@ -130,6 +136,7 @@ describe('Holder fee distribution (protocol v3)', () => {
     it('oUSD is still conserved end to end with distributions in the mix', async () => {
       const a = world.chains[0]
       await (await a.gateway.connect(user).spawnToken('LEAKPROOF', 'LEAK', '{}', 0, 0)).wait()
+      await pastGenesis()
       const token = await world.pad.allTokens(0)
       await (await a.usd.faucet(user, E(2_000))).wait()
       await (await a.gateway.connect(user).buyToken(token, E(900))).wait() // distributes
@@ -154,6 +161,7 @@ describe('Holder fee distribution (protocol v3)', () => {
 
       await (await A.gateway.connect(user1).spawnToken('OMNIYIELD', 'OMY', '{}', 0, 0)).wait()
       await world.deliverAll()
+      await time.increase(601) // past the FAIR GENESIS window
       const token = await world.pad.allTokens(0)
 
       await (await A.usd.faucet(user1, E(500))).wait()

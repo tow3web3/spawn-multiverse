@@ -41,6 +41,29 @@ curve starting around $0.0000056; when it fills (~$86K market cap), the
 token **ascends** — raised dollars plus the reserved 200M seed a pool and
 trading continues, same address, same everything.
 
+## Block 0 does not exist
+
+On every launchpad you've used, the block that creates the token already
+contains the snipers — bots buy in block 0 and dump on everyone who heard
+about the launch like a human. On SPAWN!, **FAIR GENESIS** makes that
+mechanically impossible, then makes trying expensive:
+
+- **Block 0 accepts no buys.** The spawn block refuses every buy, full
+  stop. The money bounces straight back — nothing to race.
+- **The snipe tax pays everyone else.** For the first 10 minutes, buys pay
+  a fee that starts at 30% and decays to the normal 1%. It isn't burned
+  into nothing by default — it rides the token's fee mode, so a sniper
+  firing at minute one is literally paying the holders (or the dev, or
+  the buyback-burn). The faster they snipe, the more they fund the room.
+- **$250 per wallet** while the window runs — a speed bump on top.
+- **The multichain snipe doesn't exist either.** Buys from other chains
+  ride LayerZero messages that take a minute or two — nobody can be first
+  on six chains in the same second, because physics.
+
+The one disclosed exception: the dev's own optional first buy rides inside
+the spawn itself, shown on the launch form. Everything else waits its turn
+like a human.
+
 ## Fees are a product: the dev picks the deal at launch
 
 Every trade pays 1%, and the fee mode is locked forever at launch — a
