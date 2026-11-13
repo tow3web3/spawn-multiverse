@@ -23,9 +23,19 @@ const STEPS = [
     bg: '#9ccbf5',
     body: 'Every trade from every chain hits one global genesis curve, so your token costs the same on Solana, Ethereum, Base, BNB, Arbitrum and Optimism. Fill the curve and the token ascends to the omnipool.',
   },
+  {
+    num: '04',
+    title: '🛡 FAIR GENESIS',
+    bg: '#f7be7b',
+    body: 'Snipers get nothing here. The spawn block refuses every buy — block 0 does not exist. For the first 10 minutes, buys pay a snipe tax decaying 30%→1%, routed like every fee — to your holders, you, or the burn — with a $250 cap per wallet.',
+  },
 ]
 
 const MORE = [
+  {
+    title: 'WHY SNIPERS LOSE HERE',
+    body: 'Three walls. The spawn block bounces every buy — refunded in full, block 0 does not exist. For 10 minutes a snipe tax decays 30%→1% and is routed like the token’s fees — to its holders, its dev, or the burn — so early snipes fund everyone else. And a $250 per-wallet cap keeps the opening human-sized. Sniping from another chain is structurally impossible anyway: a cross-chain buy takes minutes to arrive. The one disclosed exemption is the creator’s public dev buy at launch.',
+  },
   {
     title: 'WHY IS THE PRICE THE SAME?',
     body: 'Because there is only ONE market. Every buy and sell — from any chain — executes against the same global curve. The price isn’t synchronized between chains; it’s the same number because it’s the same market. Nothing to arbitrage.',
@@ -65,7 +75,7 @@ export function HowItWorks() {
           </p>
         </div>
 
-        <div className="mt-10 grid gap-6 md:grid-cols-3">
+        <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {STEPS.map((s) => (
             <div
               key={s.num}

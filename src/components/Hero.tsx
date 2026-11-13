@@ -9,6 +9,7 @@ const FEATURES: { label: string; cls: string; bg?: string }[] = [
   { label: '⛓ 6 CHAINS, 1 LAUNCH', cls: 'bg-ink text-lime' },
   { label: '✳ ONE GLOBAL SUPPLY', cls: 'bg-white' },
   { label: '⚖ ONE PRICE EVERYWHERE', cls: '', bg: '#9ccbf5' },
+  { label: '🛡 BLOCK 0 DOES NOT EXIST', cls: '', bg: '#f7a8ce' },
   { label: '⛽ GAS ON ONE CHAIN ONLY', cls: 'bg-white' },
   { label: '💸 FEES: HOLDERS / DEV / 🔥 BURN', cls: 'bg-tang' },
 ]
