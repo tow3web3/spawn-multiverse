@@ -12,18 +12,40 @@ pragma solidity ^0.8.24;
 /// a 32-byte chain (Solana), so the transport never assumes 20-byte
 /// addresses. EVM endpoints ride left-padded; each side downcasts only when
 /// it must touch a LOCAL EVM account.
+///
+/// MESSAGES ARE PAID FOR BY WHOEVER CAUSES THEM (v7). `send` is payable and
+/// `returnLegs` says how many reply messages the destination will have to
+/// send because of this one: the sender prepays those too, so the reply
+/// never rides on charity. `quote` returns exactly what `send` will require
+/// for the same arguments.
 interface IOmniMessenger {
-    function send(uint32 dstChain, bytes32 dstAddr, bytes calldata payload) external;
+    function send(uint32 dstChain, bytes32 dstAddr, bytes calldata payload, uint256 returnLegs)
+        external
+        payable;
+
+    function quote(uint32 dstChain, bytes32 dstAddr, bytes calldata payload, uint256 returnLegs)
+        external
+        view
+        returns (uint256 nativeFee);
 }
 
 interface IOmniReceiver {
     function onOmniMessage(uint32 srcChain, bytes32 srcSender, bytes calldata payload) external;
 }
 
+/// @notice The simulated transport: every logical chain on one node, messages
+/// delivered synchronously. It charges a configurable flat fee per message
+/// (0 by default) so the v7 fee rules — user-paid sends, prepaid return legs,
+/// sponsored senders — are testable without LayerZero.
 contract LocalOmniMessenger is IOmniMessenger {
     address public immutable admin;
     mapping(address => uint32) public chainOf;
     mapping(address => bool) public registered;
+    /// Senders whose messages ride free (the pad: its replies were prepaid
+    /// by the message that caused them).
+    mapping(address => bool) public sponsored;
+    /// Flat native fee per message, the outbound one and each prepaid reply.
+    uint256 public flatFee;
 
     event EndpointRegistered(address indexed endpoint, uint32 chain);
     event MessageDelivered(uint32 srcChain, address srcSender, uint32 dstChain, address dstAddr);
@@ -39,8 +61,36 @@ contract LocalOmniMessenger is IOmniMessenger {
         emit EndpointRegistered(endpoint, chain);
     }
 
-    function send(uint32 dstChain, bytes32 dstAddr, bytes calldata payload) external {
+    function setSponsored(address sender, bool on) external {
+        require(msg.sender == admin, "LOM: not admin");
+        sponsored[sender] = on;
+    }
+
+    function setFlatFee(uint256 fee) external {
+        require(msg.sender == admin, "LOM: not admin");
+        flatFee = fee;
+    }
+
+    /// Collected fees have nowhere to go in a simulated network.
+    function recover(address payable to) external {
+        require(msg.sender == admin, "LOM: not admin");
+        (bool ok, ) = to.call{value: address(this).balance}("");
+        require(ok, "LOM: recover failed");
+    }
+
+    function quote(uint32, bytes32, bytes calldata, uint256 returnLegs) public view returns (uint256) {
+        return flatFee * (1 + returnLegs);
+    }
+
+    function send(uint32 dstChain, bytes32 dstAddr, bytes calldata payload, uint256 returnLegs)
+        external
+        payable
+    {
         require(registered[msg.sender], "LOM: unknown sender");
+        require(
+            msg.value >= quote(dstChain, dstAddr, payload, returnLegs) || sponsored[msg.sender],
+            "LOM: fee"
+        );
         // The local world is all-EVM, so every destination must downcast.
         require(uint256(dstAddr) >> 160 == 0, "LOM: bad destination");
         address dst = address(uint160(uint256(dstAddr)));

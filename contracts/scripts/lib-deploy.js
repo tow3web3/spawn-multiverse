@@ -83,6 +83,8 @@ async function deployWorld() {
   await (await pad.setVenue(venue.target)).wait()
   await (await hubUsd.setAgent(pad.target)).wait()
   await (await messenger.register(pad.target, 0)).wait()
+  // v7 fees: the pad's messages are replies, prepaid by whoever caused them
+  await (await messenger.setSponsored(pad.target, true)).wait()
   // Holder dividends: one FeeDistributor per chain, the hub's wired to the pad.
   const hubDist = await ethers.deployContract('FeeDistributor', [hubUsd.target])
   await (await hubDist.setAgent(pad.target)).wait()
@@ -101,6 +103,10 @@ async function deployWorld() {
     await (await usd.setAgent(gateway.target)).wait()
     await (await messenger.register(gateway.target, c.label)).wait()
     await (await pad.setGateway(c.label, b32(gateway.target))).wait()
+    // every chain is a "remote" spoke of the simulated network: a trade
+    // prepays 1 reply, a spawn the SYNC to all six chains. The simulated
+    // fee is 0 unless a test turns it on (`messenger.setFlatFee`).
+    await (await gateway.setLegs(1, CHAINS.length)).wait()
     const dist = await ethers.deployContract('FeeDistributor', [usd.target])
     await (await dist.setAgent(gateway.target)).wait()
     await (await gateway.setDistributor(dist.target)).wait()
@@ -110,17 +116,44 @@ async function deployWorld() {
   return { messenger, hubUsd, pad, venue, hubDist, chains }
 }
 
+/** The chain whose gateway lives on the hub chain itself (Base): its
+ * messages never touch LayerZero — the hub adapter loops them back. */
+const HUB_LOCAL_LABEL = 3
+
+/** Executor gas bought for `lzReceive`, per destination — the DEPLOY config.
+ * The hub's worst case is OP_SPAWN: a full ERC20 deploy, the hub chain's own
+ * replica deploy (loopback SYNC), one LayerZero send per remote chain and an
+ * optional dev buy — ~1.4M of protocol work plus ~0.2M per real send. A
+ * spoke's worst case is OP_SYNC_TOKEN, a replica deploy (~0.72M measured). */
+const GAS_TO_HUB = 4_000_000n
+const GAS_TO_SPOKE = 2_000_000n
+/** The mock endpoint stores whole packets on-chain: ~0.52M gas per send,
+ * against ~0.2M for the real one. With five remote chains that alone is
+ * 2.6M inside the hub's OP_SPAWN, so the mock world buys more hub gas than a
+ * real deployment needs. The mock enforces what was bought, like an executor. */
+const MOCK_GAS_TO_HUB = 6_000_000n
+
 /**
- * Same multiverse, but over the ASYNC transport: one LayerZeroOmniMessenger
- * adapter per chain, peered through a MockLZEndpointV2 that queues packets
- * and only lands them when `deliverAll()` is called — like the real network.
+ * Same multiverse, but over the ASYNC transport — and in the MAINNET
+ * topology: one LayerZeroOmniMessenger adapter per chain, peered through a
+ * MockLZEndpointV2 that queues packets and only lands them when
+ * `deliverAll()` is called, EXCEPT the hub chain's own gateway (label 3,
+ * Base), which shares the hub adapter and reaches the pad by loopback.
  * This is the wiring that moves to testnet/mainnet: swap the mock endpoint
  * address for the real LayerZero V2 endpoint per chain, keep everything else.
+ *
+ * Fees (v7): the mock endpoint charges `FEE` per message; every spoke
+ * prepays `RETURN_UNIT` (≥ FEE) per reply into the hub tank. With
+ * `sponsored: true` (default — how testnets run) gateways ride their tank
+ * and tests can call them without value; with `sponsored: false` (mainnet)
+ * every user call must attach the quoted fee.
  */
-async function deployWorldAsync() {
+async function deployWorldAsync({ sponsored = true } = {}) {
   const FEE = ethers.parseEther('0.001')
+  const RETURN_UNIT = ethers.parseEther('0.0012')
   const EID = (label) => 30_000 + label
   const [funder] = await ethers.getSigners()
+  const remotes = CHAINS.filter((c) => c.label !== HUB_LOCAL_LABEL).length
 
   const endpoint = await ethers.deployContract('MockLZEndpointV2', [FEE])
 
@@ -133,7 +166,15 @@ async function deployWorldAsync() {
   const venue = await ethers.deployContract('InternalCurveVenue', [pad.target])
   await (await pad.setVenue(venue.target)).wait()
   await (await hubUsd.setAgent(pad.target)).wait()
-  await (await hubMessenger.register(pad.target)).wait()
+  await (await hubMessenger.register(pad.target, 0)).wait()
+  // the pad's messages are replies: prepaid into this tank, never by the pad
+  await (await hubMessenger.setSponsored(pad.target, true)).wait()
+  // labels hosted on the hub chain: the hub itself and its own gateway.
+  // A local spawn still makes the hub SYNC every remote chain — the local
+  // sender prepays that fan-out at RETURN_UNIT per leg, into this tank.
+  await (await hubMessenger.setLocal(0, true)).wait()
+  await (await hubMessenger.setLocal(HUB_LOCAL_LABEL, true)).wait()
+  await (await hubMessenger.setDestination(0, 0, RETURN_UNIT)).wait()
   const hubDist = await ethers.deployContract('FeeDistributor', [hubUsd.target])
   await (await hubDist.setAgent(pad.target)).wait()
   await (await hubDist.exclude(venue.target)).wait()
@@ -141,9 +182,13 @@ async function deployWorldAsync() {
 
   const chains = []
   for (const c of CHAINS) {
-    const messenger = await ethers.deployContract('LayerZeroOmniMessenger', [endpoint.target, EID(c.label)])
-    await (await endpoint.registerAdapter(messenger.target, EID(c.label))).wait()
-    await (await funder.sendTransaction({ to: messenger.target, value: ethers.parseEther('1') })).wait()
+    const local = c.label === HUB_LOCAL_LABEL
+    let messenger = hubMessenger
+    if (!local) {
+      messenger = await ethers.deployContract('LayerZeroOmniMessenger', [endpoint.target, EID(c.label)])
+      await (await endpoint.registerAdapter(messenger.target, EID(c.label))).wait()
+      await (await funder.sendTransaction({ to: messenger.target, value: ethers.parseEther('1') })).wait()
+    }
 
     const { usdc, cctp, usd } = await deployDollar(c.label)
     const gateway = await ethers.deployContract('SpawnGateway', [
@@ -153,23 +198,46 @@ async function deployWorldAsync() {
       pad.target,
     ])
     await (await usd.setAgent(gateway.target)).wait()
-    await (await messenger.register(gateway.target)).wait()
+    await (await messenger.register(gateway.target, c.label)).wait()
+    if (sponsored) await (await messenger.setSponsored(gateway.target, true)).wait()
     await (await pad.setGateway(c.label, b32(gateway.target))).wait()
+    // replies a user prepays: 1 per trade on a remote chain, none at home;
+    // a spawn prepays the SYNC to every remote chain wherever it starts
+    await (await gateway.setLegs(local ? 0 : 1, remotes)).wait()
     const dist = await ethers.deployContract('FeeDistributor', [usd.target])
     await (await dist.setAgent(gateway.target)).wait()
     await (await gateway.setDistributor(dist.target)).wait()
 
-    // spoke <-> hub routes (spokes never talk to each other; the pad relays)
-    await (await messenger.setRoute(0, EID(0), b32(hubMessenger.target))).wait()
-    await (await hubMessenger.setRoute(c.label, EID(c.label), b32(messenger.target))).wait()
-    chains.push({ ...c, usdc, cctp, usd, gateway, messenger, dist })
+    if (!local) {
+      // spoke <-> hub routes (spokes never talk to each other; the pad relays)
+      await (await messenger.setRoute(0, EID(0), b32(hubMessenger.target))).wait()
+      await (await hubMessenger.setRoute(c.label, EID(c.label), b32(messenger.target))).wait()
+      await (await messenger.setDestination(0, MOCK_GAS_TO_HUB, RETURN_UNIT)).wait()
+      // hub -> spoke messages are replies: they carry no further budget
+      await (await hubMessenger.setDestination(c.label, GAS_TO_SPOKE, 0)).wait()
+    }
+    chains.push({ ...c, usdc, cctp, usd, gateway, messenger, dist, local })
   }
 
   async function deliverAll() {
     while ((await endpoint.pending()) > 0n) await (await endpoint.deliverAll(32)).wait()
   }
 
-  return { endpoint, hubMessenger, hubUsd, pad, venue, hubDist, chains, deliverAll }
+  return { endpoint, hubMessenger, hubUsd, pad, venue, hubDist, chains, deliverAll, FEE, RETURN_UNIT }
 }
 
-module.exports = { deployWorld, deployWorldAsync, CHAINS, SCALE, U, fundUsd, fundUsdc, worth, backing }
+module.exports = {
+  deployWorld,
+  deployWorldAsync,
+  CHAINS,
+  HUB_LOCAL_LABEL,
+  GAS_TO_HUB,
+  GAS_TO_SPOKE,
+  MOCK_GAS_TO_HUB,
+  SCALE,
+  U,
+  fundUsd,
+  fundUsdc,
+  worth,
+  backing,
+}

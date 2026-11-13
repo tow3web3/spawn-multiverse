@@ -263,6 +263,10 @@ contract SpawnPad is IOmniReceiver {
         return bytes32(uint256(uint160(a)));
     }
 
+    /// FEES (v7): the pad never attaches value and never prepays a reply —
+    /// every `messenger.send` below passes `returnLegs = 0`. Its messages ARE
+    /// the replies: the user who caused them prepaid them into the hub
+    /// adapter's tank, and the pad rides that tank as a sponsored sender.
     function onOmniMessage(uint32 srcChain, bytes32 srcSender, bytes calldata payload) external {
         require(msg.sender == address(messenger), "PAD: not messenger");
         require(gateways[srcChain] == srcSender, "PAD: not a gateway");
@@ -336,7 +340,8 @@ contract SpawnPad is IOmniReceiver {
                 gateways[ch],
                 // token id rides as bytes32: the hub is EVM so it always
                 // fits; a Solana gateway consumes it as a raw 32-byte seed.
-                abi.encode(OP_SYNC_TOKEN, abi.encode(_b32(address(token)), name, symbol))
+                abi.encode(OP_SYNC_TOKEN, abi.encode(_b32(address(token)), name, symbol)),
+                0
             );
         }
 
@@ -403,7 +408,8 @@ contract SpawnPad is IOmniReceiver {
             srcChain,
             gateways[srcChain],
             // token id padded; buyer already wide — passthrough, no re-cast
-            abi.encode(OP_DELIVER, abi.encode(_b32(token), buyer, out, refund))
+            abi.encode(OP_DELIVER, abi.encode(_b32(token), buyer, out, refund)),
+            0
         );
 
         if (snipeBps > 0 || usdIn > spendable) {
@@ -427,7 +433,7 @@ contract SpawnPad is IOmniReceiver {
         // Pay the seller out on their chain, net of the fee.
         usd.bridgeBurn(address(this), net);
         // seller already wide — passthrough, no re-cast
-        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(seller, net)));
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(seller, net)), 0);
 
         emit Trade(token, srcChain, seller, false, net, tokensIn, venue.spotPrice(token), uint64(block.timestamp));
         _accrueFee(token, fee);
@@ -501,7 +507,7 @@ contract SpawnPad is IOmniReceiver {
             // distributor — the same burn/mint pattern as every payout.
             usd.bridgeBurn(address(this), share);
             // token id rides as bytes32 (wire convention)
-            messenger.send(ch, gateways[ch], abi.encode(OP_FEE_DROP, abi.encode(_b32(token), share)));
+            messenger.send(ch, gateways[ch], abi.encode(OP_FEE_DROP, abi.encode(_b32(token), share)), 0);
             paid += share;
         }
         f.holdersPaid += paid; // rounding dust stays in the pot
@@ -518,7 +524,7 @@ contract SpawnPad is IOmniReceiver {
         f.devClaimed += amount;
         usd.bridgeBurn(address(this), amount);
         // claimer already wide — passthrough, no re-cast
-        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(claimer, amount)));
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(claimer, amount)), 0);
         emit DevClaimed(token, claimer, amount);
     }
 }

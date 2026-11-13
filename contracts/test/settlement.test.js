@@ -362,7 +362,8 @@ describe('Real-money settlement (protocol v7)', () => {
 
     it('over async transport the only gap is value in flight — and it closes on delivery', async () => {
       const w = await deployWorldAsync()
-      const base = w.chains[2]
+      // a REMOTE chain: Base is the hub's own chain and settles in one tx
+      const base = w.chains[4] // arbitrum
       await (await base.gateway.connect(user).spawnToken('INFLIGHT', 'FLY', '{}', 0, 0)).wait()
       await w.deliverAll()
       await pastGenesis()

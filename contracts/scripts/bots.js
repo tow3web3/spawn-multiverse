@@ -44,7 +44,11 @@ async function main() {
     if ((await chain.usdc.balanceOf(bot.address)) < usdc) {
       await (await chain.usdc.mint(bot.address, U(50_000))).wait()
     }
-    await (await chain.gateway.connect(bot).buyTokenUsdc(token, usdc)).wait()
+    // v7: every action attaches its quoted messaging fee (0 on the free
+    // simulated transport, real once a flat fee or LayerZero is behind it)
+    await (
+      await chain.gateway.connect(bot).buyTokenUsdc(token, usdc, { value: await chain.gateway.quoteBuy() })
+    ).wait()
   }
 
   const replicaCache = new Map()
@@ -73,7 +77,9 @@ async function main() {
           const bal = rep ? await rep.balanceOf(bot.address) : 0n
           if (bal > E(1000)) {
             const slice = (bal * BigInt(Math.floor(rand(10, 70)))) / 100n
-            await (await chain.gateway.connect(bot).sellToken(token, slice)).wait()
+            await (
+              await chain.gateway.connect(bot).sellToken(token, slice, { value: await chain.gateway.quoteSell() })
+            ).wait()
             console.log(`SELL ${chain.id}`)
           } else {
             await buy(chain, bot, token, rand(5, 150))

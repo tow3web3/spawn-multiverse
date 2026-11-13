@@ -157,11 +157,11 @@ describe('Holder fee distribution (protocol v3)', () => {
   /* -------------------- over async LayerZero transport -------------------- */
 
   describe('over async LayerZero V2 transport', () => {
-    it('fee drops cross as packets; holders on two chains claim their pro-rata share locally', async () => {
+    it('fee drops reach every chain; holders on two chains claim their pro-rata share locally', async () => {
       const [, user1, user2] = await ethers.getSigners()
       const world = await deployWorldAsync()
-      const A = world.chains[2] // base
-      const B = world.chains[5] // optimism
+      const A = world.chains[2] // base — the hub's own chain: its drop is a loopback
+      const B = world.chains[5] // optimism — its drop crosses as a packet
 
       await (await A.gateway.connect(user1).spawnToken('OMNIYIELD', 'OMY', '{}', 0, 0)).wait()
       await world.deliverAll()

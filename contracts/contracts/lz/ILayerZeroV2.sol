@@ -42,6 +42,10 @@ interface ILayerZeroEndpointV2 {
         external
         payable
         returns (MessagingReceipt memory);
+
+    /// Called BY an OApp: names the account allowed to configure it on the
+    /// endpoint (`setConfig` — DVN set, executor, libraries) on its behalf.
+    function setDelegate(address delegate) external;
 }
 
 interface ILayerZeroReceiver {

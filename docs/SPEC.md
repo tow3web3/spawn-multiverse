@@ -22,15 +22,20 @@ actors stay wide end-to-end on the hub, and the transport envelope is
 bytes32-addressed on both seats — this is what lets a Solana pubkey use the
 same wire as EVM addresses.
 
-Protocol version v7 (settlement only — **the wire is unchanged**): oUSD stops
-being faucet money. On every user-facing chain `OmniUSD` is a USDC vault and
-oUSD a 1:1 claim on it; on the hub it is a pure ledger. See §7.
+Protocol version v7 (**the payload wire and the envelope are unchanged**):
+- *settlement* — oUSD stops being faucet money. On every user-facing chain
+  `OmniUSD` is a USDC vault and oUSD a 1:1 claim on it; on the hub it is a
+  pure ledger. See §7.
+- *transport* — messages are paid by whoever causes them, replies included;
+  the hub adapter's gas tank funds itself from those prepaid reply budgets;
+  and the hub chain is a user-facing chain too: its own gateway reaches the
+  pad by a same-transaction loopback, with no LayerZero message. See §3.
 
 ## 2. Actors and trust model
 
 | Actor | Powers | Where |
 |---|---|---|
-| **admin (deployer EOA)** | one-time wiring: `setVenue`, `setDistributor`, `setGateway` (pad); `setDistributor` (gateway); `setAgent`/`exclude` (distributor); `setAgent` (OmniUSD); `register`/`setRoute`/`setOptions`/`recover` (LZ adapter) | `SpawnPad.sol:132-152`, `SpawnGateway.sol:50`, `FeeDistributor.sol:54-66`, `OmniUSD.sol:22`, `lz/LayerZeroOmniMessenger.sol:58-78` |
+| **admin (deployer EOA)** | one-time wiring: `setVenue`, `setDistributor`, `setGateway` (pad); `setDistributor` (gateway); `setAgent`/`exclude` (distributor); `setAgent` (OmniUSD); `setLegs` (gateway — how many replies a user prepays); on the LZ adapter: `register` (admit a local sender and its chain label), `setRoute`, `setDestination` (executor gas + reply budget per destination), `setSponsored` (whose fees ride the tank), `setLocal` (labels hosted on this chain — loopback), `setDelegate` (who may configure DVNs on the endpoint), `recover` (drain the tank) | `SpawnPad.sol:setVenue/setDistributor/setGateway`, `SpawnGateway.sol:setDistributor/setLegs`, `FeeDistributor.sol:54-66`, `OmniUSD.sol:setAgent`, `lz/LayerZeroOmniMessenger.sol` (admin section) |
 | **admin, on each USDC vault (v7)** | `setDepositCap` (open/close/limit deposits — never withdrawals); `setPeer` (name a chain's peer vault, once per label); `rebalance` (CCTP-burn vault USDC toward a named peer vault). **No function sends USDC to an arbitrary address — but the admin chooses the peers; see §7 "Rebalancing trust model".** | `OmniUSD.sol:setDepositCap/setPeer/rebalance` |
 | **token creator ("dev")** | locks the fee mode at launch; claims the dev fee share from any chain | `SpawnGateway.sol:spawnToken/spawnTokenUsdc`, `SpawnPad.sol:_claim` |
 | **trader / holder** | buy, sell, claim holder dividends — all on their own chain; wrap/unwrap USDC ⇄ oUSD | `SpawnGateway.sol:buyToken/buyTokenUsdc/sellToken`, `FeeDistributor.sol:claim`, `OmniUSD.sol:wrap/unwrap` |
@@ -47,42 +52,167 @@ could do pre- and post-wiring.**
 
 Trust chain for an inbound message (production transport):
 1. endpoint authenticity — `lzReceive` requires `msg.sender == endpoint`
-   (`LayerZeroOmniMessenger.sol:111`);
+   (`LayerZeroOmniMessenger.sol:lzReceive`, `"LZM: not endpoint"`);
 2. peer authenticity — packet's `origin.sender` must equal the configured
-   peer adapter for that srcEid (`:112`);
+   peer adapter for that srcEid (`"LZM: not a peer"`);
 3. source chain label derives from `origin.srcEid` via `labelOf`, never from
-   message content (`:121`);
+   message content (same function);
 4. envelope authentication — receiver checks the protocol-level sender:
-   pad requires `gateways[srcChain] == srcSender` (`SpawnPad.sol:227`),
-   gateway requires the pad (`SpawnGateway.sol:113`), Solana store requires
+   pad requires `gateways[srcChain] == srcSender`
+   (`SpawnPad.sol:onOmniMessage`, `"PAD: not a gateway"`), gateway requires
+   the pad (`SpawnGateway.sol:onOmniMessage`, `"GW: not the pad"`), Solana
+   store requires
    `env.src_sender == store.hub_pad` and `env.dst_addr == store`
    (`solana …/lz_receive.rs:77-79`);
 5. sender gating on the way out — adapters only accept registered local
-   protocol contracts (`LayerZeroOmniMessenger.sol:83`), the Solana program
-   only sends from its own store PDA.
+   protocol contracts (`LayerZeroOmniMessenger.sol:send`, `"LZM: unknown
+   sender"`), the Solana program only sends from its own store PDA.
+
+The loopback (v7, §3) replaces steps 1–3 for a message between two contracts
+of the SAME chain: the adapter itself is the witness. It hands the receiver
+`labelOfSender[msg.sender]` and `msg.sender` — the admin-registered label of
+the caller and its real address — and only ever calls a registered endpoint
+of the destination label (`"LZM: bad target"`). Step 4 is unchanged, so a
+registered sender still cannot pose as the pad or as another gateway.
 
 ## 3. Transport and envelope
 
-Protocol contracts speak `IOmniMessenger.send(dstChain, bytes32 dstAddr,
-payload)` / receive `onOmniMessage(srcChain, bytes32 srcSender, payload)`
-(`OmniMessenger.sol:15-21`). Transports are swappable:
+Protocol contracts speak
+`IOmniMessenger.send(dstChain, bytes32 dstAddr, payload, returnLegs)`
+(payable) / `quote(...)` (same arguments, returns the native fee `send` will
+require) and receive `onOmniMessage(srcChain, bytes32 srcSender, payload)`
+(`OmniMessenger.sol`). Transports are swappable:
 
-- `LocalOmniMessenger` — synchronous, all-EVM dev transport
-  (`OmniMessenger.sol:23`).
-- `MockLZEndpointV2` + `LayerZeroOmniMessenger` — async queue for tests.
-- `LayerZeroOmniMessenger` — production adapter, one per chain. Gas-tank
-  funded (`receive()`), admin-recoverable (`recover`), quotes and pays the
-  LZ fee per send so users never attach value (`send`, `:82-100`).
+- `LocalOmniMessenger` — synchronous, all-EVM dev transport, with a
+  configurable flat fee per message (0 by default) and the same
+  sponsored-sender rule, so the fee logic is exercised without LayerZero.
+- `MockLZEndpointV2` + `LayerZeroOmniMessenger` — async queue for tests. The
+  mock charges a flat fee (+ optional per-byte fee), honours the executor
+  native-value option (the sender pays `value` on top; delivery hands it to
+  the receiver's payable `lzReceive`), delivers with exactly the gas the
+  options bought, and leaves a reverted delivery queued (retryable).
+- `LayerZeroOmniMessenger` — production adapter, one per chain.
+
+### Who pays (v7)
+
+The rule: **whoever causes a message pays for it and for the replies it
+triggers.** Nothing rides on charity, so nothing can be drained by spam.
+
+- Every gateway entrypoint is `payable` and forwards `msg.value` to
+  `messenger.send` with `returnLegs` = the replies the hub will send because
+  of it: `tradeLegs` for a buy / sell / claim (1 on a remote chain: the
+  DELIVER or PAYOUT), `spawnLegs (+ tradeLegs with a dev buy)` for a spawn
+  (the SYNC to every remote chain). Both are admin-set per gateway
+  (`SpawnGateway.sol:setLegs`) — budget multipliers, not hard message counts.
+- The adapter requires `msg.value ≥ fee` unless the sender is `sponsored`
+  (`"LZM: fee"`); a short fee reverts the user's whole transaction — nothing
+  is burned or pulled (`transport.test.js`). Any surplus stays in the tank.
+- The fee is `endpoint.quote(...)` for a packet whose executor option
+  carries `returnUnit[dst] × returnLegs` of DESTINATION-chain native
+  currency. The executor delivers that value into the remote adapter's
+  payable `lzReceive`, i.e. into its balance.
+- That balance is the adapter's **gas tank**. The pad never attaches value
+  and always passes `returnLegs = 0`: it is the one always-sponsored sender,
+  and its replies are paid out of the hub tank — which was just topped up by
+  the message being answered. With `returnUnit ≥` the real reply fee the
+  tank never shrinks (asserted to the wei on the mock).
+- `SpawnGateway.quoteBuy / quoteSell / quoteClaim / quoteSpawn(name, symbol,
+  metaURI, withDevBuy)` return the exact fee before signing. Trade payloads
+  are fixed-size; a spawn's fee depends on its strings, so its quote takes
+  them.
+- Sponsorship is configuration, not a code path: testnets sponsor their
+  gateways (the tank pays, visitors need no fee logic); mainnet sponsors the
+  pad only.
+
+**Failure mode.** If the hub tank cannot pay a reply (`"LZM: gas tank
+empty"`), the inbound `lzReceive` reverts as a whole: the BUY/SELL/SPAWN is
+not consumed, the user's value is still in flight, and LayerZero keeps the
+message retryable — anyone can re-execute it once the tank is refilled
+(tested: the packet stays queued and lands after a top-up). A tank only
+runs dry if `returnUnit` is set below the real reply cost, or through the
+replies nobody prepays (next paragraph). Tank level is an ops alert.
+
+**Not prepaid today.** A trade's single reply budget covers its DELIVER /
+PAYOUT. It does NOT cover the `OP_FEE_DROP` fan-out a trade may trigger
+(§8: one message per chain holding supply, each time the holders pot
+crosses `DIST_TRIGGER = $2`). Those ride the hub tank unfunded. At mainnet
+message prices that is both uneconomic (a $2 drop can cost more than $2 to
+ship) and a slow drain; see §11.
+
+### Per-destination options
+
+`setDestination(label, gas, unit)` replaces the old global options blob.
+Each send builds a type-3 option list with one executor lzReceive option:
+`0x0003 | 0x01 | uint16 size | 0x01 | uint128 gas [| uint128 value]` — 17
+bytes of option (22 in total) when no reply is prepaid, 33 (38 in total)
+with `value = returnUnit × returnLegs` (`_packet`). A destination without a
+gas limit is refused (`"LZM: no gas limit"`).
+
+Gas actually used by `lzReceive`, measured on the mock endpoint (which
+itself burns ~0.52M per `send` it stores, against ~0.2M for the real
+endpoint — hub figures are therefore pessimistic):
+
+| Op (where it lands) | Gas used | Budget in deploy config |
+|---|---|---|
+| OP_SPAWN (hub), 5 remote SYNCs, no dev buy / with dev buy | 3.94M / 4.52M on the mock ≈ 1.4M of protocol work + one send per remote chain (+ the DELIVER) | 4M to the hub |
+| OP_BUY / OP_SELL (hub), incl. one reply send | 0.18–0.64M | 4M to the hub |
+| OP_SYNC_TOKEN (spoke — a replica deploy) | 0.72M | 2M to a spoke |
+| OP_DELIVER / OP_PAYOUT / OP_FEE_DROP (spoke) | 0.06–0.13M | 2M to a spoke |
+
+Executor gas is nearly free on L2 destinations (≈ destination gas price ×
+gas — see MAINNET-ADDRESSES.md), but it is one number per destination, so a
+trade toward the hub buys the same 4M as a spawn. A per-op gas class would
+save ~0.00003 ETH per hub-bound trade message at today's Base gas price.
+
+### Hub-local trading — the loopback (v7)
+
+The hub chain is also a user-facing chain (label 3, Base): it has its own
+USDC vault, gateway and holder pool, and that gateway is wired to the HUB
+adapter. Labels marked `isLocal` on an adapter (the hub's: 0 and 3) are
+never routed through LayerZero: `send` calls
+`IOmniReceiver(dst).onOmniMessage(labelOfSender[msg.sender], bytes32(msg.sender), payload)`
+directly, in the same transaction, and only if `dst` is a REGISTERED sender
+of that label. Consequences:
+
+- a buy, sell or claim on the hub chain is ONE transaction — tokens or USDC
+  are in the user's wallet when it returns — and costs no messaging fee
+  (`tradeLegs = 0`);
+- a spawn on the hub chain creates the token and the local replica in that
+  transaction, and still SYNCs every remote chain: the local sender prepays
+  that fan-out as `returnUnit[0] × spawnLegs`, kept in the hub tank;
+- the pad needed no change: the hub chain's gateway is just another
+  `gateways[3]`, and every reply to label 3 takes the loopback;
+- FAIR GENESIS block 0 is now a real case rather than an executor-batching
+  corner: a local buy in the spawn block bounces with a full USDC refund,
+  inside the buyer's own transaction (`transport.test.js`);
+- the synchronous nesting gateway → adapter → pad → adapter → gateway →
+  vault is exactly what `LocalOmniMessenger` has always done for all six
+  chains, so every pre-existing suite already exercised it. The gateway's
+  user entrypoints are `nonReentrant`; `onOmniMessage` deliberately is not
+  (the loopback re-enters it while a user call is on the stack) and is
+  protected by its two authentication checks instead.
+
+### DVN configuration
+
+Each adapter names its admin as LayerZero **delegate** at construction
+(`endpoint.setDelegate`), and the admin can move it (`setDelegate`). The
+delegate — not the adapter — calls `endpoint.setConfig` to choose the send
+and receive ULN config (DVN set, confirmations) and the executor per
+pathway. Until someone does, an adapter rides LayerZero's defaults, which on
+mainnet today means four required DVNs, one of which is ~80% of the message
+fee (MAINNET-ADDRESSES.md). Choosing the set is deploy-time configuration
+and is custody security (§7): both sides of every pathway must agree or
+messages stall.
 
 **Envelope (v5).** Between adapters every LZ message body is
 `abi.encode(bytes32 srcSender, bytes32 dstAddr, bytes payload)`
-(`LayerZeroOmniMessenger.sol:90-94`). The receiving EVM adapter downcasts
-only the local target (`"LZM: bad target"`, `:119`) and passes `srcSender`
+(`LayerZeroOmniMessenger.sol:_packet`). The receiving EVM adapter downcasts
+only the local target (`"LZM: bad target"`, `lzReceive`) and passes `srcSender`
 wide; the Solana program encodes/decodes the identical layout
 (`msg_codec.rs::Envelope`, cross-proven by the `envelopes` section of
 `solana/tests/codec-vectors.json`).
 
-Delivery is **unordered** (`nextNonce` returns 0, `:133-135`); every
+Delivery is **unordered** (`nextNonce` returns 0); every
 message must therefore be self-contained. See Finding F-2 for the one
 ordering race this leaves.
 
@@ -153,9 +283,12 @@ Invariants an auditor should try to break:
 - **S2 (ledger ≡ reality):** for every spoke chain `c`,
   `supplyByChain[token][c] =` that chain's replica `totalSupply()`
   — up to the Solana dust noted in Finding F-4.
-- **S3:** `supplyByChain[token][HUB_CHAIN] == 0` today (no hub-local trading
-  entry point exists); the `_distributeHolders` hub branch
-  (`SpawnPad.sol:405-410`) is therefore currently dead code.
+- **S3:** `supplyByChain[token][HUB_CHAIN] == 0` always. Hub-local trading
+  (v7) does not go through label 0: the hub chain's users trade through
+  their own gateway, label 3, like any other chain's (`supplyByChain[token][3]`
+  = Base's replica supply, S2). The `_distributeHolders` hub branch
+  (`SpawnPad.sol:_distributeHolders`, the `HUB_CHAIN` share) therefore
+  remains dead code, as does the hub's own `FeeDistributor`.
 - **S4 (no spoke-to-spoke path):** replicas cannot move between spokes
   except through a hub sell + re-buy, so `_sell`'s unchecked-looking
   subtraction cannot underflow while S2 holds.
@@ -383,9 +516,13 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 | No pause switch, no per-token or global rate limits on messages | AUDIT SCOPE (absence is the finding; mainnet adds them) |
 | Unordered delivery + LZ retry as the only ordering backstop | AUDIT SCOPE (see F-2) |
 | `FeeDistributor` 2^128 magnitude edge | AUDIT SCOPE (quantify) |
-| Hub-chain local trading absent (S3 dead branch) | AUDIT SCOPE (dead code is attack surface) |
+| ~~Hub-chain local trading absent~~ | **RESOLVED in v7** — the hub chain has its own gateway (label 3) on the hub adapter's loopback (§3). What remains is the S3 dead branch (`HUB_CHAIN` share + the hub `FeeDistributor`): AUDIT SCOPE (dead code is attack surface) |
+| `OP_FEE_DROP` fan-out is not prepaid by anyone (v7 fee model) | AUDIT SCOPE + design decision before mainnet — each holders distribution sends one message per chain holding supply, paid by the hub tank; with `DIST_TRIGGER = $2` the shipping can exceed the drop. Options: raise the trigger, net the fan-out cost from the pot, or make distribution a user-paid pull |
+| `returnUnit` / `tradeLegs` / `spawnLegs` are admin-set estimates of a moving price | AUDIT SCOPE as a liveness model — set too low the hub tank drains and replies stall (retryable, §3); set too high users overpay into the tank. Needs monitoring + a refresh routine; one `returnUnit` per destination means a spawn's SYNC legs are priced at the origin's unit, not each target's |
+| Gateway sponsorship is one admin flag | AUDIT SCOPE (hostile/mistaken admin) — sponsoring a gateway on mainnet reopens the dust-drain of its adapter's tank |
+| Solana program still pays its sends from a protocol GasTank and prepays no reply | must adopt the v7 fee model before a Solana mainnet leg (wire unchanged; the fee plumbing is transport-side) |
 | Frontend indexing by raw `eth_getLogs` scans | OUT OF SCOPE (ops; mainnet gets an indexer) |
-| LayerZero DVN/executor selection left at defaults | AUDIT SCOPE for mainnet config review |
+| LayerZero DVN/executor selection | adapters now set a delegate (v7), so the set CAN be chosen — and must be, at deploy time, per pathway and on both sides (§3). Until `endpoint.setConfig` is called the defaults apply. AUDIT SCOPE for mainnet config review |
 | Raydium/Meteora venue adapter | does not exist yet; OUT OF SCOPE until written |
 | Solana devnet deploy + live delivery | pending; everything local is test-proven |
 

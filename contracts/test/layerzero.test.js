@@ -33,13 +33,16 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
     expect(await world.endpoint.pending()).to.equal(1n)
     expect(await world.pad.tokensLength()).to.equal(0n)
 
-    // the executor lands OP_SPAWN -> genesis on the hub + 6 SYNC packets fan out
+    // the executor lands OP_SPAWN -> genesis on the hub. Base lives on the
+    // hub chain: its replica deploys in that same transaction (loopback).
+    // The five remote chains get a SYNC packet each.
     await (await world.endpoint.deliverNext()).wait()
     expect(await world.pad.tokensLength()).to.equal(1n)
-    expect(await world.endpoint.pending()).to.equal(6n)
+    expect(await world.endpoint.pending()).to.equal(5n)
 
     const token = await world.pad.allTokens(0)
     expect(await sol.gateway.replicaOf(token)).to.equal(ethers.ZeroAddress)
+    expect(await world.chains[2].gateway.replicaOf(token)).to.not.equal(ethers.ZeroAddress)
 
     await world.deliverAll()
     for (const c of world.chains) {
@@ -49,7 +52,7 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
 
   it('a buy settles in two async legs; curve, bag and supply stay exact', async () => {
     const token = await spawnVia(world.chains[0])
-    const base = world.chains[2]
+    const base = world.chains[5] // optimism — a remote chain, two real legs
     await fundUsd(base, user, 1_000)
     await (await base.gateway.connect(user).buyToken(token, E(100))).wait()
 
@@ -106,15 +109,17 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
     const rogue = await ethers.deployContract('LayerZeroOmniMessenger', [world.endpoint.target, 31_999])
     await (await world.endpoint.registerAdapter(rogue.target, 31_999)).wait()
     await (await rogue.setRoute(0, 30_000, ethers.zeroPadValue(world.hubMessenger.target, 32))).wait()
-    await (await rogue.register(user.address)).wait()
-    await (await user.sendTransaction({ to: rogue.target, value: E(1) })).wait()
+    await (await rogue.setDestination(0, 500_000, 0)).wait()
+    await (await rogue.register(user.address, 9)).wait()
     const payload = ethers.AbiCoder.defaultAbiCoder().encode(['uint8', 'bytes'], [2, '0x'])
-    await (await rogue.connect(user).send(0, ethers.zeroPadValue(world.pad.target, 32), payload)).wait()
+    await (
+      await rogue.connect(user).send(0, ethers.zeroPadValue(world.pad.target, 32), payload, 0, { value: world.FEE })
+    ).wait()
     await expect(world.endpoint.deliverNext()).to.be.revertedWith('LZM: not a peer')
 
     // and only registered protocol contracts may send at all
     await expect(
-      world.hubMessenger.connect(user).send(1, ethers.zeroPadValue(user.address, 32), '0x'),
+      world.hubMessenger.connect(user).send(1, ethers.zeroPadValue(user.address, 32), '0x', 0),
     ).to.be.revertedWith('LZM: unknown sender')
   })
 

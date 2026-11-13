@@ -5,6 +5,7 @@ import {IOmniMessenger, IOmniReceiver} from "./OmniMessenger.sol";
 import {OmniUSD} from "./OmniUSD.sol";
 import {SpawnToken} from "./SpawnToken.sol";
 import {FeeDistributor} from "./FeeDistributor.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title SpawnGateway — one per user-facing chain.
 /// @notice The gateway is the local face of the protocol: users spawn, buy and
@@ -19,7 +20,14 @@ import {FeeDistributor} from "./FeeDistributor.sol";
 /// message leaves. Money comes back through `OmniUSD.payout`: USDC when the
 /// local vault is liquid, an oUSD claim otherwise — never a revert. The
 /// gateway only ever moves funds of `msg.sender`.
-contract SpawnGateway is IOmniReceiver {
+///
+/// Messages are paid by the user who causes them (v7): every action is
+/// `payable` and forwards its native value to the messenger, which requires
+/// the quoted fee — the outbound message plus the hub's replies it triggers
+/// (`tradeLegs` for a buy/sell/claim, `spawnLegs` more for a spawn's SYNC
+/// fan-out). The `quote*` views return that fee exactly, before signing. A
+/// short fee reverts the whole call: nothing is burned or pulled.
+contract SpawnGateway is IOmniReceiver, ReentrancyGuard {
     uint32 public constant HUB_CHAIN = 0;
 
     uint8 internal constant OP_SPAWN = 1;
@@ -43,7 +51,16 @@ contract SpawnGateway is IOmniReceiver {
     /// hub token address -> native replica on this chain
     mapping(address => SpawnToken) public replicaOf;
 
+    /// Replies the hub sends back because of one message from this chain,
+    /// prepaid by the user: `tradeLegs` for the DELIVER / PAYOUT of a buy,
+    /// sell or claim (1 on a remote chain, 0 on the hub's own chain where
+    /// the reply is a free local call), `spawnLegs` for the SYNC fan-out of
+    /// a spawn (the number of REMOTE chains the hub must reach).
+    uint8 public tradeLegs;
+    uint8 public spawnLegs;
+
     event ReplicaDeployed(address indexed hubToken, address replica, string name, string symbol);
+    event LegsSet(uint8 tradeLegs, uint8 spawnLegs);
 
     constructor(IOmniMessenger _messenger, OmniUSD _usd, uint32 _chainLabel, address _pad) {
         // A gateway settles real dollars: wiring it to a ledger-mode oUSD
@@ -60,6 +77,13 @@ contract SpawnGateway is IOmniReceiver {
         require(msg.sender == admin, "GW: not admin");
         require(address(distributor) == address(0), "GW: distributor set");
         distributor = d;
+    }
+
+    function setLegs(uint8 trade, uint8 spawn) external {
+        require(msg.sender == admin, "GW: not admin");
+        tradeLegs = trade;
+        spawnLegs = spawn;
+        emit LegsSet(trade, spawn);
     }
 
     /* ------------------------- user actions ------------------------- */
@@ -84,7 +108,7 @@ contract SpawnGateway is IOmniReceiver {
         string calldata metaURI,
         uint256 devBuyUsd,
         uint8 feeMode
-    ) external {
+    ) external payable nonReentrant {
         if (devBuyUsd > 0) usd.bridgeBurn(msg.sender, devBuyUsd);
         _sendSpawn(name, symbol, metaURI, devBuyUsd, feeMode);
     }
@@ -96,7 +120,7 @@ contract SpawnGateway is IOmniReceiver {
         string calldata metaURI,
         uint256 devBuyUsdc,
         uint8 feeMode
-    ) external {
+    ) external payable nonReentrant {
         uint256 devBuyUsd = devBuyUsdc > 0 ? usd.depositFor(msg.sender, devBuyUsdc) : 0;
         _sendSpawn(name, symbol, metaURI, devBuyUsd, feeMode);
     }
@@ -108,22 +132,34 @@ contract SpawnGateway is IOmniReceiver {
         uint256 devBuyUsd,
         uint8 feeMode
     ) internal {
-        messenger.send(
+        messenger.send{value: msg.value}(
             HUB_CHAIN,
             _b32(pad),
             // creator rides as bytes32; the hub consumes it as an address
-            abi.encode(OP_SPAWN, abi.encode(_b32(msg.sender), name, symbol, metaURI, devBuyUsd, feeMode))
+            abi.encode(OP_SPAWN, abi.encode(_b32(msg.sender), name, symbol, metaURI, devBuyUsd, feeMode)),
+            _spawnLegs(devBuyUsd > 0)
         );
     }
 
+    /// A spawn makes the hub SYNC every remote chain, and a dev buy adds the
+    /// DELIVER that brings the creator's bag home.
+    function _spawnLegs(bool withDevBuy) internal view returns (uint256) {
+        return uint256(spawnLegs) + (withDevBuy ? tradeLegs : 0);
+    }
+
     /// The dev claims their accrued fee share; the pad pays out on THIS chain.
-    function claimFees(address hubToken) external {
+    function claimFees(address hubToken) external payable nonReentrant {
         // token id + claimer ride as bytes32 (wire convention)
-        messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_CLAIM, abi.encode(_b32(hubToken), _b32(msg.sender))));
+        messenger.send{value: msg.value}(
+            HUB_CHAIN,
+            _b32(pad),
+            abi.encode(OP_CLAIM, abi.encode(_b32(hubToken), _b32(msg.sender))),
+            tradeLegs
+        );
     }
 
     /// Buy with oUSD already held (18 decimals).
-    function buyToken(address hubToken, uint256 usdIn) external {
+    function buyToken(address hubToken, uint256 usdIn) external payable nonReentrant {
         require(usdIn > 0, "GW: zero");
         _requireKnown(hubToken);
         usd.bridgeBurn(msg.sender, usdIn);
@@ -131,7 +167,7 @@ contract SpawnGateway is IOmniReceiver {
     }
 
     /// Buy with USDC (6 decimals), pulled into this chain's vault.
-    function buyTokenUsdc(address hubToken, uint256 usdcIn) external {
+    function buyTokenUsdc(address hubToken, uint256 usdcIn) external payable nonReentrant {
         require(usdcIn > 0, "GW: zero");
         _requireKnown(hubToken);
         _sendBuy(hubToken, usd.depositFor(msg.sender, usdcIn));
@@ -146,20 +182,69 @@ contract SpawnGateway is IOmniReceiver {
 
     function _sendBuy(address hubToken, uint256 usdIn) internal {
         // token id + buyer ride as bytes32 (wire convention)
-        messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn)));
+        messenger.send{value: msg.value}(
+            HUB_CHAIN,
+            _b32(pad),
+            abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn)),
+            tradeLegs
+        );
     }
 
-    function sellToken(address hubToken, uint256 tokens) external {
+    function sellToken(address hubToken, uint256 tokens) external payable nonReentrant {
         require(tokens > 0, "GW: zero");
         SpawnToken rep = replicaOf[hubToken];
         require(address(rep) != address(0), "GW: no replica");
         rep.bridgeBurn(msg.sender, tokens);
         // token id + seller ride as bytes32 (wire convention)
-        messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens)));
+        messenger.send{value: msg.value}(
+            HUB_CHAIN,
+            _b32(pad),
+            abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens)),
+            tradeLegs
+        );
+    }
+
+    /* ---------------------------- quotes ---------------------------- */
+
+    /// The native fee each action requires right now — call before signing
+    /// and attach the result as msg.value. BUY, SELL and CLAIM payloads have
+    /// a fixed size, so a placeholder payload quotes exactly; a SPAWN's size
+    /// depends on its strings, so its quote takes them.
+
+    function quoteBuy() external view returns (uint256) {
+        return _quote(abi.encode(OP_BUY, abi.encode(bytes32(0), bytes32(0), uint256(0))), tradeLegs);
+    }
+
+    function quoteSell() external view returns (uint256) {
+        return _quote(abi.encode(OP_SELL, abi.encode(bytes32(0), bytes32(0), uint256(0))), tradeLegs);
+    }
+
+    function quoteClaim() external view returns (uint256) {
+        return _quote(abi.encode(OP_CLAIM, abi.encode(bytes32(0), bytes32(0))), tradeLegs);
+    }
+
+    function quoteSpawn(
+        string calldata name,
+        string calldata symbol,
+        string calldata metaURI,
+        bool withDevBuy
+    ) external view returns (uint256) {
+        return
+            _quote(
+                abi.encode(OP_SPAWN, abi.encode(bytes32(0), name, symbol, metaURI, uint256(0), uint8(0))),
+                _spawnLegs(withDevBuy)
+            );
+    }
+
+    function _quote(bytes memory payload, uint256 legs) internal view returns (uint256) {
+        return messenger.quote(HUB_CHAIN, _b32(pad), payload, legs);
     }
 
     /* -------------------------- messaging -------------------------- */
 
+    /// NOT nonReentrant on purpose: on the hub's own chain the messenger is
+    /// a loopback, so the pad's reply re-enters here while the user's call
+    /// above is still on the stack. Authentication is the two checks below.
     function onOmniMessage(uint32 srcChain, bytes32 srcSender, bytes calldata payload) external {
         require(msg.sender == address(messenger), "GW: not messenger");
         require(srcChain == HUB_CHAIN && srcSender == _b32(pad), "GW: not the pad");

@@ -266,7 +266,7 @@ describe('SPAWN! omnichain protocol', () => {
     await expect(
       world.chains[0].gateway.connect(user).onOmniMessage(0, b32(user.address), payload),
     ).to.be.revertedWith('GW: not messenger')
-    await expect(world.messenger.connect(user).send(0, b32(world.pad.target), payload)).to.be.revertedWith(
+    await expect(world.messenger.connect(user).send(0, b32(world.pad.target), payload, 0)).to.be.revertedWith(
       'LOM: unknown sender',
     )
   })

@@ -1,29 +1,38 @@
 /**
- * First real cross-chain smoke test, over live LayerZero V2 testnets.
- * Run on a SPOKE network once it is deployed and wired:
+ * Live smoke test over the real LayerZero V2 testnets, v7 paths end to end
+ * with (mock) USDC. Run it on any deployed network:
  *
- *   npx hardhat run scripts/testnet-smoke.js --network optimismSepolia
+ *   npx hardhat run scripts/testnet-smoke.js --network optimismSepolia   # a remote chain
+ *   npx hardhat run scripts/testnet-smoke.js --network baseSepolia       # the hub chain (local trading)
  *
- * It spawns a token from this spoke, waits for LayerZero to land OP_SPAWN
- * on the Base Sepolia hub and for the replica to sync back, then exercises
- * the v7 real-money paths end to end with (mock) USDC:
+ * On a REMOTE chain it spawns a token from this spoke, waits for LayerZero
+ * to land OP_SPAWN on the hub and for the replica to sync back, then:
  *   - `buyTokenUsdc` for $260 inside the FAIR GENESIS window — the $250 cap
  *     clamps it, and the $10 REFUND leg must come home as USDC;
  *   - sells half the bag — the PAYOUT leg must come home as USDC.
  * Expect minutes, not seconds.
+ *
+ * On the HUB chain the same sequence runs through the loopback: every step
+ * settles inside its own transaction, with no LayerZero message — only the
+ * spawn's SYNC fan-out to the remote chains leaves the hub.
+ *
+ * Fees (v7): when the gateway is not sponsored the script attaches the
+ * exact `quote*` fee to every call, like a mainnet user would.
  */
 const fs = require('fs')
 const path = require('path')
 const { ethers, network } = require('hardhat')
 
 const FILE = path.join(__dirname, '..', 'deployments', 'testnet.json')
+const HUB_NET = 'baseSepolia'
 const HUB_RPC = 'https://sepolia.base.org'
+const POLL_MS = Number(process.env.SMOKE_POLL_MS ?? 10_000)
 const E = (n) => ethers.parseEther(String(n))
 const U = (n) => ethers.parseUnits(String(n), 6)
 const SCALE = 10n ** 12n // one USDC unit in oUSD wei
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-async function waitFor(what, fn, tries = 90, everyMs = 10_000) {
+async function waitFor(what, fn, tries = 90, everyMs = POLL_MS) {
   for (let i = 0; i < tries; i++) {
     const v = await fn().catch(() => undefined)
     if (v) return v
@@ -35,39 +44,58 @@ async function waitFor(what, fn, tries = 90, everyMs = 10_000) {
 
 async function main() {
   const all = JSON.parse(fs.readFileSync(FILE, 'utf8'))
-  const spoke = all[network.name]
-  const hub = all.baseSepolia
-  if (!spoke?.gateway) throw new Error(`spoke not deployed on ${network.name}`)
-  if (!hub?.pad) throw new Error('hub not deployed on baseSepolia')
-  if (!spoke.usdc) throw new Error(`${network.name} is a pre-v7 deployment (no USDC vault) — redeploy v7 first`)
+  const me = all[network.name]
+  const hub = all[HUB_NET]
+  const local = network.name === HUB_NET
+  if (!hub?.pad) throw new Error(`hub not deployed on ${HUB_NET}`)
+  if (!me?.gateway) throw new Error(`no gateway deployed on ${network.name}`)
+  if (me.transport !== 'v7' || !me.usdc) {
+    throw new Error(`${network.name} is a pre-v7 deployment — redeploy v7 first`)
+  }
+  const usdAddr = local ? me.localUsd : me.usd
 
   const [dev] = await ethers.getSigners()
-  const usd = await ethers.getContractAt('OmniUSD', spoke.usd)
-  const usdc = await ethers.getContractAt('MockUSDC', spoke.usdc)
-  const gw = await ethers.getContractAt('SpawnGateway', spoke.gateway)
-  const hubProvider = new ethers.JsonRpcProvider(HUB_RPC)
+  const usd = await ethers.getContractAt('OmniUSD', usdAddr)
+  const usdc = await ethers.getContractAt('MockUSDC', me.usdc)
+  const gw = await ethers.getContractAt('SpawnGateway', me.gateway)
+  const adapter = await ethers.getContractAt('LayerZeroOmniMessenger', me.adapter)
+  // on the hub network the pad is right here; from a spoke it is read over the hub RPC
+  const hubProvider = local ? ethers.provider : new ethers.JsonRpcProvider(HUB_RPC)
   const padAbi = (await ethers.getContractFactory('SpawnPad')).interface
   const pad = new ethers.Contract(hub.pad, padAbi, hubProvider)
 
-  // sanity: both adapters need fee money for LayerZero
+  // who pays: a sponsored gateway rides its adapter's tank, otherwise the
+  // caller attaches the quoted fee
+  const sponsored = await adapter.sponsored(me.gateway)
+  const fee = async (quote) => (sponsored ? 0n : await quote)
   const hubTank = await hubProvider.getBalance(hub.adapter)
-  const spokeTank = await ethers.provider.getBalance(spoke.adapter)
-  console.log(`gas tanks — hub: ${ethers.formatEther(hubTank)} ETH, ${network.name}: ${ethers.formatEther(spokeTank)} ETH`)
-  if (hubTank === 0n || spokeTank === 0n) throw new Error('a gas tank is empty — fund the adapters first (deploy-testnet tops them up)')
+  const myTank = await ethers.provider.getBalance(me.adapter)
+  console.log(
+    `gas tanks — hub: ${ethers.formatEther(hubTank)} ETH, ${network.name}: ${ethers.formatEther(myTank)} ETH` +
+      ` — gateway ${sponsored ? 'SPONSORED (tank pays)' : 'user-paid (fees attached)'}`,
+  )
+  if (hubTank === 0n || (sponsored && myTank === 0n)) {
+    throw new Error('a gas tank is empty — fund the adapters first (deploy-testnet tops them up)')
+  }
 
   // v7: money is (mock) USDC paid straight into this chain's vault
   if ((await usdc.balanceOf(dev.address)) < U(300)) {
     await (await usdc.mint(dev.address, U(1_000))).wait()
     console.log('✓ mock USDC minted')
   }
-  if ((await usdc.allowance(dev.address, spoke.usd)) < U(1_000)) {
-    await (await usdc.approve(spoke.usd, ethers.MaxUint256)).wait()
+  if ((await usdc.allowance(dev.address, usdAddr)) < U(1_000)) {
+    await (await usdc.approve(usdAddr, ethers.MaxUint256)).wait()
     console.log('✓ vault approved for USDC')
   }
 
   const before = await pad.tokensLength()
-  console.log(`spawning OMNI TEST ($OMNI) from ${network.name}…`)
-  await (await gw.spawnToken('OMNI TEST', 'OMNI', '{"smoke":true}', 0, 1)).wait()
+  const META = '{"smoke":true}'
+  const spawnFee = await fee(gw.quoteSpawn('OMNI TEST', 'OMNI', META, false))
+  console.log(
+    `spawning OMNI TEST ($OMNI) from ${network.name}${local ? ' (hub chain — loopback)' : ''}` +
+      ` — messaging fee ${ethers.formatEther(spawnFee)} ETH…`,
+  )
+  await (await gw.spawnToken('OMNI TEST', 'OMNI', META, 0, 1, { value: spawnFee })).wait()
 
   const token = await waitFor('OP_SPAWN on the hub', async () => {
     const len = await pad.tokensLength()
@@ -81,9 +109,12 @@ async function main() {
   })
   console.log('✓ replica deployed:', rep)
 
-  console.log('buying $260 of USDC cross-chain (FAIR GENESIS caps a wallet at $250)…')
+  const buyFee = await fee(gw.quoteBuy())
+  console.log(
+    `buying $260 of USDC (FAIR GENESIS caps a wallet at $250) — messaging fee ${ethers.formatEther(buyFee)} ETH…`,
+  )
   const usdcBefore = await usdc.balanceOf(dev.address)
-  await (await gw.buyTokenUsdc(token, U(260))).wait()
+  await (await gw.buyTokenUsdc(token, U(260), { value: buyFee })).wait()
   const repC = await ethers.getContractAt('SpawnToken', rep)
   const bal = await waitFor('token delivery', async () => {
     const b = await repC.balanceOf(dev.address)
@@ -109,7 +140,7 @@ async function main() {
   console.log('selling half the bag…')
   const usdcMid = await usdc.balanceOf(dev.address)
   const claimBefore = await usd.balanceOf(dev.address)
-  await (await gw.sellToken(token, bal / 2n)).wait()
+  await (await gw.sellToken(token, bal / 2n, { value: await fee(gw.quoteSell()) })).wait()
   const back = await waitFor('USDC payout', async () => {
     const b = await usdc.balanceOf(dev.address)
     return b > usdcMid ? b - usdcMid : undefined
@@ -122,7 +153,16 @@ async function main() {
   }
 
   console.log('hub spot price:', ethers.formatEther(await pad.spotPrice(token)))
-  console.log('🎉 CROSS-CHAIN SPAWN + USDC BUY + USDC PAYOUT OVER LIVE LAYERZERO — DONE')
+  const hubTankAfter = await hubProvider.getBalance(hub.adapter)
+  console.log(
+    `hub tank: ${ethers.formatEther(hubTank)} → ${ethers.formatEther(hubTankAfter)} ETH` +
+      ' (reply budgets in, reply fees out)',
+  )
+  console.log(
+    local
+      ? '🎉 HUB-LOCAL SPAWN + USDC BUY + USDC PAYOUT — EVERY STEP IN ONE TRANSACTION, NO LAYERZERO MESSAGE'
+      : '🎉 CROSS-CHAIN SPAWN + USDC BUY + USDC PAYOUT OVER LIVE LAYERZERO — DONE',
+  )
 }
 
 main().catch((e) => {
