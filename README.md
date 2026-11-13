@@ -12,13 +12,21 @@ A launchpad prototype where every meme token launches on **all six chains at onc
   10-minute snipe tax (30%→1%, paid to the token's fee stream) and a $250
   per-wallet cap make sniping fund the room instead of draining it.
 
-Three modes, same UI (toggle in the nav):
+Four modes, same UI (toggle in the nav):
 
-- **SIM** — in-browser market engine, zero setup.
-- **⛓ TESTNET** — the LIVE public beta at
+- **SIM** — in-browser market engine, zero setup, all six chains simulated.
+- **⛓ TESTNET** — the public beta at
   [spawn-multiverse.netlify.app](https://spawn-multiverse.netlify.app): the
-  hub on Base Sepolia, spokes on Optimism + Arbitrum Sepolia, real LayerZero
-  V2 messages, a gas drip for visitors, MetaMask or an instant burner wallet.
+  hub on Base Sepolia (which also trades locally, in one transaction), spokes
+  on Optimism + Arbitrum Sepolia over real LayerZero V2 messages, a gas drip
+  for visitors, MetaMask or an instant burner wallet, play USDC anyone can
+  mint.
+- **◉ MAINNET** — appears only once `public/onchain/mainnet.json` is
+  published. Real USDC, your own wallet only (no burner, no drip, no mint), a
+  one-time risk notice before the first transaction, a permanent "guarded
+  beta — unaudited" banner with each chain's deposit cap, and the network fee
+  shown before every signature. The page only names the chains the manifest
+  lists; the rest of the six are marked as coming.
 - **LOCAL** — the same Solidity protocol on a hardhat chain: every buy,
   sell and spawn is a transaction against the hub-and-spoke protocol in
   [contracts/](contracts/). Price discovery is a pluggable **venue module**
@@ -37,12 +45,22 @@ mainnet) · [solana/NOTES.md](solana/NOTES.md) (Solana leg log).
 npm run chain          # terminal 1 — local node
 npm run chain:deploy   # terminal 2 — deploy + seed the pit
 npm run chain:bots     # optional — live on-chain bot market
-npm run dev            # terminal 3 — flip the nav toggle to ⛓ ONCHAIN
+npm run dev            # terminal 3 — flip the nav toggle to LOCAL
 npm run chain:test     # contract invariants suite
 ```
 
-The money is fictional in both modes; the math (and in on-chain mode, the
-transactions) are not.
+The money is fictional in SIM, TESTNET and LOCAL; the math (and on-chain, the
+transactions) are not. In MAINNET mode the money is real.
+
+How money moves on-chain (protocol v7): you trade in **USDC**. Each chain has
+a vault — a buy approves the vault for the exact amount and puts USDC in, a
+sell or refund pays USDC out on the chain you sold from. If that chain's
+vault is short you receive **oUSD**, a 1:1 claim you unwrap once liquidity is
+back; holder rewards are paid in oUSD too. Every action attaches the network
+fee its `quote*` view returns (testnets sponsor it). On the hub chain a trade
+is one transaction; from another chain it crosses LayerZero and back. Holder
+fees arrive by themselves on the hub chain; elsewhere they wait on the hub
+until someone pulls them.
 
 ## The engine
 

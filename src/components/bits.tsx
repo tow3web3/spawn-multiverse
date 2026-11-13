@@ -1,4 +1,4 @@
-import { CHAINS } from '../lib/chains'
+import { useChainSet } from '../lib/liveChains'
 
 export function Sparkle({
   className = '',
@@ -41,9 +41,11 @@ export function ChainDots({ size = 'md' }: { size?: 'sm' | 'md' }) {
     size === 'sm'
       ? 'h-5 min-w-5 px-0.5 text-[8px] border-2'
       : 'h-7 min-w-7 px-1 text-[10px] border-2'
+  // only the chains this mode really runs (a deployment may run fewer than six)
+  const { live } = useChainSet()
   return (
     <div className="flex items-center -space-x-1">
-      {CHAINS.map((c) => (
+      {live.map((c) => (
         <span
           key={c.id}
           title={c.label}

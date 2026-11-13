@@ -1,15 +1,20 @@
 import { useState } from 'react'
 import { useStore } from '../store'
-import { CHAINS } from '../lib/chains'
 import { fmtPrice } from '../lib/format'
+import { useChainSet, type ChainSet } from '../lib/liveChains'
 import { Asterisk } from './bits'
 
-const STEPS = [
+/** The four pillars. The copy counts and names the chains this mode really
+ * runs — the simulation runs all six, a deployment runs what its manifest
+ * lists. */
+const steps = (cs: ChainSet) => [
   {
     num: '01',
     title: 'SPAWN ONCE',
     bg: '#c9f24b',
-    body: 'Upload an image, name your token, hit launch. One native deployment goes live on all six chains in a single coordinated genesis — no bridging, no wrapped versions, no knock-off contracts.',
+    body: `Upload an image, name your token, hit launch. One native deployment goes live on all ${cs.lower} chains ${
+      cs.soon.length ? 'from a single transaction' : 'in a single coordinated genesis'
+    } — no bridging, no wrapped versions, no knock-off contracts.`,
   },
   {
     num: '02',
@@ -21,7 +26,7 @@ const STEPS = [
     num: '03',
     title: 'ONE PRICE EVERYWHERE',
     bg: '#9ccbf5',
-    body: 'Every trade from every chain hits one global genesis curve, so your token costs the same on Solana, Ethereum, Base, BNB, Arbitrum and Optimism. Fill the curve and the token ascends to the omnipool.',
+    body: `Every trade from every chain hits one global genesis curve, so your token costs the same on ${cs.names}. Fill the curve and the token ascends to the omnipool.`,
   },
   {
     num: '04',
@@ -31,7 +36,7 @@ const STEPS = [
   },
 ]
 
-const MORE = [
+const more = (cs: ChainSet, onchain: boolean, hubChain: string | undefined) => [
   {
     title: 'WHY SNIPERS LOSE HERE',
     body: 'Three walls. The spawn block bounces every buy — refunded in full, block 0 does not exist. For 10 minutes a snipe tax decays 30%→1% and is routed like the token’s fees — to its holders, its dev, or the burn — so early snipes fund everyone else. And a $250 per-wallet cap keeps the opening human-sized. Sniping from another chain is structurally impossible anyway: a cross-chain buy takes minutes to arrive. The one disclosed exemption is the creator’s public dev buy at launch.',
@@ -46,19 +51,39 @@ const MORE = [
   },
   {
     title: 'YOUR BAG IS CHAIN-NATIVE',
-    body: 'Buy from Base and you hold real tokens ON Base — not an IOU. Sell them from the chain where they live. Across all six chains the total supply always adds up to exactly 1,000,000,000. Always.',
+    body: `Buy from Base and you hold real tokens ON Base — not an IOU. Sell them from the chain where they live. Across all ${cs.lower} chains the total supply always adds up to exactly 1,000,000,000. Always.`,
   },
   {
     title: 'FIXED RULES FOR EVERYONE',
     body: 'Supply is 1B for every token — not configurable, no hidden premine. The only head start anyone can get is a public dev buy at launch, visible to all. Pool liquidity belongs to the protocol forever: it can never be pulled.',
   },
+  // how real dollars and real messages behave — only where they exist
+  ...(onchain
+    ? [
+        {
+          title: 'YOUR DOLLARS ARE USDC',
+          body: 'You trade in USDC, and every chain keeps its own vault: a buy puts USDC in, a sell or a refund pays USDC out on the chain you sold from. If that chain’s vault is ever short you get oUSD instead — a 1:1 claim on the vault that you redeem once liquidity is rebalanced. Holder rewards are paid in oUSD too; spend it as it is or unwrap it.',
+        },
+        {
+          title: 'WHAT CROSSING CHAINS COSTS',
+          body: hubChain
+            ? `The market lives on ${hubChain}. Trade from ${hubChain} and it is one transaction: no bridge, no wait, no message fee. Trade from another chain and your order crosses LayerZero and comes back — a minute or three, and a network fee that pays the round trip, shown before you sign. Holder fees work the same way: at home they arrive by themselves; elsewhere they wait on the hub until someone pays to pull them.`
+            : 'Every order is a message to the one market and a message back. Whoever sends it pays for the round trip: a network fee shown before you sign.',
+        },
+      ]
+    : []),
 ]
 
 export function HowItWorks() {
-  const { creatures } = useStore()
-  const [more, setMore] = useState(false)
-  const gloop = creatures.find((c) => c.ticker === 'GLOOP')
-  const price = gloop ? fmtPrice(gloop.price) : '$0.0000412'
+  const { creatures, onchain } = useStore()
+  const cs = useChainSet()
+  const [open, setOpen] = useState(false)
+  // the proof strip quotes a real creature — never a made-up number on-chain
+  const ref =
+    creatures.find((c) => c.ticker === 'GLOOP') ?? [...creatures].sort((a, b) => b.mcap - a.mcap)[0]
+  const price = ref ? fmtPrice(ref.price) : onchain ? null : '$0.0000412'
+  const hubChain = cs.live.find((c) => onchain?.chainInfo?.[c.id]?.local)
+  const hubName = hubChain ? hubChain.label.charAt(0) + hubChain.label.slice(1).toLowerCase() : undefined
 
   return (
     <section id="how" className="scroll-mt-24 border-y-3 border-ink bg-ink py-16 text-white">
@@ -71,12 +96,12 @@ export function HowItWorks() {
             HOW IT WORKS<span className="text-lime">.</span>
           </h2>
           <p className="pb-2 font-mono text-[11px] font-bold tracking-wide text-white/50">
-            ONE GENESIS. SIX CHAINS. ZERO FRAGMENTATION.
+            ONE GENESIS. {cs.word} CHAIN{cs.count === 1 ? '' : 'S'}. ZERO FRAGMENTATION.
           </p>
         </div>
 
         <div className="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-          {STEPS.map((s) => (
+          {steps(cs).map((s) => (
             <div
               key={s.num}
               className="relative overflow-hidden rounded-2xl border-3 border-ink p-6 text-ink shadow-[6px_6px_0_0_rgba(201,242,75,0.35)] transition hover:-translate-y-1"
@@ -93,16 +118,16 @@ export function HowItWorks() {
         {/* deeper dive, on demand */}
         <div className="mt-8 text-center">
           <button
-            onClick={() => setMore((m) => !m)}
-            aria-expanded={more}
+            onClick={() => setOpen((m) => !m)}
+            aria-expanded={open}
             className="rounded-xl border-3 border-lime bg-transparent px-6 py-3 font-mono text-[12px] font-bold tracking-[0.15em] text-lime transition hover:bg-lime hover:text-ink"
           >
-            {more ? 'LESS ↑' : 'MORE ↓'}
+            {open ? 'LESS ↑' : 'MORE ↓'}
           </button>
         </div>
-        {more && (
+        {open && (
           <div className="mt-6 grid gap-4 md:grid-cols-2">
-            {MORE.map((m) => (
+            {more(cs, !!onchain, hubName).map((m) => (
               <div key={m.title} className="rounded-2xl border-2 border-white/15 bg-void p-5">
                 <h4 className="font-display text-lg tracking-wide text-lime">{m.title}</h4>
                 <p className="mt-2 text-[14px] font-medium leading-relaxed text-white/80">
@@ -114,36 +139,53 @@ export function HowItWorks() {
         )}
 
         {/* live proof strip */}
-        <div className="mt-10 rounded-2xl border-3 border-white/20 bg-void p-5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-lime">
-              LIVE PROOF // $GLOOP GLOBAL PRICE REFERENCE
-            </p>
-            <p className="font-mono text-[10px] font-bold tracking-wide text-white/40">
-              SAME NUMBER. SIX CHAINS. REFRESHED EVERY BLOCK-ISH.
-            </p>
-          </div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            {CHAINS.map((ch) => (
-              <div
-                key={ch.id}
-                className="rounded-xl border-2 border-white/15 bg-ink px-3 py-3 text-center"
-              >
-                <span
-                  className="mx-auto flex h-7 w-fit min-w-7 items-center justify-center rounded-full border-2 border-ink px-1 font-mono text-[10px] font-bold text-ink"
-                  style={{ background: ch.color }}
+        {price && (
+          <div className="mt-10 rounded-2xl border-3 border-white/20 bg-void p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-mono text-[10px] font-bold tracking-[0.2em] text-lime">
+                LIVE PROOF // ${ref?.ticker ?? 'GLOOP'} GLOBAL PRICE REFERENCE
+              </p>
+              <p className="font-mono text-[10px] font-bold tracking-wide text-white/40">
+                SAME NUMBER. {cs.word} CHAIN{cs.count === 1 ? '' : 'S'}. REFRESHED EVERY BLOCK-ISH.
+              </p>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {cs.live.map((ch) => (
+                <div
+                  key={ch.id}
+                  className="rounded-xl border-2 border-white/15 bg-ink px-3 py-3 text-center"
                 >
-                  {ch.short}
-                </span>
-                <p className="mt-2 font-mono text-[9px] font-bold tracking-wide text-white/40">
-                  {ch.label}
-                </p>
-                <p className="mt-1 font-mono text-[12px] font-bold text-lime">{price}</p>
-                <p className="mt-0.5 font-mono text-[8px] font-bold text-up">SYNCED ✓</p>
-              </div>
-            ))}
+                  <span
+                    className="mx-auto flex h-7 w-fit min-w-7 items-center justify-center rounded-full border-2 border-ink px-1 font-mono text-[10px] font-bold text-ink"
+                    style={{ background: ch.color }}
+                  >
+                    {ch.short}
+                  </span>
+                  <p className="mt-2 font-mono text-[9px] font-bold tracking-wide text-white/40">
+                    {ch.label}
+                  </p>
+                  <p className="mt-1 font-mono text-[12px] font-bold text-lime">{price}</p>
+                  <p className="mt-0.5 font-mono text-[8px] font-bold text-up">SYNCED ✓</p>
+                </div>
+              ))}
+              {cs.soon.map((ch) => (
+                <div
+                  key={ch.id}
+                  className="rounded-xl border-2 border-dashed border-white/15 px-3 py-3 text-center opacity-50"
+                >
+                  <span className="mx-auto flex h-7 w-fit min-w-7 items-center justify-center rounded-full border-2 border-white/30 px-1 font-mono text-[10px] font-bold text-white/60">
+                    {ch.short}
+                  </span>
+                  <p className="mt-2 font-mono text-[9px] font-bold tracking-wide text-white/40">
+                    {ch.label}
+                  </p>
+                  <p className="mt-1 font-mono text-[12px] font-bold text-white/40">—</p>
+                  <p className="mt-0.5 font-mono text-[8px] font-bold text-white/40">SOON</p>
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </section>
   )

@@ -1,13 +1,16 @@
 // Testnet gas drip: wets a visitor's burner wallet with a drop of ETH on the
-// spoke testnets so they can trade without hunting faucets. Testnet money
-// only; the one real guard is the balance check — an address that already
-// has gas gets nothing, so the same burner can't farm the drip.
+// user-facing testnets so they can trade without hunting faucets. Testnet
+// money only (it is never wired into a mainnet manifest); the one real guard
+// is the balance check — an address that already has gas gets nothing, so
+// the same burner can't farm the drip.
 import { createPublicClient, createWalletClient, http, isAddress, parseEther } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 
 const DROP = parseEther('0.0005')
 const ALREADY_WET = parseEther('0.0002')
 const CHAINS = [
+  // v7: the hub chain is a user-facing chain too (its own gateway, by loopback)
+  { id: 84532, name: 'base-sepolia', rpc: 'https://sepolia.base.org' },
   { id: 11155420, name: 'optimism-sepolia', rpc: 'https://sepolia.optimism.io' },
   { id: 421614, name: 'arbitrum-sepolia', rpc: 'https://sepolia-rollup.arbitrum.io/rpc' },
   { id: 11155111, name: 'ethereum-sepolia', rpc: 'https://ethereum-sepolia-rpc.publicnode.com' },

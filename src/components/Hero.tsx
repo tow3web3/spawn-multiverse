@@ -3,10 +3,11 @@ import { fmtMoney, fmtTokens } from '../lib/format'
 import { HeroCharts } from './LastLaunch'
 import { ChainLogo, CHAIN_LOGO_LABELS } from './ChainLogos'
 import { Asterisk } from './bits'
+import { useChainSet } from '../lib/liveChains'
 
-/** The whole pitch, scannable in five chips. */
-const FEATURES: { label: string; cls: string; bg?: string }[] = [
-  { label: '⛓ 6 CHAINS, 1 LAUNCH', cls: 'bg-ink text-lime' },
+/** The whole pitch, scannable in a few chips. */
+const FEATURES = (chains: number): { label: string; cls: string; bg?: string }[] => [
+  { label: `⛓ ${chains} CHAINS, 1 LAUNCH`, cls: 'bg-ink text-lime' },
   { label: '✳ ONE GLOBAL SUPPLY', cls: 'bg-white' },
   { label: '⚖ ONE PRICE EVERYWHERE', cls: '', bg: '#9ccbf5' },
   { label: '🛡 BLOCK 0 DOES NOT EXIST', cls: '', bg: '#f7a8ce' },
@@ -40,7 +41,11 @@ export function Hero({
   onOpenLab: () => void
   onOpenCreature: (num: number) => void
 }) {
-  const { creatures } = useStore()
+  const { creatures, onchain } = useStore()
+  const chainSet = useChainSet()
+  const liveIds = new Set(chainSet.live.map((c) => c.id))
+  const liveLogos = CHAIN_LOGO_LABELS.filter((c) => liveIds.has(c.id))
+  const soonLogos = CHAIN_LOGO_LABELS.filter((c) => !liveIds.has(c.id))
   const traded = creatures.reduce((a, c) => a + c.volume, 0)
   const burned = creatures.reduce((a, c) => a + (c.fees?.burnedTokens ?? 0), 0)
   const ascended = creatures.filter((c) => c.status === 'ascended').length
@@ -61,8 +66,24 @@ export function Hero({
 
         <div className="relative flex flex-wrap items-center gap-2">
           <span className="rounded-full border-2 border-ink bg-cream px-3 py-1 font-mono text-[10px] font-bold tracking-wide">
-            ✳ LIVE ON 6 CHAINS
+            ✳ LIVE ON {chainSet.count} CHAIN{chainSet.count === 1 ? '' : 'S'}
+            {chainSet.soon.length > 0 ? ` · ${chainSet.soon.length} MORE COMING` : ''}
           </span>
+          {onchain?.network === 'mainnet' && (
+            <span className="rounded-full border-2 border-ink bg-tang px-3 py-1 font-mono text-[10px] font-bold tracking-wide">
+              ◉ MAINNET — GUARDED BETA
+            </span>
+          )}
+          {onchain?.network === 'testnet' && (
+            <span className="rounded-full border-2 border-ink bg-white px-3 py-1 font-mono text-[10px] font-bold tracking-wide">
+              ⛓ TESTNET — PLAY MONEY
+            </span>
+          )}
+          {!onchain && (
+            <span className="rounded-full border-2 border-ink bg-white px-3 py-1 font-mono text-[10px] font-bold tracking-wide">
+              SIMULATION
+            </span>
+          )}
         </div>
 
         <h1 className="relative mt-4 font-display text-[clamp(2.4rem,5.5vw,4.6rem)] leading-[0.95] tracking-wide">
@@ -79,14 +100,16 @@ export function Hero({
         <p className="relative mt-4 max-w-md text-[15px] font-medium leading-relaxed">
           Launch once — your token goes live{' '}
           <mark className="bg-ink px-1.5 py-0.5 font-bold text-lime">
-            natively on all 6 chains
+            natively on all {chainSet.count} {chainSet.soon.length > 0 ? 'live ' : ''}chains
           </mark>{' '}
-          at the same second. No bridges, no wrapped copies.
+          {chainSet.soon.length > 0
+            ? 'from one transaction. No bridges, no wrapped copies.'
+            : 'at the same second. No bridges, no wrapped copies.'}
         </p>
 
         {/* the pitch, scannable */}
         <div className="relative mt-4 flex max-w-lg flex-wrap gap-2">
-          {FEATURES.map(({ label: l, cls, bg }) => (
+          {FEATURES(chainSet.count).map(({ label: l, cls, bg }) => (
             <span
               key={l}
               className={`rounded-full border-2 border-ink px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm ${cls}`}
@@ -124,7 +147,7 @@ export function Hero({
             LIVE ON
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
-            {CHAIN_LOGO_LABELS.map(({ id, label }) => (
+            {liveLogos.map(({ id, label }) => (
               <span
                 key={id}
                 className="flex items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm"
@@ -134,6 +157,27 @@ export function Hero({
               </span>
             ))}
           </div>
+          {/* chains of the design this deployment does not run yet — said plainly */}
+          {soonLogos.length > 0 && (
+            <>
+              <p className="mt-3 font-mono text-[10px] font-bold tracking-[0.2em] opacity-70">
+                COMING NEXT
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {soonLogos.map(({ id, label }) => (
+                  <span
+                    key={id}
+                    className="flex items-center gap-1.5 rounded-full border-2 border-dashed border-ink/50 px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide opacity-60"
+                  >
+                    <span className="grayscale">
+                      <ChainLogo id={id} size={16} />
+                    </span>
+                    {label} · SOON
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </div>
 

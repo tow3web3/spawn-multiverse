@@ -93,6 +93,9 @@ export interface Creature extends CreatureMeta {
 export interface Position {
   tokens: number
   cost: number
+  /** On-chain only: false when part of this bag was not bought through
+   * this browser, so its cost — and any PnL — is unknown here. */
+  costKnown?: boolean
 }
 
 export interface Wallet {
@@ -384,11 +387,56 @@ export interface SpawnInput {
   /** Dev buy riding inside the spawn itself — the one FAIR GENESIS
    * exemption (no block-0 rule, no snipe tax, no cap), disclosed in the UI. */
   devBuyUsd?: number
+  /** On-chain only: the chain the launch is submitted (and paid) from. */
+  chain?: string
 }
 
 export type TradeResult =
-  | { ok: true; usd: number; tokens: number; price: number; ascended: boolean }
+  | {
+      ok: true
+      usd: number
+      tokens: number
+      price: number
+      ascended: boolean
+      /** Something the trader should know about how it settled. */
+      note?: string
+      /** The message is still crossing chains — the figures are an estimate. */
+      pending?: boolean
+    }
   | { ok: false; reason: string }
+
+/** Which world an on-chain store is talking to. */
+export type NetworkProfile = 'local' | 'testnet' | 'mainnet'
+
+/** One user-facing chain, as the connected wallet sees it. */
+export interface ChainInfo {
+  id: string
+  /** The hub chain's own gateway: one-transaction trades, no messaging fee. */
+  local: boolean
+  /** The wallet's dollars here: USDC, plus oUSD claims on this chain's vault. */
+  usdc: number
+  ousd: number
+  /** Native gas balance, and its symbol. */
+  gas: number
+  nativeSymbol: string
+  /** The chain's USDC vault: what it holds and how much it may hold. */
+  liquidity: number
+  depositCap: number
+  depositsPaused: boolean
+  /** The gateway refuses new buys and launches (sells stay open). */
+  paused: boolean
+  /** Native messaging fee each action must attach (0 when sponsored). */
+  fee: { buy: number; sell: number; claim: number; pull: number }
+}
+
+/** Holder fees of one creature for the connected wallet (v7: accrue, then pull). */
+export interface HolderFees {
+  /** Claimable right now, per chain. */
+  claimable: Record<string, number>
+  /** Per remote chain: that chain's whole slice still waiting on the hub
+   * (`pot`) and the wallet's estimated share of it once pulled (`share`). */
+  waiting: Record<string, { pot: number; share: number }>
+}
 
 /** How the person signs in on-chain: a throwaway burner key held by the
  * browser, or an injected wallet extension (MetaMask & friends). */
@@ -410,17 +458,49 @@ export interface StoreValue {
   /** Present only in on-chain mode. */
   onchain?: {
     status: 'connecting' | 'ready' | 'offline'
-    airdrop: () => Promise<void>
-    /** Chain ids actually live on this deployment (testnet has fewer than 6). */
+    /** Local devnet, public testnet (play money) or mainnet (real USDC). */
+    network: NetworkProfile
+    /** The protocol's tank pays every message (testnets): no fee to attach. */
+    sponsored: boolean
+    /** Mints play USDC on every chain the wallet has gas on — testnets and
+     * the local devnet only; absent on mainnet. */
+    airdrop?: () => Promise<void>
+    /** Chain ids actually live on this deployment. */
     chains?: string[]
+    /** Per-chain balances, vault state and messaging fees. */
+    chainInfo?: Record<string, ChainInfo>
+    /** The hub refuses new buys and launches (they would be refunded). */
+    hubPaused?: boolean
     /** Which signer is active right now. */
     walletSource?: WalletSource
     /** Forget the session (keeps the burner key for later). */
     disconnect?: () => void
-    /** Unclaimed holder fee rewards (USD) per creature num, summed across live chains. */
+    /** Holder fee rewards claimable NOW (USD) per creature num, summed across chains. */
     holderRewards?: Record<number, number>
+    /** The same per chain, plus what still waits on the hub for a pull. */
+    holderFees?: Record<number, HolderFees>
     /** Claim this creature's holder rewards on every chain holding any; returns USD claimed. */
     claimHolderRewards?: (num: number) => Promise<number>
+    /** Bring one chain's waiting holder fees home (a paid cross-chain message). */
+    pullHolderFees?: (num: number, chain: string) => Promise<{ ok: boolean; reason?: string }>
+    /** Where each bag lives: creature num -> chain -> tokens. A sell only
+     * reaches the bag of the chain it is sent from. */
+    bags?: Record<number, Record<string, number>>
+    /** Tokens delivered before their replica existed: creature num -> chain -> amount. */
+    parked?: Record<number, Record<string, number>>
+    claimParked?: (num: number, chain: string) => Promise<number>
+    /** Turn the wallet's oUSD claims on a chain back into USDC; returns USDC received. */
+    unwrap?: (chain: string) => Promise<number>
+    /** The native fee a launch from `chain` must attach right now. */
+    quoteSpawnFee?: (input: SpawnInput, chain: string) => Promise<number>
+    /** Mainnet only: the one-time risk notice gating every transaction. */
+    risk?: {
+      accepted: boolean
+      open: boolean
+      show: () => void
+      accept: () => void
+      dismiss: () => void
+    }
     /** FAIR GENESIS (v6): per creature num, the hub's live window state for
      * the connected wallet — absent on pre-v6 deployments. */
     fairGenesis?: Record<number, { endsAt: number; spentUsd: number; capUsd: number }>

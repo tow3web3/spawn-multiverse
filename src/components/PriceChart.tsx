@@ -35,7 +35,11 @@ export function PriceChart({
     const pts = points.length > 0 ? points : [{ ts: now, price: 0 }]
     const last = pts[pts.length - 1]
     // Extend flat to "now" so the line always reaches the right edge.
-    return last.ts < now - 1500 ? [...pts, { ts: now, price: last.price }] : pts
+    if (last.ts < now - 1500) return [...pts, { ts: now, price: last.price }]
+    // Every point in one instant (a spawn and its dev buy share a block)
+    // has no width to draw: give the last price a second of flat line.
+    if (last.ts - pts[0].ts < 1) return [...pts, { ts: last.ts + 1000, price: last.price }]
+    return pts
   }, [points, now])
 
   const t0 = data[0].ts

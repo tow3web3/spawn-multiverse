@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useStore, shortAddr } from '../store'
 import { fmtMoney, fmtPrice, fmtTokens, fmtUsd } from '../lib/format'
+import { useChainSet } from '../lib/liveChains'
 import { CreatureArt } from './CreatureCard'
 import { FEE_LABEL } from './TokenPage'
 
@@ -15,9 +16,12 @@ export function DevDashboard({
   onOpenLab: () => void
   onBack: () => void
 }) {
-  const { mode, creatures, wallet, connect, claimFees } = useStore()
+  const { mode, creatures, wallet, connect, claimFees, onchain } = useStore()
+  const chainSet = useChainSet()
   const [busyNum, setBusyNum] = useState<number | null>(null)
   const [claimed, setClaimed] = useState<Record<number, number>>({})
+  /** Claims the hub turned down (it refuses instead of reverting). */
+  const [refused, setRefused] = useState<Record<number, boolean>>({})
   const [connecting, setConnecting] = useState(false)
 
   const mine = wallet
@@ -35,9 +39,15 @@ export function DevDashboard({
   const doClaim = async (num: number) => {
     if (!claimFees || busyNum !== null) return
     setBusyNum(num)
+    setRefused((m) => ({ ...m, [num]: false }))
     try {
       const got = await claimFees(num)
       if (got > 0) setClaimed((m) => ({ ...m, [num]: got }))
+      // on-chain a claim never reverts: 0 back means the hub refused it
+      // (or the risk notice is still unread on mainnet)
+      else if (mode === 'chain' && onchain?.risk?.accepted !== false) setRefused((m) => ({ ...m, [num]: true }))
+    } catch {
+      setRefused((m) => ({ ...m, [num]: true }))
     } finally {
       setBusyNum(null)
     }
@@ -62,7 +72,7 @@ export function DevDashboard({
       </h1>
       <p className="mt-2 max-w-xl font-mono text-[11px] font-bold leading-relaxed opacity-55">
         YOUR LAUNCHES, YOUR FEE STREAMS, YOUR CLAIMS. REMEMBER: YOU LAUNCHED FROM ONE CHAIN
-        WITH ONE GAS TOKEN — SPAWN! DEPLOYED TO ALL SIX.
+        WITH ONE GAS TOKEN — SPAWN! DEPLOYED TO ALL {chainSet.word}.
       </p>
 
       {!wallet ? (
@@ -188,6 +198,11 @@ export function DevDashboard({
                             +{fmtUsd(claimed[c.num])} IN YOUR WALLET ✓
                           </p>
                         )}
+                        {refused[c.num] && claimed[c.num] === undefined && (
+                          <p className="mt-1 font-mono text-[9px] font-bold text-down">
+                            NOTHING WAS PAID — THE HUB REFUSED THE CLAIM.
+                          </p>
+                        )}
                       </div>
                     ) : (
                       <p className="font-mono text-[9px] font-bold tracking-wide opacity-45">
@@ -203,8 +218,12 @@ export function DevDashboard({
           </div>
 
           {mode === 'chain' && (
-            <p className="mt-4 text-center font-mono text-[9px] font-bold tracking-wide opacity-45">
-              ON-CHAIN MODE: FEE ROUTING IS RECORDED AT LAUNCH — CLAIMS LAND WITH PROTOCOL V2.
+            <p className="mt-4 text-center font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-45">
+              A CLAIM IS SENT FROM THE FIRST CHAIN YOUR WALLET HAS GAS ON (THE HUB CHAIN FIRST: IT
+              IS INSTANT) AND PAYS OUT THERE IN USDC.
+              {onchain?.sponsored
+                ? ''
+                : ' FROM ANOTHER CHAIN IT CROSSES LAYERZERO — A FEW MINUTES AND A NETWORK FEE.'}
             </p>
           )}
         </>

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { useStore, type Creature } from '../store'
+import { useChainSet } from '../lib/liveChains'
 import { CreatureCard } from './CreatureCard'
 
 export type PitTab = 'all' | 'hot' | 'new' | 'ascended'
@@ -52,7 +53,8 @@ export function ThePit({
   onOpenCreature: (num: number) => void
   onOpenLab: () => void
 }) {
-  const { creatures, justSpawned } = useStore()
+  const { creatures, justSpawned, onchain } = useStore()
+  const chainSet = useChainSet()
   const searchRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -101,10 +103,14 @@ export function ThePit({
           <p className="text-[15px] font-semibold leading-snug">
             Freshly spawned. Ferociously unhinged.
             <br />
-            Every token starts its life across all six chains.
+            Every token starts its life across all {chainSet.lower} chains.
           </p>
           <p className="mt-1 font-mono text-[10px] font-bold tracking-wide opacity-50">
-            ALL PRICES &amp; TRADES ARE DEMO DATA.
+            {!onchain
+              ? 'ALL PRICES & TRADES ARE DEMO DATA.'
+              : onchain.network === 'mainnet'
+                ? 'REAL TOKENS, REAL USDC. ANYONE CAN LAUNCH ANYTHING — NOT ADVICE.'
+                : 'REAL CONTRACTS, PLAY MONEY.'}
           </p>
         </div>
       </div>

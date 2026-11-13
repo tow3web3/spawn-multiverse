@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks, type FeeMode } from '../store'
-import { CHAINS } from '../lib/chains'
+import { useChainSet } from '../lib/liveChains'
 import { fmtNum, fmtPrice } from '../lib/format'
 import { cleanLinks, LINK_META } from '../lib/links'
 import { Sparkle } from './bits'
@@ -38,8 +38,10 @@ export function GenesisLab({
   onClose: () => void
   onSpawned: (num: number) => void
 }) {
-  const { spawn, connect, onchain } = useStore()
-  const liveChains = onchain?.chains ? CHAINS.filter((c) => onchain.chains!.includes(c.id)) : CHAINS
+  const { spawn, connect, wallet, onchain } = useStore()
+  const chainSet = useChainSet()
+  const liveChains = chainSet.live
+  const info = onchain?.chainInfo
   const [name, setName] = useState('')
   const [ticker, setTicker] = useState('')
   const [image, setImage] = useState<string | null>(null)
@@ -49,12 +51,58 @@ export function GenesisLab({
   const [devBuyStr, setDevBuyStr] = useState('')
   const [busy, setBusy] = useState(false)
   const [spawnErr, setSpawnErr] = useState<string | null>(null)
+  /** On-chain: the chain the launch is signed and paid from. */
+  const [fromChain, setFromChain] = useState<string | null>(null)
+  const [launchFee, setLaunchFee] = useState<number | null>(null)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  // default launch chain: the hub chain's own gateway (instant, and the only
+  // one whose launch crosses no bridge), else the first live chain
+  const from =
+    onchain && liveChains.length
+      ? (liveChains.find((c) => c.id === fromChain) ??
+        liveChains.find((c) => info?.[c.id]?.local) ??
+        liveChains[0])
+      : undefined
+  const fromInfo = from ? info?.[from.id] : undefined
+  const fromInstant = !!onchain && (onchain.network === 'local' || !!fromInfo?.local)
+  const devBuyNum = Number.parseFloat(devBuyStr) || 0
+
+  // the launch fee depends on the strings and on the dev buy: quote it live
+  const linksKey = JSON.stringify(cleanLinks(links))
+  useEffect(() => {
+    if (!onchain?.quoteSpawnFee || !from || onchain.status !== 'ready') return
+    if (onchain.sponsored) {
+      setLaunchFee(0)
+      return
+    }
+    let stale = false
+    const t = window.setTimeout(() => {
+      void onchain.quoteSpawnFee!(
+        {
+          name: name.trim() || 'TURBO PICKLE',
+          ticker: ticker.trim() || 'PICKL',
+          image: '',
+          links: cleanLinks(links),
+          feeMode,
+          devBuyUsd: devBuyNum,
+        },
+        from.id,
+      )
+        .then((fee) => !stale && setLaunchFee(fee))
+        .catch(() => !stale && setLaunchFee(null))
+    }, 350)
+    return () => {
+      stale = true
+      window.clearTimeout(t)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onchain?.status, onchain?.sponsored, from?.id, name, ticker, linksKey, feeMode, devBuyNum > 0])
 
   const previewName = (name.trim() || 'TURBO PICKLE').toUpperCase()
   const previewTicker = (ticker.trim() || 'PICKL').toUpperCase()
@@ -76,11 +124,12 @@ export function GenesisLab({
     setSpawnErr(null)
     try {
       // The dev buy rides INSIDE the spawn — the one FAIR GENESIS exemption.
-      const devBuy = Number.parseFloat(devBuyStr) || 0
       let devBuyUsd = 0
-      if (devBuy > 0) {
-        const w = await connect()
-        devBuyUsd = Math.min(devBuy, w.balance)
+      if (devBuyNum > 0) {
+        const w = wallet ?? (await connect())
+        // the sim has one balance; on-chain the dev buy spends the launch
+        // chain's dollars and the provider says so if they fall short
+        devBuyUsd = onchain ? devBuyNum : Math.min(devBuyNum, w.balance)
       }
       const c = await spawn({
         name: name.trim(),
@@ -89,11 +138,17 @@ export function GenesisLab({
         links: cleanLinks(links),
         feeMode,
         devBuyUsd,
+        chain: from?.id,
       })
       onClose()
       onSpawned(c.num)
-    } catch {
-      setSpawnErr('SPAWN FAILED — IS THE LOCAL CHAIN RUNNING? CHECK THE NODE AND TRY AGAIN.')
+    } catch (e) {
+      const why = e instanceof Error && e.message ? e.message.split('\n')[0].slice(0, 160) : ''
+      setSpawnErr(
+        onchain
+          ? `SPAWN FAILED — ${(why || 'THE TRANSACTION DID NOT GO THROUGH').toUpperCase()}`
+          : 'SPAWN FAILED — TRY AGAIN.',
+      )
     } finally {
       setBusy(false)
     }
@@ -126,7 +181,8 @@ export function GenesisLab({
             </h2>
             <p className="pb-1 text-right font-mono text-[10px] font-bold tracking-wide opacity-70">
               STEP 01 / 01
-              <br />6 CHAINS = 1 LAUNCH
+              <br />
+              {chainSet.count} CHAINS = 1 LAUNCH
             </p>
           </div>
           <button
@@ -199,7 +255,7 @@ export function GenesisLab({
                 </span>
                 <span className="mt-1 block font-mono text-[10px] leading-relaxed text-white/40">
                   Click or drop it here. Square works best — this face follows your token onto
-                  all six chains.
+                  all {chainSet.lower} chains.
                 </span>
                 {imageError && (
                   <span className="mt-1 block font-mono text-[10px] font-bold text-down">
@@ -265,14 +321,64 @@ export function GenesisLab({
                 ))}
               </div>
               <span className="font-mono text-[11px] font-bold text-lime">
-                {liveChains.length} / 6 ACTIVATED ✓
+                {liveChains.length} / {liveChains.length + chainSet.soon.length} ACTIVATED ✓
               </span>
             </div>
+            {chainSet.soon.length > 0 && (
+              <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
+                Live on this deployment: {chainSet.names}. Coming:{' '}
+                {chainSet.soon.map((c) => c.label).join(', ')} — your token will not exist
+                there until they are switched on.
+              </p>
+            )}
             <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
               💡 You pay the launch on <span className="text-lime">ONE chain only</span> — the
-              one you launch from, with its gas token. SPAWN! deploys natively to the other
-              five. No 6 wallets, no 6 gas tokens.
+              one you launch from, with its gas token. SPAWN! deploys natively to
+              {chainSet.count > 2 ? ` the other ${chainSet.count - 1}` : ' the rest'}. No{' '}
+              {chainSet.count} wallets, no {chainSet.count} gas tokens.
             </p>
+
+            {/* on-chain: where the launch is signed from, and what it costs */}
+            {onchain && from && (
+              <>
+                <p className={`${label} mt-5`}>LAUNCH FROM</p>
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {liveChains.map((ch) => (
+                    <button
+                      key={ch.id}
+                      type="button"
+                      onClick={() => setFromChain(ch.id)}
+                      aria-pressed={from.id === ch.id}
+                      title={info?.[ch.id]?.local ? `${ch.label} — the hub chain: instant` : ch.label}
+                      className={`rounded-lg border-2 px-2.5 py-1.5 font-mono text-[10px] font-bold transition ${
+                        from.id === ch.id
+                          ? 'border-lime bg-lime text-ink'
+                          : 'border-white/25 text-white/60 hover:border-white/50'
+                      }`}
+                    >
+                      {ch.label}
+                      {info?.[ch.id]?.local ? ' ⚡' : ''}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
+                  {fromInstant
+                    ? onchain.network === 'local'
+                      ? 'Local devnet: the launch lands in one transaction.'
+                      : `${from.label} is the hub chain: your token exists there in one transaction, and reaches the other chains a minute or two later.`
+                    : `From ${from.label} the launch crosses LayerZero to the hub first: allow 1–3 minutes before it appears.`}{' '}
+                  <span className="text-lime">
+                    {onchain.sponsored
+                      ? 'Network fee: sponsored on this testnet — you only pay gas.'
+                      : launchFee === null
+                        ? 'Network fee: quoting…'
+                        : launchFee > 0
+                          ? `Network fee ≈ ${launchFee.toFixed(launchFee < 0.001 ? 6 : 5)} ${fromInfo?.nativeSymbol ?? 'ETH'} + gas — it pays the messages that create your token on the other chains${devBuyNum > 0 && !fromInstant ? ' and bring your dev buy home' : ''}. Not refundable.`
+                          : 'No network fee — you only pay gas.'}
+                  </span>
+                </p>
+              </>
+            )}
 
             <p className={`${label} mt-7`}>06 — WHO EATS THE 1% TRADING FEE?</p>
             <div className="mt-3 grid grid-cols-2 gap-2">
@@ -305,8 +411,8 @@ export function GenesisLab({
               ))}
             </div>
             <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
-              Locked at launch, forever. Fees from all six chains land in one global pot —
-              one market, one pot.
+              Locked at launch, forever. Fees from all {chainSet.lower} chains land in one
+              global pot — one market, one pot.
             </p>
 
             <p className={`${label} mt-7`}>07 — SNIPE YOUR OWN SPAWN (OPTIONAL)</p>
@@ -331,6 +437,11 @@ export function GenesisLab({
               block 0 accepts no buys, then for 10 minutes buys pay a snipe tax decaying 30%→1%
               (routed like your fees) with a $250 cap per wallet. Your dev buy rides inside the
               spawn itself and is the one disclosed exemption.
+              {onchain && from
+                ? ` It is paid in USDC from your ${from.label} balance${
+                    fromInfo && wallet ? ` ($${Math.max(fromInfo.usdc, fromInfo.ousd).toFixed(2)} available)` : ''
+                  }, approved for the exact amount.`
+                : ''}
             </p>
 
             <button
@@ -346,9 +457,15 @@ export function GenesisLab({
               </p>
             )}
             <p className="mt-3 font-mono text-[10px] leading-relaxed text-white/35">
-              {ready
-                ? 'Demo money only — in on-chain mode this submits real transactions to the local SPAWN! deployment.'
-                : 'Name it, tick it, give it a face — then the multiverse opens.'}
+              {!ready
+                ? 'Name it, tick it, give it a face — then the multiverse opens.'
+                : !onchain
+                  ? 'Simulation — demo money only, no transaction is submitted.'
+                  : onchain.network === 'mainnet'
+                    ? 'MAINNET — this submits a real transaction and spends real USDC and gas. Unaudited contracts: only what you can lose.'
+                    : onchain.network === 'testnet'
+                      ? 'Public testnet — real transactions, play money.'
+                      : 'Local devnet — real transactions against your own node, play money.'}
             </p>
           </div>
 
@@ -404,7 +521,7 @@ export function GenesisLab({
                   </span>
                 </div>
                 <p className="mt-1 font-mono text-[10px] font-bold tracking-wide opacity-50">
-                  ↗ 6 NATIVE DEPLOYMENTS · 1 TOTAL SUPPLY
+                  ↗ {chainSet.count} NATIVE DEPLOYMENTS · 1 TOTAL SUPPLY
                 </p>
               </div>
             </div>
@@ -413,7 +530,12 @@ export function GenesisLab({
               <p>CURVE START PRICE: {fmtPrice(START_PRICE)}</p>
               <p>GLOBAL SUPPLY: {fmtNum(GLOBAL_SUPPLY)} — PREDEFINED</p>
               <p>ASCENSION: CURVE → OMNIPOOL AT ~$86K MCAP</p>
-              <p>GLOBAL GENESIS: SIMULATED, NOT ATOMIC</p>
+              <p>
+                GLOBAL GENESIS:{' '}
+                {onchain
+                  ? 'ONE TRANSACTION, REPLICAS FOLLOW BY MESSAGE'
+                  : 'SIMULATED, NOT ATOMIC'}
+              </p>
             </div>
           </div>
         </div>

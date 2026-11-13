@@ -9,6 +9,7 @@ import {
 } from '../lib/format'
 import { Face } from './Faces'
 import { Asterisk, ChainDots, Sparkle } from './bits'
+import { useChainSet } from '../lib/liveChains'
 
 function StatusBadge({ c }: { c: Creature }) {
   if (c.status === 'ascended') {
@@ -57,6 +58,7 @@ export function CreatureCard({
   highlight: boolean
   onOpen: () => void
 }) {
+  const { count } = useChainSet()
   return (
     <article
       onClick={onOpen}
@@ -148,7 +150,7 @@ export function CreatureCard({
         <div className="mt-3 flex items-center justify-between border-t-2 border-dashed border-ink/25 pt-3">
           <ChainDots size="sm" />
           <span className="font-mono text-[9px] font-bold tracking-wide">
-            1 TOKEN · 6 CHAINS ↗
+            1 TOKEN · {count} CHAIN{count === 1 ? '' : 'S'} ↗
           </span>
         </div>
       </div>

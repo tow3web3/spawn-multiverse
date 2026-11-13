@@ -11,6 +11,7 @@ import {
   type FeeMode,
 } from '../store'
 import { CHAINS } from '../lib/chains'
+import { useChainSet } from '../lib/liveChains'
 import { LINK_META, linkHref } from '../lib/links'
 import {
   creatureNum,
@@ -46,10 +47,14 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
   const [side, setSide] = useState<Side>('buy')
   const [chain, setChain] = useState('solana')
-  // some deployments (testnet) run fewer than the 6 chains
-  const liveChains = onchain?.chains ? CHAINS.filter((c) => onchain.chains!.includes(c.id)) : CHAINS
+  // a deployment runs the chains its manifest lists (mainnet v1: three)
+  const chainSet = useChainSet()
+  const liveChains = chainSet.live
+  const info = onchain?.chainInfo
   useEffect(() => {
-    if (liveChains.length && !liveChains.some((c) => c.id === chain)) setChain(liveChains[0].id)
+    if (!liveChains.length || liveChains.some((c) => c.id === chain)) return
+    // start from the hub chain's own gateway when there is one: it is instant
+    setChain(liveChains.find((c) => info?.[c.id]?.local)?.id ?? liveChains[0].id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onchain?.chains?.join(), chain])
   const [usdStr, setUsdStr] = useState('50')
@@ -58,6 +63,9 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   const [busy, setBusy] = useState(false)
   const [claimBusy, setClaimBusy] = useState(false)
   const [claimedMsg, setClaimedMsg] = useState<string | null>(null)
+  /** Which holder-fee side action is running: `pull:<chain>` / `park:<chain>`. */
+  const [sideBusy, setSideBusy] = useState<string | null>(null)
+  const [sideMsg, setSideMsg] = useState<{ at: 'fees' | 'bag'; ok: boolean; text: string } | null>(null)
 
   useEffect(() => {
     window.scrollTo(0, 0)
@@ -72,7 +80,11 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
   const pos = wallet?.positions[num]
   const usd = Number.parseFloat(usdStr) || 0
-  const sellTokens = pos ? (pos.tokens * pct) / 100 : 0
+  // On-chain a bag is chain-native: a sell only reaches the tokens held on
+  // the chain it is sent from, so the percentage applies to THAT bag.
+  const bagsByChain = onchain?.bags?.[num]
+  const bagHere = onchain ? (bagsByChain?.[chain] ?? 0) : (pos?.tokens ?? 0)
+  const sellTokens = (bagHere * pct) / 100
   const amount = side === 'buy' ? usd : sellTokens
   const q = useMemo(
     () => getQuote(num, side, amount),
@@ -105,18 +117,38 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   const fgChain = onchain?.fairGenesis?.[num]
   const fgEndsAt = fgChain?.endsAt ?? c.spawnedAt + GENESIS_WINDOW_MS
   const fgActive = now < fgEndsAt
-  const fgTax = fgActive ? (SNIPE_MAX_RATE * (fgEndsAt - now)) / GENESIS_WINDOW_MS : 0
+  // never more than the whole window: a clock a few seconds off must not
+  // print a tax above the maximum
+  const fgRemaining = Math.min(GENESIS_WINDOW_MS, Math.max(0, fgEndsAt - now))
+  const fgTax = fgActive ? (SNIPE_MAX_RATE * fgRemaining) / GENESIS_WINDOW_MS : 0
   const fgSpent =
     fgChain?.spentUsd ??
     (wallet ? (market.genesisSpent?.get(wallet.address) ?? 0) : 0)
   const fgCap = fgChain?.capUsd ?? GENESIS_MAX_USD
   const fgRoom = Math.max(0, fgCap - fgSpent)
-  const fgLeft = Math.max(0, Math.ceil((fgEndsAt - now) / 1000))
+  const fgLeft = Math.ceil(fgRemaining / 1000)
   const fgCountdown = `${Math.floor(fgLeft / 60)}:${String(fgLeft % 60).padStart(2, '0')}`
+
+  // The selected chain, as the connected wallet sees it (on-chain modes).
+  const ci = info?.[chain]
+  /** A one-node devnet or the hub chain's own gateway: one transaction, no wait. */
+  const instant = !onchain || onchain.network === 'local' || !!ci?.local
+  const chainUsd = ci ? ci.usdc + ci.ousd : (wallet?.balance ?? 0)
+  // what the provider will attach: a live LayerZero quote gets 10% headroom
+  const rawFee = ci ? (side === 'buy' ? ci.fee.buy : ci.fee.sell) : 0
+  const netFee = instant ? rawFee : rawFee * 1.1
+  const buyBlocked = side === 'buy' && (!!onchain?.hubPaused || !!ci?.paused)
+  const fmtFee = (n: number) => `${n.toFixed(n < 0.001 ? 6 : 5)} ${ci?.nativeSymbol ?? 'ETH'}`
+
+  const hf = onchain?.holderFees?.[num]
+  const claimableNow = onchain?.holderRewards?.[num] ?? 0
+  const waiting = Object.entries(hf?.waiting ?? {}).filter(([, w]) => w.pot > 0.005)
+  const parked = Object.entries(onchain?.parked?.[num] ?? {}).filter(([, t]) => t > 0)
 
   const doTrade = async () => {
     if (busy) return
     setBusy(true)
+    setMsg(null)
     try {
       if (!wallet) {
         await connect()
@@ -125,13 +157,12 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
       }
       const r = await trade(num, side, amount, chain)
       if (r.ok) {
-        setMsg({
-          ok: true,
-          text:
-            side === 'buy'
-              ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
-              : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}`,
-        })
+        const head = r.pending
+          ? `${side === 'buy' ? 'BUY' : 'SELL'} SENT FROM ${chain.toUpperCase()} (≈ ${fmtTokens(r.tokens)} $${c.ticker})`
+          : side === 'buy'
+            ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
+            : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}`
+        setMsg({ ok: true, text: r.note ? `${head} · ${r.note}` : head })
       } else {
         setMsg({ ok: false, text: r.reason.toUpperCase() })
       }
@@ -139,6 +170,49 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
       setMsg({ ok: false, text: 'TRANSACTION FAILED — IS THE CHAIN RUNNING?' })
     } finally {
       setBusy(false)
+    }
+  }
+
+  const doPull = async (chainId: string) => {
+    if (sideBusy || !onchain?.pullHolderFees) return
+    setSideBusy(`pull:${chainId}`)
+    setSideMsg(null)
+    try {
+      const r = await onchain.pullHolderFees(num, chainId)
+      setSideMsg(
+        r.ok
+          ? {
+              at: 'fees',
+              ok: true,
+              text: `PULL SENT FROM ${chainId.toUpperCase()} — THE FEES LAND IN A FEW MINUTES, THEN CLAIM.`,
+            }
+          : { at: 'fees', ok: false, text: (r.reason ?? 'PULL FAILED').toUpperCase() },
+      )
+    } finally {
+      setSideBusy(null)
+    }
+  }
+
+  const doClaimParked = async (chainId: string) => {
+    if (sideBusy || !onchain?.claimParked) return
+    setSideBusy(`park:${chainId}`)
+    setSideMsg(null)
+    try {
+      const got = await onchain.claimParked(num, chainId)
+      if (got > 0)
+        setSideMsg({
+          at: 'bag',
+          ok: true,
+          text: `${fmtTokens(got)} $${c.ticker} DELIVERED ON ${chainId.toUpperCase()} ✓`,
+        })
+    } catch {
+      setSideMsg({
+        at: 'bag',
+        ok: false,
+        text: 'NOT YET — THE TOKEN IS STILL ARRIVING ON THAT CHAIN. TRY AGAIN IN A MINUTE.',
+      })
+    } finally {
+      setSideBusy(null)
     }
   }
 
@@ -247,7 +321,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
           <div className="rounded-2xl border-3 border-ink bg-void p-4 text-white shadow-brutal">
             <p className="font-mono text-[10px] font-bold tracking-[0.15em] text-lime">
               <span className="mr-1.5 inline-block h-2 w-2 animate-blink rounded-full bg-lime align-middle" />
-              GLOBAL PRICE — ONE CURVE, SIX CHAINS · LIVE
+              GLOBAL PRICE — ONE CURVE, {chainSet.word} CHAIN{chainSet.count === 1 ? '' : 'S'} · LIVE
             </p>
             <div className="mt-2">
               <PriceChart points={market.history} ascendedAt={market.ascendedAt} dark height="h-64" />
@@ -303,43 +377,87 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                       </div>
                     ))}
                   </div>
-                  {/* protocol v3: the connected wallet's slice of the holder stream */}
-                  {onchain?.claimHolderRewards &&
-                    ((onchain.holderRewards?.[num] ?? 0) > 0.005 || claimedMsg) && (
-                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border-2 border-ink bg-lime/40 px-3 py-2">
+                  {/* the connected wallet's slice of the holder stream: what is
+                      claimable on its chains right now… */}
+                  {onchain?.claimHolderRewards && (claimableNow > 0.005 || claimedMsg) && (
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border-2 border-ink bg-lime/40 px-3 py-2">
+                      <div>
+                        <p className="font-mono text-[8.5px] font-bold tracking-wide opacity-55">
+                          YOUR HOLDER REWARDS — CLAIMABLE NOW
+                        </p>
+                        <p className="font-mono text-[15px] font-bold">
+                          {claimedMsg ?? fmtUsd(claimableNow)}
+                        </p>
+                        <p className="font-mono text-[8px] font-bold tracking-wide opacity-45">
+                          PAID IN oUSD — SPEND IT AS-IS OR UNWRAP IT TO USDC IN YOUR PORTFOLIO
+                        </p>
+                      </div>
+                      {claimableNow > 0.005 && (
+                        <button
+                          onClick={() => {
+                            if (claimBusy) return
+                            setClaimBusy(true)
+                            setClaimedMsg(null)
+                            void onchain
+                              .claimHolderRewards!(num)
+                              .then((got) => setClaimedMsg(got > 0 ? `CLAIMED ${fmtUsd(got)} ✓` : null))
+                              .finally(() => setClaimBusy(false))
+                          }}
+                          disabled={claimBusy}
+                          className="rounded-xl border-3 border-ink bg-lime px-5 py-2.5 font-mono text-[11px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {claimBusy ? '✳ CLAIMING…' : 'CLAIM ↓'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {/* …and what still waits on the hub: a remote chain's slice
+                      only crosses when someone there pays to pull it */}
+                  {waiting.map(([chainId, w]) => {
+                    const fee = info?.[chainId]?.fee.pull ?? 0
+                    return (
+                      <div
+                        key={chainId}
+                        className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border-2 border-dashed border-ink/50 bg-cream/60 px-3 py-2"
+                      >
                         <div>
                           <p className="font-mono text-[8.5px] font-bold tracking-wide opacity-55">
-                            YOUR HOLDER REWARDS — UNCLAIMED
+                            WAITING ON THE HUB FOR {chainId.toUpperCase()} HOLDERS
                           </p>
-                          <p className="font-mono text-[15px] font-bold">
-                            {claimedMsg ?? fmtUsd(onchain.holderRewards?.[num] ?? 0)}
+                          <p className="font-mono text-[13px] font-bold">
+                            {fmtUsd(w.pot)}{' '}
+                            <span className="opacity-50">· YOUR SHARE ≈ {fmtUsd(w.share)}</span>
+                          </p>
+                          <p className="font-mono text-[8px] font-bold tracking-wide opacity-45">
+                            ANYONE CAN PULL IT — IT THEN LANDS FOR EVERY {chainId.toUpperCase()} HOLDER
+                            {onchain?.sponsored
+                              ? ' · FEE SPONSORED'
+                              : fee > 0
+                                ? ` · COSTS ≈ ${(fee * 1.1).toFixed(5)} ${info?.[chainId]?.nativeSymbol ?? 'ETH'}`
+                                : ''}
                           </p>
                         </div>
-                        {(onchain.holderRewards?.[num] ?? 0) > 0.005 && (
-                          <button
-                            onClick={() => {
-                              if (claimBusy) return
-                              setClaimBusy(true)
-                              setClaimedMsg(null)
-                              void onchain
-                                .claimHolderRewards!(num)
-                                .then((got) =>
-                                  setClaimedMsg(got > 0 ? `CLAIMED ${fmtUsd(got)} ✓` : null),
-                                )
-                                .finally(() => setClaimBusy(false))
-                            }}
-                            disabled={claimBusy}
-                            className="rounded-xl border-3 border-ink bg-lime px-5 py-2.5 font-mono text-[11px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            {claimBusy ? '✳ CLAIMING…' : 'CLAIM ↓'}
-                          </button>
-                        )}
+                        <button
+                          onClick={() => void doPull(chainId)}
+                          disabled={sideBusy !== null}
+                          className="rounded-xl border-3 border-ink bg-white px-4 py-2 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 hover:bg-lime disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          {sideBusy === `pull:${chainId}` ? '✳ PULLING…' : 'PULL ↓'}
+                        </button>
                       </div>
-                    )}
+                    )
+                  })}
+                  {sideMsg?.at === 'fees' && (
+                    <p
+                      className={`mt-2 font-mono text-[9px] font-bold tracking-wide ${sideMsg.ok ? 'text-up' : 'text-down'}`}
+                    >
+                      {sideMsg.text}
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="mt-2 font-mono text-[10px] font-bold tracking-wide opacity-45">
-                  FEE ROUTING IS RECORDED AT LAUNCH — ON-CHAIN ACCOUNTING LANDS WITH PROTOCOL V2.
+                  FEE ROUTING IS LOCKED AT LAUNCH — THE COUNTERS APPEAR WITH THE FIRST TRADE.
                 </p>
               )}
             </div>
@@ -464,8 +582,19 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   </button>
                 ))}
               </div>
-              <span className="font-mono text-[10px] font-bold opacity-55">
-                {wallet ? `BAL ${fmtUsd(wallet.balance)}` : 'NO WALLET'}
+              <span
+                className="text-right font-mono text-[10px] font-bold opacity-55"
+                title={
+                  ci
+                    ? `${fmtUsd(ci.usdc)} USDC + ${fmtUsd(ci.ousd)} oUSD on ${chain.toUpperCase()} · ${fmtUsd(wallet?.balance ?? 0)} across all chains`
+                    : undefined
+                }
+              >
+                {!wallet
+                  ? 'NO WALLET'
+                  : ci
+                    ? `${fmtUsd(chainUsd)} ON ${chain.toUpperCase()}`
+                    : `BAL ${fmtUsd(wallet.balance)}`}
               </span>
             </div>
 
@@ -475,18 +604,24 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 <button
                   key={ch.id}
                   onClick={() => setChain(ch.id)}
-                  title={ch.label}
+                  title={info?.[ch.id]?.local ? `${ch.label} — instant, no cross-chain wait` : ch.label}
                   className={`rounded-lg border-2 border-ink px-2.5 py-1 font-mono text-[10px] font-bold transition ${
                     chain === ch.id ? 'shadow-brutal-sm -translate-y-0.5' : 'opacity-50 hover:opacity-100'
                   }`}
                   style={{ background: ch.color }}
                 >
                   {ch.short}
+                  {info?.[ch.id]?.local ? ' ⚡' : ''}
                 </button>
               ))}
             </div>
             <p className="mt-1.5 font-mono text-[9px] font-bold opacity-45">
               SAME PRICE EVERYWHERE ✓
+              {onchain && onchain.network !== 'local'
+                ? instant
+                  ? ` · ${chain.toUpperCase()} SETTLES IN ONE TRANSACTION ⚡`
+                  : ` · ${chain.toUpperCase()} CROSSES LAYERZERO: 1–3 MIN`
+                : ''}
             </p>
 
             {side === 'buy' ? (
@@ -511,7 +646,13 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   </button>
                 ))}
                 <button
-                  onClick={() => wallet && setUsdStr(wallet.balance.toFixed(2))}
+                  onClick={() => {
+                    if (!wallet) return
+                    // on-chain a buy spends ONE asset on ONE chain: its USDC,
+                    // or its oUSD claims — whichever stack is larger
+                    const max = ci ? Math.max(ci.usdc, ci.ousd) : wallet.balance
+                    setUsdStr((Math.floor(max * 100) / 100).toFixed(2))
+                  }}
                   className="rounded-lg border-2 border-ink bg-white px-2.5 py-1.5 font-mono text-[10px] font-bold transition hover:bg-lime"
                 >
                   MAX
@@ -532,7 +673,18 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 ))}
                 <span className="font-mono text-[10px] font-bold opacity-55">
                   = {fmtTokens(sellTokens)} ${c.ticker}
+                  {onchain && bagHere > 0 ? ` OF YOUR ${fmtTokens(bagHere)} ON ${chain.toUpperCase()}` : ''}
                 </span>
+                {/* the bag lives somewhere else: say where instead of failing */}
+                {onchain && wallet && bagHere <= 0 && (
+                  <span className="basis-full font-mono text-[9px] font-bold tracking-wide text-down">
+                    {bagsByChain && Object.keys(bagsByChain).length
+                      ? `NOTHING TO SELL ON ${chain.toUpperCase()} — YOUR BAG LIVES ON ${Object.entries(bagsByChain)
+                          .map(([id, t]) => `${id.toUpperCase()} (${fmtTokens(t)})`)
+                          .join(' + ')}. PICK THAT CHAIN.`
+                      : 'YOU HOLD NONE OF THIS TOKEN.'}
+                  </span>
+                )}
               </div>
             )}
 
@@ -550,15 +702,40 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               </p>
             )}
 
+            {/* what the signature will cost, before it is asked for */}
+            {onchain && onchain.status === 'ready' && ci && (
+              <p className="mt-1 font-mono text-[9px] font-bold tracking-wide opacity-60">
+                {onchain.sponsored
+                  ? 'NETWORK FEE: SPONSORED ON THIS TESTNET — YOU ONLY PAY GAS'
+                  : netFee > 0
+                    ? `NETWORK FEE ≈ ${fmtFee(netFee)} + GAS${instant ? '' : ' · PAYS THE LAYERZERO ROUND TRIP, NOT REFUNDABLE'}`
+                    : instant && onchain.network !== 'local'
+                      ? 'NO MESSAGE FEE FROM THIS CHAIN — YOU ONLY PAY GAS'
+                      : 'NO NETWORK FEE — YOU ONLY PAY GAS'}
+                {side === 'buy' && onchain.network !== 'local' ? ' · USDC IS APPROVED FOR THIS EXACT AMOUNT' : ''}
+              </p>
+            )}
+            {buyBlocked && (
+              <p className="mt-1 font-mono text-[9px] font-bold tracking-wide text-down">
+                ⏸ {onchain?.hubPaused ? 'THE HUB IS PAUSED' : `${chain.toUpperCase()} IS PAUSED`} — NEW BUYS ARE
+                CLOSED. SELLING STAYS OPEN.
+              </p>
+            )}
+
             <button
               onClick={() => void doTrade()}
-              disabled={busy || (wallet !== null && (amount <= 0 || (side === 'sell' && !pos?.tokens)))}
+              disabled={
+                busy ||
+                (wallet !== null && (amount <= 0 || (side === 'sell' && bagHere <= 0) || buyBlocked))
+              }
               className={`mt-3 w-full rounded-xl border-3 border-ink px-6 py-3 font-mono text-[13px] font-bold tracking-wide shadow-brutal transition hover:-translate-y-0.5 hover:shadow-brutal-lg active:translate-y-0 active:shadow-brutal disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-brutal ${
                 side === 'buy' ? 'bg-lime' : 'bg-candy'
               }`}
             >
               {busy
-                ? '✳ CONFIRMING…'
+                ? instant
+                  ? '✳ CONFIRMING…'
+                  : '✳ CROSSING CHAINS — 1 TO 3 MIN…'
                 : !wallet
                   ? '◉ CONNECT WALLET TO TRADE'
                   : side === 'buy'
@@ -577,6 +754,33 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
             )}
           </div>
 
+          {/* deliveries that beat their token to a chain wait at the gateway */}
+          {parked.map(([chainId, tokens]) => (
+            <div
+              key={chainId}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border-3 border-ink bg-tang px-4 py-3 shadow-brutal-sm"
+            >
+              <div>
+                <p className={label}>PARKED ON {chainId.toUpperCase()} — YOURS TO CLAIM</p>
+                <p className="font-mono text-[13px] font-bold">
+                  {fmtTokens(tokens)} ${c.ticker}
+                </p>
+              </div>
+              <button
+                onClick={() => void doClaimParked(chainId)}
+                disabled={sideBusy !== null}
+                className="rounded-xl border-3 border-ink bg-white px-4 py-2 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 hover:bg-lime disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {sideBusy === `park:${chainId}` ? '✳ CLAIMING…' : 'CLAIM ↓'}
+              </button>
+            </div>
+          ))}
+          {sideMsg?.at === 'bag' && (
+            <p className={`font-mono text-[9px] font-bold tracking-wide ${sideMsg.ok ? 'text-up' : 'text-down'}`}>
+              {sideMsg.text}
+            </p>
+          )}
+
           {/* position */}
           {wallet && pos && pos.tokens > 1 && (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border-3 border-ink bg-white px-4 py-3 shadow-brutal-sm">
@@ -585,13 +789,29 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 <p className="font-mono text-[13px] font-bold">
                   {fmtTokens(pos.tokens)} ${c.ticker}
                 </p>
+                {bagsByChain && Object.keys(bagsByChain).length > 0 && (
+                  <p className="font-mono text-[9px] font-bold tracking-wide opacity-50">
+                    {Object.entries(bagsByChain)
+                      .map(([id, t]) => `${fmtTokens(t)} ON ${id.toUpperCase()}`)
+                      .join(' · ')}
+                  </p>
+                )}
               </div>
               <div className="text-right">
                 <p className="font-mono text-[13px] font-bold">{fmtUsd(posValue)}</p>
-                <p className={`font-mono text-[10px] font-bold ${pnl >= 0 ? 'text-up' : 'text-down'}`}>
-                  {pnl >= 0 ? '+' : ''}
-                  {fmtUsd(pnl).replace('$-', '-$')} PNL
-                </p>
+                {pos.costKnown === false ? (
+                  <p
+                    className="font-mono text-[9px] font-bold opacity-50"
+                    title="Part of this bag was not bought through this browser, so its cost is unknown here."
+                  >
+                    PNL UNKNOWN ON THIS DEVICE
+                  </p>
+                ) : (
+                  <p className={`font-mono text-[10px] font-bold ${pnl >= 0 ? 'text-up' : 'text-down'}`}>
+                    {pnl >= 0 ? '+' : ''}
+                    {fmtUsd(pnl).replace('$-', '-$')} PNL
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -620,11 +840,15 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
             </div>
           </div>
 
-          {mode === 'sim' && (
-            <p className="text-center font-mono text-[9px] font-bold tracking-wide opacity-40">
-              DEMO MARKET — REAL CURVE MATH, FICTIONAL MONEY. NO TRANSACTION IS SUBMITTED.
-            </p>
-          )}
+          <p className="text-center font-mono text-[9px] font-bold tracking-wide opacity-40">
+            {mode === 'sim'
+              ? 'DEMO MARKET — REAL CURVE MATH, FICTIONAL MONEY. NO TRANSACTION IS SUBMITTED.'
+              : onchain?.network === 'mainnet'
+                ? 'MAINNET — REAL USDC, UNAUDITED CONTRACTS, CAPPED VAULTS. ONLY WHAT YOU CAN LOSE.'
+                : onchain?.network === 'testnet'
+                  ? 'PUBLIC TESTNET — REAL CONTRACTS AND REAL TRANSACTIONS, PLAY MONEY.'
+                  : 'LOCAL DEVNET — REAL CONTRACTS ON YOUR OWN NODE, PLAY MONEY.'}
+          </p>
         </div>
       </div>
     </div>
