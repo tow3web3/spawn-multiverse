@@ -1,7 +1,7 @@
 import React from 'react'
 import { AbsoluteFill, interpolate, random, spring, useCurrentFrame, useVideoConfig } from 'remotion'
 import { ChainDisc, type ChainId, Smiley } from './logos'
-import { CUTS, durFrames, f, S1, S2a, S2b, S3, S4, S5, S6, S7, S8 } from './script'
+import { CUTS, durFrames, f, S1, S2a, S2b, S3, S4, S5, S6, S7, S7b, S8 } from './script'
 import { ShotMedia } from './Shot'
 import { B, C, FONT } from './theme'
 import { Check, Chip, shake, TitleBlock, Typewriter, useSlam, useSlide } from './ui'
@@ -496,6 +496,119 @@ const LockIcon: React.FC = () => (
   </svg>
 )
 
+// ───────────────────────────── S7b THE MAP
+const W = 1920
+const H = 1080
+
+const DoorChip: React.FC<{ chain: ChainId; label: string; x: number; at: number }> = ({ chain, label, x, at }) => {
+  const { visible, scale } = useSlam(at, { from: 1.45 })
+  if (!visible) return null
+  return (
+    <div style={{ position: 'absolute', left: x * W, top: S7b.chipY * H, transform: `translateX(-50%) scale(${scale})` }}>
+      <Chip size={26} shadow={6} style={{ gap: 10, padding: '6px 18px 6px 6px', letterSpacing: '0.08em' }}>
+        <ChainDisc id={chain} size={44} ring={3} />
+        {label}
+      </Chip>
+    </div>
+  )
+}
+
+const FloorTag: React.FC<{ text: string; x: number; at: number; bg?: string }> = ({ text, x, at, bg = C.cream }) => {
+  const { visible, scale } = useSlam(at, { from: 1.12 })
+  if (!visible) return null
+  return (
+    <div style={{ position: 'absolute', left: x * W, top: 952, transform: `translateX(-50%) scale(${scale})` }}>
+      <Chip bg={bg} size={28} shadow={6} style={{ letterSpacing: '0.06em', padding: '8px 18px' }}>
+        {text}
+      </Chip>
+    </div>
+  )
+}
+
+/** Lime bracket under the three doors of the omnichain universe, with its label. */
+const OmniBracket: React.FC = () => {
+  const frame = useCurrentFrame()
+  const { fps } = useVideoConfig()
+  const o = S7b.status.omni
+  const at = f(o.at)
+  if (frame < at) return null
+  const grow = spring({ frame: frame - at, fps, config: { stiffness: 320, damping: 22, mass: 0.6 } })
+  const x0 = o.from * W
+  const x1 = o.to * W
+  return (
+    <>
+      <div
+        style={{
+          position: 'absolute',
+          left: x0,
+          top: 912,
+          width: x1 - x0,
+          height: 30,
+          borderLeft: `8px solid ${C.lime}`,
+          borderRight: `8px solid ${C.lime}`,
+          borderBottom: `8px solid ${C.lime}`,
+          borderRadius: '0 0 6px 6px',
+          transform: `scaleX(${grow})`,
+          transformOrigin: 'left center',
+          filter: `drop-shadow(3px 3px 0 ${C.ink})`,
+        }}
+      />
+      <FloorTag text={o.text} x={(o.from + o.to) / 2} at={at + 3} bg={C.lime} />
+    </>
+  )
+}
+
+const NextTag: React.FC = () => {
+  const n = S7b.status.solana
+  const { visible, scale } = useSlam(f(n.at), { from: 1.4, stiffness: 520, damping: 18 })
+  if (!visible) return null
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: S7b.signAt.x * W,
+        top: S7b.signAt.y * H,
+        transform: `translate(-50%, -50%) rotate(-7deg) scale(${scale})`,
+        background: C.hot,
+        color: C.ink,
+        fontFamily: FONT.title,
+        fontSize: 64,
+        lineHeight: 1,
+        padding: '6px 22px 8px',
+        border: `${B.border}px solid ${C.ink}`,
+        borderRadius: B.radiusSm,
+        boxShadow: B.shadow(8),
+        letterSpacing: '0.04em',
+      }}
+    >
+      {n.text}
+    </div>
+  )
+}
+
+export const Scene7b: React.FC = () => {
+  const frame = useCurrentFrame()
+  const dur = durFrames('S7b')
+  // the overlays follow the clip's own push-in so they stay pinned to the doors
+  const k = interpolate(frame, [0, dur], S7b.follow.scale, { extrapolateRight: 'clamp' })
+  const st = S7b.status
+  return (
+    <AbsoluteFill>
+      <ShotMedia media={S7b.media} duration={dur} />
+      <AbsoluteFill style={{ transform: `scale(${k})`, transformOrigin: S7b.follow.origin }}>
+        {S7b.doors.map((d) => (
+          <DoorChip key={d.chain} chain={d.chain} label={d.label} x={d.x} at={f(d.at)} />
+        ))}
+        <OmniBracket />
+        <FloorTag text={st.bnb.text} x={st.bnb.x} at={f(st.bnb.at)} />
+        <FloorTag text={st.ethereum.text} x={st.ethereum.x} at={f(st.ethereum.at)} />
+        <NextTag />
+      </AbsoluteFill>
+      <TitleBlock text={S7b.title.text} at={f(S7b.title.at)} variant="lime" size={88} rotate={-1} style={{ left: 64, top: 40 }} />
+    </AbsoluteFill>
+  )
+}
+
 // ───────────────────────────── S8 CLOSE
 export const Scene8: React.FC = () => {
   const dur = durFrames('S8')
@@ -511,13 +624,13 @@ export const Scene8: React.FC = () => {
 }
 
 const EndCard: React.FC = () => {
-  const mark = useSlam(f(S8.mark.at), { from: 2 })
-  const word = useSlam(f(S8.wordmark.at), { from: 1.5 })
+  const mark = useSlam(f(S8.mark.at), { from: 1.45 })
+  const word = useSlam(f(S8.wordmark.at), { from: 1.18 })
   const tag = useSlam(f(S8.tagline.at), { from: 1.3 })
   const url = useSlam(f(S8.url.at), { from: 1.3 })
   const status = useSlam(f(S8.status.at), { from: 1.2 })
   return (
-    <div style={{ position: 'absolute', left: 990, top: 0, bottom: 0, width: 880, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+    <div style={{ position: 'absolute', left: 950, top: 0, bottom: 0, width: 940, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 30, height: 230 }}>
         {mark.visible && <Smiley size={176} style={{ transform: `scale(${mark.scale}) rotate(-6deg)` }} />}
         {word.visible && (
@@ -559,9 +672,9 @@ const EndCard: React.FC = () => {
             style={{
               fontFamily: FONT.mono,
               fontWeight: 700,
-              fontSize: 27,
+              fontSize: 26,
               lineHeight: 1.45,
-              letterSpacing: '0.08em',
+              letterSpacing: '0.02em',
               color: C.cream,
               opacity: 0.85,
               transform: `scale(${status.scale})`,
@@ -569,19 +682,9 @@ const EndCard: React.FC = () => {
               whiteSpace: 'nowrap',
             }}
           >
-            {/* two lines, broken after the first separator (too long for one line at a readable size) */}
-            {(() => {
-              const i = S8.status.text.indexOf(' · ')
-              return i < 0 ? (
-                S8.status.text
-              ) : (
-                <>
-                  {S8.status.text.slice(0, i)}
-                  <br />
-                  {S8.status.text.slice(i + 3)}
-                </>
-              )
-            })()}
+            {S8.status.lines.map((l) => (
+              <div key={l}>{l}</div>
+            ))}
           </div>
         )}
       </div>

@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useId } from 'react'
 import { C } from './theme'
 
 /**
@@ -59,11 +59,65 @@ export const UsdcMark: React.FC<P> = (p) => (
   </Svg>
 )
 
-export type ChainId = 'base' | 'arbitrum' | 'optimism'
+
+// BNB Chain, Ethereum, Solana — bodies copied byte-for-byte from src/components/ChainLogos.tsx
+export const EthereumMark: React.FC<P> = (p) => {
+  return (
+    <Svg {...p} viewBox="0 0 32 32">
+      <circle cx="16" cy="16" r="16" fill="#627EEA" />
+      <g fill="#FFF">
+        <path fillOpacity=".602" d="M16.498 4v8.87l7.497 3.35z" />
+        <path d="M16.498 4L9 16.22l7.498-3.35z" />
+        <path fillOpacity=".602" d="M16.498 21.968v6.027L24 17.616z" />
+        <path d="M16.498 27.995v-6.028L9 17.616z" />
+        <path fillOpacity=".2" d="M16.498 20.573l7.497-4.353-7.497-3.348z" />
+        <path fillOpacity=".602" d="M9 16.22l7.498 4.353v-7.701z" />
+      </g>
+    </Svg>
+  )
+}
+
+export const BnbMark: React.FC<P> = (p) => {
+  return (
+    <Svg {...p} viewBox="0 0 32 32">
+      <circle cx="16" cy="16" r="16" fill="#F0B90B" />
+      <path
+        fill="#FFF"
+        d="M12.116 14.404L16 10.52l3.886 3.886 2.26-2.26L16 6l-6.144 6.144 2.26 2.26zM6 16l2.26-2.26L10.52 16l-2.26 2.26L6 16zm6.116 1.596L16 21.48l3.886-3.886 2.26 2.259L16 26l-6.144-6.144-.003-.003 2.263-2.257zM21.48 16l2.26-2.26L26 16l-2.26 2.26L21.48 16zm-3.188-.002h.002V16L16 18.294l-2.291-2.29-.004-.004.004-.003.401-.402.195-.195L16 13.706l2.293 2.293z"
+      />
+    </Svg>
+  )
+}
+
+/** Solana's three bars in the brand gradient, on a dark disc. */
+export const SolanaMark: React.FC<P> = (p) => {
+  const id = `sol-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
+  return (
+    <Svg {...p} viewBox="0 0 32 32">
+      <defs>
+        <linearGradient id={id} x1="7" y1="23" x2="25" y2="9" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#9945FF" />
+          <stop offset="1" stopColor="#14F195" />
+        </linearGradient>
+      </defs>
+      {/* the faint edge keeps the disc readable on the dark surface */}
+      <circle cx="16" cy="16" r="15.4" fill="#000" stroke="#fff" strokeOpacity=".3" strokeWidth="1.2" />
+      <path
+        fill={`url(#${id})`}
+        d="M9.925 19.687a.59.59 0 01.415-.17h14.366a.29.29 0 01.207.497l-2.838 2.815a.59.59 0 01-.415.171H7.294a.291.291 0 01-.207-.498l2.838-2.815zm0-10.517A.59.59 0 0110.34 9h14.366c.261 0 .392.314.207.498l-2.838 2.815a.59.59 0 01-.415.17H7.294a.291.291 0 01-.207-.497L9.925 9.17zm12.15 5.225a.59.59 0 00-.415-.17H7.294a.291.291 0 00-.207.498l2.838 2.815c.11.109.26.17.415.17h14.366a.291.291 0 00.207-.498l-2.838-2.815z"
+      />
+    </Svg>
+  )
+}
+
+export type ChainId = 'base' | 'arbitrum' | 'optimism' | 'bnb' | 'ethereum' | 'solana'
 
 export const ChainMark: React.FC<P & { id: ChainId }> = ({ id, ...p }) => {
   if (id === 'base') return <BaseMark {...p} />
   if (id === 'arbitrum') return <ArbitrumMark {...p} />
+  if (id === 'bnb') return <BnbMark {...p} />
+  if (id === 'ethereum') return <EthereumMark {...p} />
+  if (id === 'solana') return <SolanaMark {...p} />
   return <OptimismMark {...p} />
 }
 

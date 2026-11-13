@@ -1,7 +1,7 @@
 import React from 'react'
 import { AbsoluteFill, Html5Audio, interpolate, Sequence, staticFile, useCurrentFrame } from 'remotion'
 import { MUSIC as MUSIC_FILE, SFX_FILES } from './assets.gen'
-import { Scene1, Scene2a, Scene2b, Scene3, Scene4, Scene5, Scene6, Scene7, Scene8 } from './scenes'
+import { Scene1, Scene2a, Scene2b, Scene3, Scene4, Scene5, Scene6, Scene7, Scene7b, Scene8 } from './scenes'
 import { durFrames, f, type FilmProps, MUSIC, S8, SFX_HIT, sfxCues, type ShotId, startFrame, TOTAL_FRAMES } from './script'
 import { C } from './theme'
 import { Grain } from './ui'
@@ -41,6 +41,7 @@ export const Film: React.FC<FilmProps> = (props) => {
       <Shot id="S5"><Scene5 /></Shot>
       <Shot id="S6"><Scene6 bounceAtInClip={bounceAtInClip} /></Shot>
       <Shot id="S7"><Scene7 /></Shot>
+      <Shot id="S7b"><Scene7b /></Shot>
       <Shot id="S8"><Scene8 /></Shot>
       <Grain frozen={frame >= holdFrom} />
       {MUSIC_FILE && (

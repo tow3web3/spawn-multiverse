@@ -68,10 +68,11 @@ export const CUTS = {
   S2b: [10.8, 15.0],
   S3: [15.0, bar(1)], // 19.33
   S4: [bar(1), bar(4)], // 19.33 – 25.76
-  S5: [bar(4), bar(8)], // 25.76 – 34.33
-  S6: [bar(8), bar(11)], // 34.33 – 40.76
-  S7: [bar(11), bar(13)], // 40.76 – 45.05
-  S8: [bar(13), 49.6], // 45.05 – 49.6 (still end card over the music's tail)
+  S5: [bar(4), bar(7)], // 25.76 – 32.19
+  S6: [bar(7), bar(10)], // 32.19 – 38.62
+  S7: [bar(10), bar(12)], // 38.62 – 42.90
+  S7b: [bar(12), bar(14)], // 42.90 – 47.19  THE MAP
+  S8: [bar(14), 50.0], // 47.19 (the last hit) – 50.0, still end card over the tail
 } as const
 
 export type ShotId = keyof typeof CUTS
@@ -152,23 +153,23 @@ export const S4 = {
 
 // ───────────────────────────── S5 ONE PRICE
 export const S5 = {
-  // rate 0.65: the 5 s clip covers 7.75 s of the 8.57 s shot, then holds its last frame
-  media: { clip: 's05', still: 'k07', rate: 0.65 } as Media,
+  // rate 0.8: the 5 s clip covers 6.3 s of the 6.43 s shot
+  media: { clip: 's05', still: 'k07', rate: 0.8 } as Media,
   darken: 0.35,
   startPrice: '$0.0000056',
   /** a ticket starts sliding this many frames before it lands */
   landFrames: 7,
   /**
    * `at` = the moment the ticket LANDS: the price ticks, the coins sound.
-   * On the kicks 26.73 / 28.98 / 31.12. `from` = its pipe's side.
+   * On the kicks 26.73 / 27.92 / 28.98. `from` = its pipe's side.
    */
   trades: [
     { who: 'LINA', chain: 'base', chainLabel: 'BASE', side: 'BUYS', amount: '$50', from: 'left', at: rel('S5', 26.73), price: '$0.0000061' },
-    { who: 'KENJI', chain: 'arbitrum', chainLabel: 'ARBITRUM', side: 'BUYS', amount: '$20', from: 'top', at: rel('S5', 28.98), price: '$0.0000063' },
-    { who: 'ADA', chain: 'optimism', chainLabel: 'OPTIMISM', side: 'SELLS', amount: '$10', from: 'right', at: rel('S5', 31.12), price: '$0.0000062' },
+    { who: 'KENJI', chain: 'arbitrum', chainLabel: 'ARBITRUM', side: 'BUYS', amount: '$20', from: 'top', at: rel('S5', 27.92), price: '$0.0000063' },
+    { who: 'ADA', chain: 'optimism', chainLabel: 'OPTIMISM', side: 'SELLS', amount: '$10', from: 'right', at: rel('S5', 28.98), price: '$0.0000062' },
   ] as const,
   title: { text: 'EVERY TRADE, FROM ANY CHAIN, HITS ONE MARKET.', at: 0.3 },
-  title2: { text: 'ONE PRICE. EVERYWHERE.', at: rel('S5', 32.19) },
+  title2: { text: 'ONE PRICE. EVERYWHERE.', at: rel('S5', bar(6)) }, // 30.05
 }
 
 // ───────────────────────────── S6 BLOCK 0
@@ -183,20 +184,20 @@ export const S6 = {
    * Also a Studio prop.
    */
   bounceAtInClip: 2.4,
-  /** film time of the bounce: the downbeat 36.48 */
-  bounce: bar(9),
+  /** film time of the bounce: the downbeat 34.33 (shot start + 1 bar) */
+  bounce: bar(8),
   media: { clip: 's06', still: 'k08', rate: 0.75 } as Media,
   stamp: { text: '09:03:00.000 — BLOCK 0', at: 0.15, charsPerSecond: 24 },
   /** tag on the claw before the bounce (top-left, where the claw enters) */
   sniper: { text: 'SNIPER BOT', at: 0.5, goneAfterBounce: 0.25 },
   bounced: { text: 'BOUNCED', settleAfterBounce: 0.6 },
-  title: { text: 'BLOCK 0 DOES NOT EXIST.', at: rel('S6', 36.76) },
-  sub: { text: 'FIRST 10 MIN: SNIPE TAX 30% → 1%. MAX $250 PER WALLET.', at: rel('S6', bar(10)) }, // 38.62
+  title: { text: 'BLOCK 0 DOES NOT EXIST.', at: rel('S6', 34.61) },
+  sub: { text: 'FIRST 10 MIN: SNIPE TAX 30% → 1%. MAX $250 PER WALLET.', at: rel('S6', bar(9)) }, // 36.48
   meter: {
     label: 'SNIPE TAX',
-    at: rel('S6', 37.3), // appears
-    drainFrom: rel('S6', 37.56),
-    drainTo: rel('S6', 40.2), // 10:00 → 00:00 compressed into this
+    at: rel('S6', 35.15), // appears
+    drainFrom: rel('S6', 35.41),
+    drainTo: rel('S6', 38.1), // 10:00 → 00:00 compressed into this
     fromPct: 30,
     toPct: 1,
     fromClock: 600, // seconds shown at the start of the countdown (10:00)
@@ -206,25 +207,66 @@ export const S6 = {
 // ───────────────────────────── S7 HOLDERS
 export const S7 = {
   media: { clip: 's07', still: 'k09' } as Media,
-  title: { text: '1% OF EVERY TRADE GOES BACK.', at: rel('S7', 40.78) },
+  title: { text: '1% OF EVERY TRADE GOES BACK.', at: rel('S7', 38.63) },
   chips: [
-    { text: 'TO HOLDERS', color: 'lime', at: rel('S7', 41.06) },
-    { text: 'TO THE DEV', color: 'candy', at: rel('S7', 41.33) },
-    { text: 'OR BURNED', color: 'tang', at: rel('S7', 41.6) },
+    { text: 'TO HOLDERS', color: 'lime', at: rel('S7', 38.91) },
+    { text: 'TO THE DEV', color: 'candy', at: rel('S7', 39.69) },
+    { text: 'OR BURNED', color: 'tang', at: rel('S7', 39.98) },
   ] as const,
-  lock: { text: 'CHOSEN AT LAUNCH. LOCKED FOREVER.', at: rel('S7', bar(12)) }, // 42.90
+  lock: { text: 'CHOSEN AT LAUNCH. LOCKED FOREVER.', at: rel('S7', bar(11)) }, // 40.76
+}
+
+// ───────────────────────────── S7b THE MAP
+// Six cardboard doors. What is true: Base + Arbitrum + Optimism share ONE
+// token at ONE price (the omnichain universe); BNB Chain and Ethereum are each
+// their own universe; Solana is next. Flip a chain's status by editing its
+// `status` word(s) here.
+export const S7b = {
+  // the overlays are pinned to the doors: no extra drift on the picture
+  media: { clip: 's11', still: 'k11', clipIn: 0, rate: 1, drift: [1.0, 1.0] } as Media,
+  /**
+   * s11 has its own slow push-in (outer doors 0.094 → 0.072 and 0.906 → 0.928
+   * over the clip ≈ 1.046× over this shot). The overlay layer scales the same
+   * way about the same point so the chips stay on their doors. Door x values
+   * below are measured on the clip's first frame.
+   */
+  follow: { scale: [1.0, 1.046] as [number, number], origin: '50% 55%' },
+  title: { text: 'SIX CHAINS ON THE MAP.', at: 0 },
+  /** y of the logo chips above the doors, fraction of frame height */
+  chipY: 0.205,
+  /** x = door centre (fraction of frame width), left to right */
+  doors: [
+    { chain: 'base', label: 'BASE', x: 0.095, at: rel('S7b', 43.2) },
+    { chain: 'arbitrum', label: 'ARBITRUM', x: 0.26, at: rel('S7b', 43.2) },
+    { chain: 'optimism', label: 'OPTIMISM', x: 0.42, at: rel('S7b', 43.2) },
+    { chain: 'bnb', label: 'BNB CHAIN', x: 0.58, at: rel('S7b', 43.98) },
+    { chain: 'ethereum', label: 'ETHEREUM', x: 0.74, at: rel('S7b', 45.05) },
+    { chain: 'solana', label: 'SOLANA', x: 0.9, at: rel('S7b', 46.12) },
+  ] as const,
+  /**
+   * Status words in the floor band. `x` = centre of the tag (shifted off the
+   * door centre where two tags would collide or cover a creature).
+   */
+  status: {
+    omni: { text: 'ONE TOKEN · ONE PRICE', from: 0.095, to: 0.42, at: rel('S7b', 43.2) }, // lime bracket under doors 1–3
+    bnb: { text: 'OWN UNIVERSE · USDT', x: 0.545, at: rel('S7b', 43.98) },
+    ethereum: { text: 'OWN UNIVERSE · USDC', x: 0.775, at: rel('S7b', 45.05) },
+    solana: { text: 'NEXT', at: rel('S7b', 46.12) }, // hot-pink tag on door 6's blank sign
+  },
+  /** door 6's blank paper sign (fractions of the frame) */
+  signAt: { x: 0.896, y: 0.45 },
 }
 
 // ───────────────────────────── S8 CLOSE
 export const S8 = {
   media: { clip: 's08', still: 'k10', focus: '35% 50%' } as Media,
-  mark: { at: 0 }, // on the cut (45.05)
-  wordmark: { text: 'SPAWN!', at: 0.03 },
-  tagline: { text: 'THE OMNICHAIN MEME MACHINE', at: rel('S8', 46.12) },
-  url: { text: 'spawn-multiverse.netlify.app', at: rel('S8', bar(14)) }, // 47.19, the last hit
-  status: { text: 'GUARDED BETA · BASE · OPTIMISM · ARBITRUM · MORE COMING', at: rel('S8', 47.6) },
+  mark: { at: 0 }, // slams on the cut = the music's last hit (47.19)
+  wordmark: { text: 'SPAWN!', at: 0 },
+  tagline: { text: 'THE OMNICHAIN MEME MACHINE', at: rel('S8', 47.6) },
+  url: { text: 'spawn-multiverse.netlify.app', at: rel('S8', 48.0) },
+  status: { lines: ['GUARDED BETA', 'BASE · OPTIMISM · ARBITRUM · BNB · ETHEREUM — SOLANA NEXT'], at: rel('S8', 48.4) },
   /** the last N seconds are a perfectly still frame (over the music's tail) */
-  holdLast: 1.4,
+  holdLast: 1.1, // still from 48.9
 }
 
 /** Studio-editable props (defaults from this file). */
@@ -277,7 +319,8 @@ export const sfxCues = (p: FilmProps): SfxCue[] => {
     { sound: 'stamp', frame: bounce, volume: 0.45 },
     // S7 opens on coins: the file starts on the cut
     { sound: 'coins', frame: startFrame('S7') + f(SFX_HIT.coins), volume: 0.5 },
-    { sound: 'pop', frame: startFrame('S8') + f(S8.wordmark.at), volume: 0.4 },
+    // the end card slams on the last hit
+    { sound: 'thump', frame: startFrame('S8') + f(S8.wordmark.at), volume: 0.5 },
   ]
   for (const t of S5.trades) {
     const land = s5 + f(t.at)
@@ -289,5 +332,7 @@ export const sfxCues = (p: FilmProps): SfxCue[] => {
     t.prices.forEach((_, k) => cues.push({ sound: 'tick', frame: startFrame('S2b') + f(t.at + k * S2b.tickEvery), volume: 0.35 }))
   for (const pnl of S4.panels) cues.push({ sound: 'pop', frame: startFrame('S4') + f(pnl.at), volume: 0.4 })
   for (const c of S7.chips) cues.push({ sound: 'pop', frame: startFrame('S7') + f(c.at), volume: 0.4 })
+  // the map: one pop per group of doors that lights up together
+  for (const at of [...new Set(S7b.doors.map((d) => d.at))]) cues.push({ sound: 'pop', frame: startFrame('S7b') + f(at), volume: 0.4 })
   return cues
 }
