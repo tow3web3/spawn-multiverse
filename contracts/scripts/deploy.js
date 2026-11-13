@@ -21,7 +21,7 @@
  */
 const { ethers, network } = require('hardhat')
 const { getProfile, netKeyOf } = require('../config/profiles')
-const { deployNet } = require('./lib-net')
+const { deployNet, cliSigner } = require('./lib-net')
 
 async function main() {
   const net = netKeyOf(network.name)
@@ -32,7 +32,7 @@ async function main() {
         `(${Object.keys(profile.nets).join(', ')})`,
     )
   }
-  const [signer] = await ethers.getSigners()
+  const signer = await cliSigner()
   if (!signer) throw new Error('no deployer key: DEPLOYER_PK (or MAINNET_DEPLOYER_PK) missing in contracts/.env')
   await deployNet({ profile, netKey: net, signer })
 }

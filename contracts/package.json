@@ -12,6 +12,7 @@
     "test:fork:optimism": "node scripts/fork-run.js optimism",
     "test:fork": "node scripts/fork-run.js base && node scripts/fork-run.js optimism",
     "rehearse": "node scripts/fork-rehearsal.js",
+    "rehearse:add-chain": "node scripts/fork-addchain.js",
     "dvn:survey": "node scripts/dvn-survey.js",
     "budget": "SPAWN_PROFILE=mainnet hardhat run scripts/estimate-budget.js",
     "status:mainnet": "SPAWN_PROFILE=mainnet hardhat run scripts/status.js",

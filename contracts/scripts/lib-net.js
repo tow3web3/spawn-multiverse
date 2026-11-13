@@ -77,6 +77,10 @@ function saveState(file, state) {
   fs.writeFileSync(file, JSON.stringify(state, null, 2))
 }
 
+/** Executor gas the hub buys for a message to this spoke: the chain's own
+ * figure when it has one (an L1 pays for every unit), else the profile's. */
+const spokeGas = (profile, cfg) => cfg.gasToSpoke ?? profile.gasToSpoke
+
 /** The vault users pay into on a net: the hub chain's is `localUsd`. */
 const vaultOf = (profile, net, entry) => (net === profile.hub ? entry?.localUsd : entry?.usd)
 const distOf = (profile, net, entry) => (net === profile.hub ? entry?.localDist : entry?.dist)
@@ -154,6 +158,24 @@ async function isDevNode(provider) {
   }
 }
 
+/**
+ * The signer a CLI acts as: hardhat's first signer (the deployer / operator
+ * key from contracts/.env). On a DEVELOPMENT node only — an anvil fork —
+ * SPAWN_FORK_AS=0x… impersonates that address instead, so a rehearsal
+ * against forked LIVE state can act as the real operator without the real
+ * key ever signing anything (a transaction signed for a fork is valid on the
+ * real chain). Ignored on a live network.
+ */
+async function cliSigner() {
+  const [first] = await ethers.getSigners()
+  const as = process.env.SPAWN_FORK_AS
+  if (as && (await isDevNode(ethers.provider))) {
+    await ethers.provider.send('hardhat_setBalance', [as, '0x8AC7230489E80000']) // 10 ETH, fork only
+    return ethers.getImpersonatedSigner(as)
+  }
+  return first
+}
+
 function track(ctx, receipt) {
   ctx.gas.txs += 1
   ctx.gas.used += receipt.gasUsed
@@ -195,29 +217,82 @@ async function hasRole(contract, role, who) {
  * `uses` lists the contracts whose addresses the step depends on.
  */
 async function ensure(ctx, { desc, on, fn, args = [], needed, role = 'admin', uses = [] }) {
+  // ctx.last: what became of this step — 'noop' (nothing to do), 'planned'
+  // (a dry run would send it), 'blocked' (another key must), 'sent'
+  ctx.last = 'noop'
   if (isStub(on) || uses.some(isStub)) {
     if (!ctx.dry) throw new Error(`internal: stub contract outside a dry run (${desc})`)
     ctx.plan.push(desc)
     ctx.log(`  would: ${desc}`)
+    ctx.last = 'planned'
     return false
   }
   if (!(await needed())) return false
   const callArgs = typeof args === 'function' ? args() : args
+  // The role is judged BEFORE the dry-run exit: after the hand-over a dry
+  // run is how the admin-only steps are COLLECTED (target + calldata) to be
+  // scheduled on the timelock — see scripts/lib-timelock.js.
+  if (!(await hasRole(on, role, ctx.signer.address))) {
+    const data = on.interface.encodeFunctionData(fn, callArgs)
+    ctx.blocked.push({ desc, role, fn, target: on.target, data })
+    ctx.log(`  ⏳ ${desc} — needs the ${role}: target ${on.target} data ${data}`)
+    ctx.last = 'blocked'
+    return false
+  }
   if (ctx.dry) {
     ctx.plan.push(desc)
     ctx.log(`  would: ${desc}`)
-    return false
-  }
-  if (!(await hasRole(on, role, ctx.signer.address))) {
-    const data = on.interface.encodeFunctionData(fn, callArgs)
-    ctx.blocked.push({ desc, role, target: on.target, data })
-    ctx.log(`  ⏳ ${desc} — needs the ${role}: target ${on.target} data ${data}`)
+    ctx.last = 'planned'
     return false
   }
   const tx = await on.connect(ctx.signer)[fn](...callArgs)
   track(ctx, await tx.wait())
   ctx.log(`  ${desc} ✓`)
+  ctx.last = 'sent'
   return true
+}
+
+/* --------------------------------- budget --------------------------------- */
+
+// Execution gas of a network's whole life-cycle, measured on mainnet forks
+// (test-fork/, 2026-11-13): deploy + wiring, the DVN config per pathway,
+// the hand-over. Re-measure after any contract change.
+const LIFE_GAS = {
+  hub: { deploy: 17_700_000n, dvnPerPathway: 570_000n, handover: 2_600_000n },
+  spoke: { deploy: 9_200_000n, dvnPerPathway: 570_000n, handover: 2_300_000n },
+}
+
+/**
+ * What the deployer must hold before a FRESH deploy of this network: twice
+ * the life-cycle gas at the chain's CURRENT gas price, plus the tank float,
+ * never below the configured floor. The floor carries what the gas price
+ * cannot see on a rollup (the L1 data fee); on an L1 the gas term is the
+ * whole story — a flat number there is either absurd at 0.1 gwei or
+ * dangerously short at 30.
+ */
+async function deployBudget(ctx) {
+  const { profile, cfg, signer } = ctx
+  const floor = cfg.budgetFloor ?? cfg.budget ?? profile.budget[cfg.role]
+  const spokes = Object.values(activeNets(profile)).filter((c) => c.role === 'spoke').length
+  const g = LIFE_GAS[cfg.role]
+  const gas = g.deploy + g.dvnPerPathway * BigInt(cfg.role === 'hub' ? spokes : 1) + g.handover
+  let gasPrice = 0n
+  try {
+    // what a transaction really pays (base fee + tip), not the 1559 CEILING
+    // a wallet signs for — the ×2 below is the margin
+    const fee = await signer.provider.getFeeData()
+    gasPrice = fee.gasPrice ?? fee.maxFeePerGas ?? 0n
+  } catch {
+    /* an RPC without fee data: the floor decides */
+  }
+  const tank = profile.tank?.mode === 'fixed' ? (profile.tank[cfg.role] ?? 0n) : 0n
+  const byGas = gas * gasPrice * 2n + tank
+  const need = byGas > floor ? byGas : floor
+  const how =
+    byGas > floor
+      ? `2 × ${gas} gas at ${ethers.formatUnits(gasPrice, 'gwei')} gwei${tank ? ' + tank float' : ''}`
+      : `floor; 2 × gas at ${ethers.formatUnits(gasPrice, 'gwei')} gwei would be ${fmt(byGas)}`
+  return { need, how, gas, gasPrice, floor }
 }
 
 /* ------------------------------- preflight ------------------------------- */
@@ -281,14 +356,14 @@ async function preflight(ctx) {
   }
 
   if (profile.budget) {
-    const need = cfg.budget ?? profile.budget[cfg.role]
+    const { need, how } = await deployBudget(ctx)
     const bal = await provider.getBalance(signer.address)
     // a finished deployment re-runs for a few wiring txs: no full budget needed
     const fresh = !ctx.state.gateway
     check(
       'deployer balance covers the deploy budget',
       !fresh || bal >= need,
-      `${fmt(bal)} ETH, budget ${fmt(need)} ETH${fresh ? '' : ' (already deployed — not required)'}`,
+      `${fmt(bal)} ETH, budget ${fmt(need)} ETH (${how})${fresh ? '' : ' (already deployed — not required)'}`,
     )
   }
 
@@ -431,12 +506,18 @@ async function setDestination(ctx, adapter, label, gas, unit, what) {
   })
 }
 
+/** `spawn` is the FLOOR (one leg per remote chain): the deploy never lowers
+ * spawnLegs, because tune-fees.js may have padded it so a spawn from this
+ * chain prepays a dearer destination's SYNC (an L1 leg costs several L2
+ * legs at this chain's reply price). */
 async function setLegs(ctx, gateway, trade, spawn) {
+  let cur = { trade: -1, spawn: -1 }
+  if (!isStub(gateway)) cur = { trade: Number(await gateway.tradeLegs()), spawn: Number(await gateway.spawnLegs()) }
+  const want = Math.max(spawn, cur.spawn)
   await ensure(ctx, {
-    desc: `gateway.setLegs(trade ${trade}, spawn ${spawn})`,
-    on: gateway, fn: 'setLegs', args: [trade, spawn], role: 'operator',
-    needed: async () =>
-      Number(await gateway.tradeLegs()) !== trade || Number(await gateway.spawnLegs()) !== spawn,
+    desc: `gateway.setLegs(trade ${trade}, spawn ${want})`,
+    on: gateway, fn: 'setLegs', args: [trade, want], role: 'operator',
+    needed: async () => cur.trade !== trade || cur.spawn < spawn,
   })
 }
 
@@ -549,21 +630,29 @@ async function deployHub(ctx, roles) {
       on: adapter, fn: 'setRoute', args: [c.label, c.eid, b32(s.adapter)],
       needed: async () => (await adapter.eidOf(c.label)) === 0n,
     })
+    // the route is the admin's: after the hand-over it is not sent here but
+    // queued (blocked) for the timelock, with pad.setGateway right behind it
+    const routeQueued = ctx.last === 'blocked' || ctx.last === 'planned'
     // BEFORE the pad learns the gateway: from that moment every spawn SYNCs
     // this chain, and a send without a gas limit reverts. Hub -> spoke
     // messages are replies: they carry no further budget.
     await ensure(ctx, {
-      desc: `options hub -> ${net}: adapter.setDestination(${c.label}, gas ${profile.gasToSpoke}, 0)`,
-      on: adapter, fn: 'setDestination', args: [c.label, profile.gasToSpoke, 0n], role: 'operator',
+      desc: `options hub -> ${net}: adapter.setDestination(${c.label}, gas ${spokeGas(profile, c)}, 0)`,
+      on: adapter, fn: 'setDestination', args: [c.label, spokeGas(profile, c), 0n], role: 'operator',
       needed: async () => (await adapter.gasLimit(c.label)) === 0n,
     })
-    const routed =
-      isStub(adapter) || ctx.dry
-        ? true
-        : (await adapter.eidOf(c.label)) !== 0n && (await adapter.gasLimit(c.label)) !== 0n
-    if (!routed) {
-      ctx.log(`  (${net}: route or options missing — pad.setGateway withheld so spawns cannot break)`)
-      continue
+    const gasQueued = ctx.last === 'planned'
+    if (!isStub(adapter)) {
+      const gasSet = (await adapter.gasLimit(c.label)) !== 0n
+      const routeSet = (await adapter.eidOf(c.label)) !== 0n
+      // The gas limit is the OPERATOR's and must be ON CHAIN (or, in a dry
+      // run, about to be sent by this very key) before pad.setGateway is
+      // even queued: the timelock batch is setRoute then setGateway, and the
+      // moment it executes every spawn SYNCs this chain.
+      if (!(gasSet || gasQueued) || !(routeSet || routeQueued)) {
+        ctx.log(`  (${net}: route or options missing — pad.setGateway withheld so spawns cannot break)`)
+        continue
+      }
     }
     await ensure(ctx, {
       desc: `pad.setGateway(${c.label}, ${net})`,
@@ -697,7 +786,7 @@ async function selfCheck({ profile, netKey, stateFile, provider, roles, log = co
       if (!sp.ready) continue
       row(`adapter.eidOf(${net})`, await adapter.eidOf(c.label), c.eid)
       row(`adapter.peers(${net})`, await adapter.peers(c.eid), b32(sp.adapter))
-      row(`adapter.gasLimit(${net})`, await adapter.gasLimit(c.label), profile.gasToSpoke, true)
+      row(`adapter.gasLimit(${net})`, await adapter.gasLimit(c.label), spokeGas(profile, c), true)
       row(`pad.gateways(${net})`, await pad.gateways(c.label), b32(sp.gateway))
       row(`pad.autoDrop(${net})`, await pad.autoDrop(c.label), false)
     }
@@ -757,8 +846,31 @@ async function buildManifest({ profile, stateFile, hubProvider, previous }) {
       ...(profile.mainnet ? { depositCap: cap } : {}),
     })
   }
+  // A spoke is listed only once the hub has WIRED it. A spoke that joins a
+  // live deployment sits deployed-but-unwired for the timelock delay (48h):
+  // listed early, the site would send users to a chain whose messages the
+  // hub still rejects.
+  const padView = new ethers.Contract(hub.pad, ['function gateways(uint32) view returns (bytes32)'], hubProvider)
+  const wiredOnHub = async (label) => {
+    for (let i = 0; i < 4; i++) {
+      try {
+        return await padView.gateways(label)
+      } catch {
+        await new Promise((r) => setTimeout(r, 1500 * i))
+      }
+    }
+    return undefined // the hub RPC would not answer
+  }
   for (const [net, cfg] of Object.entries(activeNets(profile))) {
     if (cfg.role !== 'spoke' || !all[net]?.gateway) continue
+    const wired = await wiredOnHub(cfg.label)
+    // An unreachable hub must never silently DROP a live chain from the
+    // site: when the hub cannot be asked, the previous manifest decides.
+    const listed =
+      wired === undefined
+        ? !!previous?.chains?.some((c) => c.label === cfg.label && same(c.gateway, all[net].gateway))
+        : same(wired, b32(all[net].gateway))
+    if (!listed) continue
     chains.push({
       label: cfg.label, id: cfg.id,
       gateway: all[net].gateway, usd: all[net].usd, usdc: all[net].usdc, dist: all[net].dist,
@@ -891,11 +1003,15 @@ module.exports = {
   saveState,
   vaultOf,
   distOf,
+  spokeGas,
   roleKeys,
   preflight,
+  deployBudget,
+  LIFE_GAS,
   deployNet,
   selfCheck,
   buildManifest,
   hasRole,
   isDevNode,
+  cliSigner,
 }

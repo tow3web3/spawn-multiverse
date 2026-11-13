@@ -70,6 +70,7 @@ npm run preflight        # read-only, LIVE: every external address re-derived on
 npm run test:fork        # Base (9) + Optimism (7) forks: real endpoint, USDC, CCTP
 npm run rehearse         # the commands of §3–§6 below, end to end, on a fork
 npm run dvn:survey       # the configured verifier set still matches LayerZero's registry and quotes
+npm run rehearse:add-chain   # §10 only: add-chain.sh against forks of the LIVE deployment (4 chains, ~15 min)
 ```
 
 Needs Foundry's `anvil` (the fork node; hardhat's own EVM cannot execute on
@@ -291,25 +292,95 @@ keeps every drop small.
 `tune-fees.js` weekly and after any gas regime change: reply budgets are an
 estimate of a moving price.
 
-## 10. Adding a chain later
+## 10. Adding a chain to the live deployment
 
-1. Add it to `config/profiles.js` (eid, label, USDC, CCTP domain,
-   confirmations, its address for every DVN of the set) and extend the
-   preflight evidence in MAINNET-ADDRESSES.md.
-2. Deploy it (`deploy.js --network <new>`), `configure-dvn.js` on it.
-3. Everything on the hub and on the other chains is now **admin** work:
-   re-run `deploy.js` and `configure-dvn.js` on each — they print the calls
-   (route, options, `pad.setGateway`, CCTP peers, the hub's DVN config for
-   the new pathway) for OWNER to schedule, and they execute after 48h.
-4. **Legs go stale:** every other gateway's `spawnLegs` must grow by one, or
-   spawns from it under-prepay one SYNC until it does. That is operator
-   work — re-run `deploy.js` on each chain for the `setLegs` calldata.
-5. **Hub-bound gas:** each extra remote spoke adds ~0.27M gas to the worst
-   spawn on the hub. `gasToHub` is 4.6M for 2 spokes (3.63M worst) and
-   still covers 3 (3.88M); a 4th needs it raised on every spoke
-   (`setDestination`, operator). `npm run test:fork:base` fails if the limit
-   stops covering the worst spawn.
-6. `tune-fees.js` everywhere, `SPAWN_VERIFY=1`, canary on the new chain.
+After the hand-over every topology step is the timelocks': the hub's route
+to the newcomer, `pad.setGateway`, the CCTP peers on every vault, the hub
+side of the verifier set. OWNER schedules them, they wait **48h in public**,
+OWNER executes. Nobody can shorten that — it is the same delay that protects
+users from a hostile admin. One wrapper runs the whole thing, in two
+commands 48h apart:
+
+```bash
+bash scripts/add-chain.sh ethereum prepare     # day 0
+bash scripts/add-chain.sh ethereum finish      # day 2 (refuses, with the time left, if run early)
+```
+
+**Before `prepare`** — in `config/profiles.js` the chain needs its eid,
+label, native USDC, CCTP domain, confirmations and its address for every
+verifier of its pathway (a chain that lacks one of the default verifiers
+gets its own set under `dvn.pathways`, used on BOTH ends of that pathway);
+`MAINNET-ADDRESSES.md` gets the evidence; `npm run dvn:survey` must still
+print the configured set as live on every chain; and the fork rehearsal must
+pass from the commit that will run: `npm run rehearse:add-chain` (anvil
+forks of every chain, from the LIVE deployed state, the wrapper itself, 48h
+of time travel).
+
+**What `prepare` does**
+
+| Step | Who signs | Effect while waiting |
+|---|---|---|
+| Preflight of every chain, the new one included | nobody (read-only) | — |
+| Deploy the new spoke, vault **closed**, gateway **paused** | deployer (its admin, for now) | invisible: not in the site's manifest until the hub has wired it |
+| Its side of the verifier set | deployer | — |
+| Operator pre-steps on the hub and every live spoke: the newcomer's gas limit on the hub adapter, one more spawn leg everywhere | deployer (operator) | spawns prepay one leg more than they use; the hub tank keeps the difference |
+| ONE batch per chain on its timelock: hub = verifier set of the new pathway, CCTP peer, `setRoute`, `pad.setGateway` (in that order, atomic); each spoke = its CCTP peer | OWNER (`contracts/.env.owner`), topped up with gas by the deployer if it has none | nothing — a scheduled operation changes no state |
+
+The batch is refused while an operator pre-step is missing: the pad must
+never learn a gateway whose destination has no gas limit (every spawn would
+revert). `SPAWN_OPS=list npx hardhat run scripts/timelock-ops.js --network base`
+shows the operations and their ETA at any time.
+
+**The veto.** Until `finish` executes it, the guardian (the deployer hot
+key) or OWNER can drop a scheduled batch — nothing in it will ever run:
+
+```bash
+SPAWN_OPS=cancel SPAWN_OP_ID=0x… npx hardhat run scripts/timelock-ops.js --network base
+```
+
+The new spoke then simply stays deployed, closed and paused: it costs
+nothing and nobody can reach it. Scheduling again starts a fresh 48h.
+
+**What `finish` does** (after the delay)
+
+1. OWNER executes the hub batch. **This is the point of no return:**
+   `pad.setGateway` is permanent — there is no `removeGateway` — and from
+   this transaction on EVERY launch SYNCs the new chain, forever.
+2. At once: `tune-fees.js` on the hub (a local launch now prepays the SUM of
+   the SYNC quotes + 25%), then OWNER executes the spokes' batches, then
+   `tune-fees.js` on every spoke — its reply budget, its `spawnLegs` (padded
+   so that legs × unit covers the whole fan-out: a dearer destination costs
+   several of a spoke's own legs) and its hub-bound executor gas
+   (`hubGasFor`: +0.27M per remote chain).
+3. Every chain's wiring is read back; the verifier sets of every pathway are
+   cross-checked, both ends.
+4. The new vault opens at the canary cap, the gateway is unpaused, a full
+   round trip from the new chain with the deployer's own 3 USDC, then its
+   hand-over to OWNER's timelock, the launch cap, `status`.
+
+Between the hub batch and the re-pricing (seconds to a minute) a launch
+under-prepays the new SYNC and the hub tank covers it; the wrapper re-prices
+the hub first for that reason. If it stops there, run it again — it resumes.
+
+**Gas the wallets need** (mainnet, at 2026-11-13 gas prices):
+
+| Wallet | Chain | For | About |
+|---|---|---|---|
+| deployer | the new chain | deploy + DVN + hand-over (the preflight asks 2 × that gas at the live gas price) + the canary's messages | Ethereum at 0.11 gwei: 0.0026 + ≈0.009 → fund **0.015 ETH**. It **scales with L1 gas** (≈0.2 ETH at 5 gwei) |
+| deployer | the new chain | 3 USDC for the canary | 3 USDC |
+| deployer | hub + each live spoke | pre-steps, re-pricing, OWNER top-ups | < 0.0003 ETH each (it already holds more) |
+| OWNER | hub + each live spoke | schedule + execute one batch | sent by the deployer automatically (`SPAWN_TOPUP=1`, a few 1e-5 ETH) |
+
+**What a chain costs after it is added** — see MAINNET-ADDRESSES.md →
+"What an Ethereum leg costs". The cost of a destination is paid by every
+launch from every chain, at that destination's gas price. An L1 leg ties the
+price of every launch to L1 gas, permanently.
+
+**Rehearsing on testnets.** The testnet deployment is handed over too (same
+OWNER, timelocks with no delay), so
+`SPAWN_LAUNCH_PROFILE=testnet bash scripts/add-chain.sh ethereumSepolia prepare`
+then `… finish` runs the same sequence live. It needs faucet gas for the
+deployer on the new testnet (≈0.02 ETH on Ethereum Sepolia) — nothing else.
 
 ## Measured on mainnet forks (2026-11-13)
 
@@ -342,6 +413,17 @@ with and without the executor value option; our DVN set accepted, pinned and
 read back, per side; `rebalance` producing Circle's burn event for exactly
 the peer vault; the timelock hand-over and a timelocked DVN change;
 inbound messages (delivered by impersonating the endpoint) paying real USDC.
+
+Adding a chain (§10), proven on forks of all four chains starting from the
+LIVE deployed state (`npm run rehearse:add-chain`, 2026-11-13): the wrapper
+itself, both phases; the batches scheduled on the real timelocks by OWNER
+(impersonated — no real key signs on a fork) and refused before the delay;
+after 48h of time travel the live pad wired to the new spoke, every pathway's
+verifier set equal on both ends, the newcomer handed over; a Base launch
+SYNCing three chains and fully prepaid; Base and Optimism trading untouched;
+the worst spawn (3.88M gas with three remote chains) inside the 4.6M
+hub-bound limit. Not proven there: any packet actually crossing to or from
+the new chain — its canary is the first time.
 
 **Not proven anywhere yet — the testnet rehearsal and the mainnet canary are
 the first time:**

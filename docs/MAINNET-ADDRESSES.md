@@ -145,13 +145,21 @@ exits 1 on any difference (run 2026-11-13: 16/16 ✓).
 (The same address can be a different operator on another chain — `0xa7b5…0d99`
 is Horizen on Base and Twinstake on Optimism and Arbitrum. Hence the table.)
 
-Status: **Base and Optimism — VERIFIED on forks**: the real send and receive
-libraries accepted the set, the config was read back (per side), a real
-`endpoint.send` went through under it and the quote dropped (table below).
-**Arbitrum and Ethereum — registry + `getFee` only.** Not proven anywhere:
-both ends of a live pathway agreeing (the fork has one chain) and the DVNs
-actually signing — `SPAWN_VERIFY=1 … configure-dvn.js` checks the first at
-deploy time, the canary the second.
+Status: **Base, Optimism and Arbitrum One — LIVE** since 2026-11-13: the set
+is configured on both ends of all four pathway directions (cross-checked by
+`SPAWN_VERIFY=1 … configure-dvn.js` and by `status.js`), and full round trips
+from Optimism and from Arbitrum crossed under it (the canaries).
+**Ethereum — re-checked 2026-11-13, not live**: its four addresses match
+LayerZero's registry and each quotes `eth→base` and `base→eth`
+(`npm run dvn:survey`, 16/16 ✓); on forks of Ethereum AND of the live Base
+deployment (`npm run rehearse:add-chain`) the real send and receive
+libraries of both chains accepted the set, the hub's side was set BY THE
+LIVE TIMELOCK, and the two ends cross-checked equal. Not proven until an
+Ethereum leg exists: the DVNs actually signing an `eth↔base` packet.
+
+A chain that lacks one of these verifiers names its own set for its pathway
+(`dvn.pathways` in config/profiles.js) — the same names on both ends, each
+resolved to that chain's addresses.
 
 Fee per verifier, per pathway (ETH, `getFee`, 2026-11-13) — 25 DVNs are live
 on all four chains; every ordinary one quotes the same few 1e-7:
@@ -254,3 +262,43 @@ baked into v7:
   written on 2026-11-13.
 - Hub-local trading on Base (no LayerZero message at all) is the primary
   path; cross-chain entry is the premium path and shows its fee.
+
+## What an Ethereum leg costs — measured 2026-11-13
+
+`npm run rehearse:add-chain` adds Ethereum to forks of the LIVE deployment
+through the timelocks, then asks the real EndpointV2 on the Base fork for
+quotes under our verifier set — at the L1 gas price LayerZero's price feed
+held that day (0.14 gwei) and again after telling that same feed 5 and 30
+gwei. Hub-side cost, ETH (USD at 1,962 $/ETH), with 1.0M executor gas bought
+per message to Ethereum:
+
+| L1 gas | SYNC → Ethereum | reply → Ethereum | a launch from Base prepays | … without Ethereum |
+|---|---|---|---|---|
+| 0.14 gwei (today) | 0.000956 | 0.000955 | **0.00156** (3.07 $) | 0.00037 (0.72 $) |
+| 5 gwei | 0.00800 | 0.00799 | **0.0104** (20 $) | 0.00037 |
+| 30 gwei | 0.0451 | 0.0451 | **0.0568** (111 $) | 0.00037 |
+
+(The L2 quotes do not move: SYNC → Optimism 0.000127, → Arbitrum 0.000169.)
+
+What that means, given that `pad.setGateway` is permanent and every spawn
+SYNCs every wired chain:
+
+- **Every launch, from every chain, pays the Ethereum SYNC** — 4.2× today's
+  launch fee at 0.14 gwei, and it scales with L1 gas from there.
+- **Every trade from Ethereum prepays an Ethereum reply** (0.0012 ETH with
+  the margin today, on top of its own L1 transaction and send).
+- **The contracts' ceilings bite early.** A launch from a spoke prepays
+  `spawnLegs × returnUnit`, and `spawnLegs ≤ 32`. At Optimism's reply price
+  (0.00016 ETH/leg) that is 0.0051 ETH: above **≈2 gwei** L1 a launch from
+  Optimism can no longer prepay the Ethereum SYNC (≈3 gwei from Arbitrum)
+  and the hub tank pays the difference — a drain anyone can trigger by
+  launching — unless the operator raises that chain's per-leg price, which
+  every trade from that chain then pays too. `tune-fees.js` clamps and warns;
+  it does not make that trade-off by itself. `returnUnit ≤ 0.05 ETH` caps an
+  Ethereum reply at ≈26 gwei.
+- The only brake during an L1 gas spike is pausing entry (gateways) — there
+  is no way to stop SYNCing a wired chain.
+
+Deploying the leg itself is cheap at 0.1 gwei: the preflight asks the
+deployer for 2 × 12.07M gas at the live gas price (0.0026 ETH on
+2026-11-13), and the canary from Ethereum costs ≈0.009 ETH in messages.

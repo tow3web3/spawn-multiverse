@@ -11,7 +11,7 @@
  */
 const { ethers, network } = require('hardhat')
 const { getProfile, netKeyOf } = require('../config/profiles')
-const { loadState, same, isDevNode, MAINNET_CONFIRM } = require('./lib-net')
+const { loadState, same, isDevNode, MAINNET_CONFIRM, cliSigner } = require('./lib-net')
 
 async function main() {
   const profile = getProfile(network.name)
@@ -22,7 +22,7 @@ async function main() {
     throw new Error('SPAWN_CAP_USDC=<whole USDC> is required')
   }
   const want = BigInt(process.env.SPAWN_CAP_USDC) * 10n ** 6n
-  const [signer] = await ethers.getSigners()
+  const signer = await cliSigner()
   const state = loadState(profile.stateFile)[netKey]
   const vaultAddr = cfg.role === 'hub' ? state?.localUsd : state?.usd
   if (!vaultAddr) throw new Error(`${netKey}: no vault deployed in ${profile.stateFile}`)

@@ -338,16 +338,17 @@ run('Base mainnet fork — the hub over the real endpoint, real USDC, real CCTP'
 
     // tune-fees re-prices the local spawn fan-out from the LIVE quotes of the new set
     const syncData = h.payload(OP.SYNC, ['bytes32', 'string', 'string'], [ethers.ZeroHash, 'N'.repeat(64), 'S'.repeat(16)])
-    const dearest = [
-      await adapter.quote(op.label, dst, syncData, 0),
-      await adapter.quote(profile.nets.arbitrum.label, b32(state().arbitrum.gateway), syncData, 0),
-    ].reduce((a, q) => (q > a ? q : a))
+    const sum =
+      (await adapter.quote(op.label, dst, syncData, 0)) +
+      (await adapter.quote(profile.nets.arbitrum.label, b32(state().arbitrum.gateway), syncData, 0))
     const tuned = await tuneFees({ profile, netKey: 'base', signer: deployer, apply: true, log: h.quiet })
     expect(tuned.applied).to.equal(true)
-    expect(await adapter.returnUnit(0)).to.equal((dearest * 125n) / 100n)
+    // the SUM of the SYNC quotes + 25%, spread over the 2 legs a local spawn prepays (rounded up)
+    expect(await adapter.returnUnit(0)).to.equal((sum * 125n - 1n) / 200n + 1n)
     report.tunedUnit = await adapter.returnUnit(0)
-    // a local spawn now prepays exactly 2 SYNCs at the tuned price — and that covers them
+    // a local spawn now prepays exactly its fan-out + the margin — and that covers it
     expect(await gateway.quoteSpawn('X', 'X', '{}', false)).to.equal(report.tunedUnit * 2n)
+    expect(report.tunedUnit * 2n).to.be.gte((sum * 125n) / 100n)
   })
 
   it('measures the real gas of a remote-origin SPAWN on the hub (2 then 3 remote SYNCs) — the hub-bound gas limit', async () => {

@@ -17,7 +17,7 @@
 const { ethers, network } = require('hardhat')
 const { getProfile, netKeyOf } = require('../config/profiles')
 const { configureDvn, verifyDvn } = require('./lib-dvn')
-const { MAINNET_CONFIRM, isDevNode } = require('./lib-net')
+const { MAINNET_CONFIRM, isDevNode, cliSigner } = require('./lib-net')
 
 async function main() {
   const profile = getProfile(network.name)
@@ -30,7 +30,7 @@ async function main() {
     console.log('  ✓ every pathway: both ends name the configured verifier set')
     return
   }
-  const [signer] = await ethers.getSigners()
+  const signer = await cliSigner()
   const dev = await isDevNode(signer.provider)
   const dry = process.env.SPAWN_DRY === '1' || (profile.mainnet && !dev && process.env.SPAWN_MAINNET_CONFIRM !== MAINNET_CONFIRM)
   const res = await configureDvn({ profile, netKey: netKeyOf(network.name), signer, dry })

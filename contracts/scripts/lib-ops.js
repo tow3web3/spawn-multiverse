@@ -7,7 +7,7 @@
  * "network" of a simulated deployment on one in-process chain.
  */
 const { ethers } = require('hardhat')
-const { activeNets } = require('../config/profiles')
+const { activeNets, hubGasFor } = require('../config/profiles')
 const { loadState, b32, same, hasRole, vaultOf, distOf, roleKeys, USDC_ABI, ENDPOINT_ABI } = require('./lib-net')
 const { verifyDvn } = require('./lib-dvn')
 
@@ -34,14 +34,21 @@ const SAMPLE_SYNC = coder.encode(
 /* -------------------------------- tune-fees -------------------------------- */
 
 /**
- * Re-prices the reply budget of one network from LIVE quotes.
+ * Re-prices one network's reply budgets from LIVE quotes.
  *  - on a SPOKE: `returnUnit(hub)` = what the hub pays to answer this chain
- *    (a DELIVER), × margin. It is what every trade from here prepays per leg.
- *  - on the HUB: `returnUnit(0)` = the dearest SYNC to any spoke × margin —
- *    what a locally-initiated spawn prepays per remote chain.
+ *    (a DELIVER) + margin — what every trade from here prepays per leg. Then
+ *    `spawnLegs`, so that legs × unit covers what a spawn from here makes
+ *    the hub pay: one SYNC to EVERY remote chain (never fewer legs than
+ *    chains). A dearer destination — an L1 — costs several of this chain's
+ *    legs, which is why the count alone under-funds the hub tank. And the
+ *    hub-bound executor gas, which must grow with the number of chains the
+ *    hub SYNCs on a spawn (config/profiles.js → hubGasFor).
+ *  - on the HUB: `returnUnit(0)` = (Σ of the SYNC quotes to every remote
+ *    chain + margin) ÷ the local gateway's spawnLegs — a locally-initiated
+ *    spawn prepays exactly the fan-out, not (dearest × chains).
  * Set too low the hub tank drains and replies stall (retryable); too high
  * users overpay into the tank. Operator-only; without the role (or without
- * `apply`) the change is printed as calldata.
+ * `apply`) the changes are printed as calldata.
  * opts: { profile, netKey, signer, apply?, marginPct?, tolerancePct?, providers?, stateFile?, log? }
  */
 async function tuneFees(opts) {
@@ -55,60 +62,123 @@ async function tuneFees(opts) {
   const nets = activeNets(profile)
   const cfg = profile.nets[netKey]
   const adapter = await ethers.getContractAt('LayerZeroOmniMessenger', s.adapter, signer)
+  const gateway = await ethers.getContractAt('SpawnGateway', s.gateway, signer)
   const hubAdapter =
     netKey === profile.hub
       ? adapter
       : await ethers.getContractAt('LayerZeroOmniMessenger', hub.adapter, providerOf(profile, profile.hub, opts.providers))
+  const ceilDiv = (a, b) => (a === 0n ? 0n : (a - 1n) / b + 1n)
+
+  // what the hub pays to SYNC each remote chain it has a route to
+  const syncs = []
+  for (const [net, c] of Object.entries(nets)) {
+    if (c.role !== 'spoke' || !all[net]?.ready) continue
+    if ((await hubAdapter.eidOf(c.label)) === 0n) continue
+    syncs.push({ net, what: 'SYNC', fee: await hubAdapter.quote(c.label, b32(all[net].gateway), SAMPLE_SYNC, 0) })
+  }
+  const syncSum = syncs.reduce((a, q) => a + q.fee, 0n)
 
   const quotes = []
+  let target
+  let basis
+  let legsNow = Number(await gateway.spawnLegs())
+  let legsTarget = legsNow
+  const tradeLegs = Number(await gateway.tradeLegs())
+  const gas = await adapter.gasLimit(0)
+  let gasTarget = gas
   if (cfg.role === 'hub') {
-    for (const [net, c] of Object.entries(nets)) {
-      if (c.role !== 'spoke' || !all[net]?.ready) continue
-      if ((await adapter.eidOf(c.label)) === 0n) continue
-      quotes.push({ net, what: 'SYNC', fee: await adapter.quote(c.label, b32(all[net].gateway), SAMPLE_SYNC, 0) })
-    }
+    quotes.push(...syncs)
     if (!quotes.length) {
       log(`tune-fees — ${netKey}: no wired spoke yet, nothing to price`)
       return { changed: false, quotes }
     }
+    const legs = BigInt(Math.max(1, legsNow))
+    target = ceilDiv(syncSum * (100n + marginPct), 100n * legs)
+    basis = `Σ of ${quotes.length} SYNC quote(s) + ${marginPct}% ÷ ${legs} leg(s)`
   } else {
     if ((await hubAdapter.eidOf(cfg.label)) === 0n) {
       throw new Error(`the hub has no route to ${netKey} yet — re-run the deploy on ${profile.hub} first`)
     }
     quotes.push({ net: netKey, what: 'DELIVER', fee: await hubAdapter.quote(cfg.label, b32(s.gateway), SAMPLE_DELIVER, 0) })
+    target = (quotes[0].fee * (100n + marginPct)) / 100n
+    basis = `the DELIVER quote + ${marginPct}%`
+    gasTarget = hubGasFor(profile, syncs.length)
+    if (gasTarget < gas) gasTarget = gas // never lowered here: a spawn out of gas on the hub is a stuck message
   }
-  const dearest = quotes.reduce((a, q) => (q.fee > a ? q.fee : a), 0n)
-  let target = (dearest * (100n + marginPct)) / 100n
   const cap = await adapter.MAX_RETURN_UNIT()
   if (target > cap) {
     log(`  ⚠ ${fmt(target)} ETH exceeds the contract cap ${fmt(cap)} — clamped; replies will be under-funded`)
     target = cap
   }
   const current = await adapter.returnUnit(0)
-  const gas = await adapter.gasLimit(0)
   const diff = current > target ? current - target : target - current
-  const changed = current === 0n || diff * 100n > current * tolerancePct
+  const unitChanged = current === 0n || diff * 100n > current * tolerancePct
+  // the unit that will be on chain after this run: legs are sized against it
+  const unit = unitChanged ? target : current
+  if (cfg.role !== 'hub' && unit > 0n) {
+    const maxLegs = Number(await gateway.MAX_SPAWN_LEGS())
+    const need = Number(ceilDiv(syncSum * (100n + marginPct), 100n * unit))
+    legsTarget = Math.max(syncs.length, need)
+    if (legsTarget > maxLegs) {
+      log(`  ⚠ a spawn from ${netKey} would need ${legsTarget} legs, the contract allows ${maxLegs} — clamped; the hub tank pays the rest`)
+      legsTarget = maxLegs
+    }
+    // tolerance: a couple of percent of drift is not worth a transaction, and
+    // legs are never lowered below one per chain
+    if (legsTarget < legsNow && (legsNow - legsTarget) * 100 <= legsNow * Number(tolerancePct)) legsTarget = legsNow
+  }
+  const legsChanged = legsTarget !== legsNow
+  const gasChanged = gasTarget !== gas
+  const changed = unitChanged || legsChanged || gasChanged
 
   log(`tune-fees — ${profile.name}/${netKey} — reply budget per leg (hub-chain native)`)
   for (const q of quotes) log(`  live quote hub -> ${q.net} (${q.what}): ${fmt(q.fee)} ETH`)
-  log(`  current ${fmt(current)} ETH  →  target ${fmt(target)} ETH (dearest quote + ${marginPct}%)`)
+  log(`  current ${fmt(current)} ETH  →  target ${fmt(target)} ETH (${basis})`)
+  if (cfg.role !== 'hub') {
+    for (const q of syncs) log(`  a spawn from here makes the hub SYNC ${q.net}: ${fmt(q.fee)} ETH`)
+    log(`  spawnLegs ${legsNow}  →  ${legsTarget} (Σ SYNC ${fmt(syncSum)} ETH + ${marginPct}% ÷ ${fmt(unit)} ETH/leg, at least one per chain)`)
+    log(`  hub-bound executor gas ${gas}  →  ${gasTarget} (${syncs.length} remote chain(s) on a spawn)`)
+  }
   if (!changed) {
     log(`  ✓ within ${tolerancePct}% — left as is`)
-    return { changed: false, current, target, quotes }
+    return { changed: false, current, target, quotes, syncs, legs: { current: legsNow, target: legsTarget }, gas: { current: gas, target: gasTarget } }
   }
-  const args = [0, gas, target]
+  const out = {
+    changed: true, applied: false, current, target, quotes, syncs,
+    legs: { current: legsNow, target: legsTarget }, gas: { current: gas, target: gasTarget },
+  }
   if (!opts.apply) {
     log('  (not applied — SPAWN_APPLY=1 sends it)')
-    return { changed: true, applied: false, current, target, quotes }
+    return out
   }
-  if (!(await hasRole(adapter, 'operator', signer.address))) {
-    const data = adapter.interface.encodeFunctionData('setDestination', args)
-    log(`  ⏳ needs the operator: target ${adapter.target} data ${data}`)
-    return { changed: true, applied: false, blocked: { target: adapter.target, data }, current, target, quotes }
+  const destArgs = [0, gasTarget, unit]
+  const legsArgs = [tradeLegs, legsTarget]
+  const isOperator = await hasRole(adapter, 'operator', signer.address)
+  if (!isOperator) {
+    if (unitChanged || gasChanged) {
+      const data = adapter.interface.encodeFunctionData('setDestination', destArgs)
+      log(`  ⏳ needs the operator: target ${adapter.target} data ${data}`)
+      out.blocked = { target: adapter.target, data }
+    }
+    if (legsChanged) {
+      const data = gateway.interface.encodeFunctionData('setLegs', legsArgs)
+      log(`  ⏳ needs the operator: target ${gateway.target} data ${data}`)
+      out.blockedLegs = { target: gateway.target, data }
+    }
+    return out
   }
-  await (await adapter.setDestination(...args)).wait()
-  log(`  adapter.setDestination(0, ${gas}, ${fmt(target)} ETH) ✓`)
-  return { changed: true, applied: true, current, target, quotes }
+  // Order matters when the budget GROWS: the unit (and gas) first, the legs
+  // after — at no point does a spawn prepay less than before.
+  if (unitChanged || gasChanged) {
+    await (await adapter.setDestination(...destArgs)).wait()
+    log(`  adapter.setDestination(0, ${gasTarget}, ${fmt(unit)} ETH) ✓`)
+  }
+  if (legsChanged) {
+    await (await gateway.setLegs(...legsArgs)).wait()
+    log(`  gateway.setLegs(${tradeLegs}, ${legsTarget}) ✓`)
+  }
+  out.applied = true
+  return out
 }
 
 /* ------------------------------- keeper-pull ------------------------------- */

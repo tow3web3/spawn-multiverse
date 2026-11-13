@@ -130,8 +130,14 @@ const mainnet = {
       usdc: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
       tokenMessenger: CCTP_TOKEN_MESSENGER_V2, cctpDomain: 0,
       confirmations: 15,
-      // an L1 deploy: ~12M gas at L1 prices (preflight floor for this net)
-      budget: eth('0.02'),
+      // An L1 deploy is ~12M gas at L1 prices: the preflight budget is 2 ×
+      // that at the LIVE gas price (lib-net.js → deployBudget) — ~0.003 ETH
+      // at 0.14 gwei, ~0.7 ETH at 30 gwei. This is only the absolute floor.
+      budgetFloor: eth('0.002'),
+      // On an L1 the hub pays for every unit of executor gas it buys: the
+      // worst SYNC (a replica deploy, longest strings) measured 0.78M, so
+      // 1.0M (+28%) instead of the profile's 1.2M.
+      gasToSpoke: 1_000_000n,
       enabled: enabledExtra.has('ethereum'),
     },
   },
@@ -176,6 +182,12 @@ const mainnet = {
     optional: ['Horizen', 'Twinstake'],
     optionalThreshold: 1,
     maxMessageSize: 10_000,
+    // Per-pathway exceptions, keyed "<net>|<net>" (either order): a chain
+    // may lack one of the verifiers above (Google is not on every chain).
+    // A pathway named here uses ITS set on both ends; every other pathway
+    // uses the default above. Example:
+    //   'base|somechain': { required: ['LayerZero Labs', 'Horizen'], optional: ['Twinstake'], optionalThreshold: 1 },
+    pathways: {},
     addresses: {
       'LayerZero Labs': {
         base: '0x9e059a54699a285714207b43B055483E78FAac25',
@@ -239,4 +251,33 @@ function activeNets(profile) {
   return Object.fromEntries(Object.entries(profile.nets).filter(([, c]) => c.enabled !== false))
 }
 
-module.exports = { PROFILES, getProfile, netKeyOf, activeNets, eth }
+/**
+ * The executor gas a spoke must buy for a hub-bound message, given how many
+ * REMOTE spokes the hub SYNCs on a spawn. Measured against the real
+ * EndpointV2 (test-fork/): the worst spawn the gateway admits costs 3.63M
+ * gas with 2 remote spokes and ~0.27M more per extra spoke; the limit keeps
+ * 15% above that and never goes below the profile's `gasToHub`. A spawn that
+ * runs out of gas on the hub is a stuck message — adding a chain must raise
+ * this on EVERY spoke adapter (tune-fees.js does).
+ */
+function hubGasFor(profile, remoteSpokes) {
+  const worst = 3_630_000n + 270_000n * BigInt(Math.max(0, remoteSpokes - 2))
+  const need = (worst * 115n) / 100n
+  return need > profile.gasToHub ? need : profile.gasToHub
+}
+
+/** The verifier set of the pathway between `a` and `b`: its own entry in
+ * `dvn.pathways` (either key order), else the profile default. */
+function dvnSetFor(profile, a, b) {
+  const d = profile.dvn
+  const own = d.pathways?.[`${a}|${b}`] ?? d.pathways?.[`${b}|${a}`]
+  const set = own ?? d
+  return {
+    required: set.required,
+    optional: set.optional ?? [],
+    optionalThreshold: (set.optional ?? []).length ? set.optionalThreshold : 0,
+    own: !!own,
+  }
+}
+
+module.exports = { PROFILES, getProfile, netKeyOf, activeNets, hubGasFor, dvnSetFor, eth }

@@ -14,10 +14,11 @@
 const { ethers, network } = require('hardhat')
 const { getProfile, netKeyOf } = require('../config/profiles')
 const { handover } = require('./lib-handover')
+const { cliSigner } = require('./lib-net')
 
 async function main() {
   const profile = getProfile(network.name)
-  const [signer] = await ethers.getSigners()
+  const signer = await cliSigner()
   if (!signer) throw new Error('no deployer key in contracts/.env')
   await handover({
     profile,

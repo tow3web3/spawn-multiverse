@@ -18,7 +18,7 @@
  * the hand-over, the timelock after (then the calldata is printed instead).
  */
 const { ethers } = require('hardhat')
-const { activeNets } = require('../config/profiles')
+const { activeNets, dvnSetFor } = require('../config/profiles')
 const { loadState, same } = require('./lib-net')
 
 const CONFIG_TYPE_EXECUTOR = 1
@@ -59,17 +59,20 @@ function dvnAddresses(profile, net, names) {
   )
 }
 
-/** The ULN config this deployment wants on `net` for a pathway whose SOURCE
- * chain is `srcNet` (confirmations are a property of the source chain). */
-function plannedUln(profile, net, srcNet) {
-  const d = profile.dvn
-  const required = dvnAddresses(profile, net, d.required)
-  const optional = dvnAddresses(profile, net, d.optional ?? [])
+/** The ULN config this deployment wants on `net`, for its pathway with
+ * `remote`, when the SOURCE chain is `srcNet` (confirmations are a property
+ * of the source chain). The verifier set is the pathway's own
+ * (`dvn.pathways`) or the profile default — the SAME names on both ends,
+ * resolved to each chain's addresses. */
+function plannedUln(profile, net, srcNet, remote) {
+  const set = dvnSetFor(profile, net, remote ?? (srcNet === net ? undefined : srcNet))
+  const required = dvnAddresses(profile, net, set.required)
+  const optional = dvnAddresses(profile, net, set.optional)
   return {
     confirmations: BigInt(profile.nets[srcNet].confirmations),
     requiredDVNCount: required.length,
     optionalDVNCount: optional.length,
-    optionalDVNThreshold: optional.length ? d.optionalThreshold : 0,
+    optionalDVNThreshold: set.optionalThreshold,
     requiredDVNs: required,
     optionalDVNs: optional,
   }
@@ -113,7 +116,7 @@ function remotesOf(profile, netKey) {
 /**
  * Configures (or, already configured, verifies) the DVN set of `netKey`'s
  * adapter for every pathway it takes part in, then reads it back.
- * opts: { profile, netKey, signer, stateFile?, dry?, log? }
+ * opts: { profile, netKey, signer, stateFile?, dry?, collect?, log? }
  */
 async function configureDvn(opts) {
   const { profile, netKey, signer, log = console.log } = opts
@@ -134,14 +137,16 @@ async function configureDvn(opts) {
       (dry ? ' — DRY RUN' : ''),
   )
   const d = profile.dvn
-  log(
-    `  set: required ${d.required.join(' + ')}` +
-      (d.optional?.length ? ` | optional ${d.optionalThreshold}-of ${d.optional.join(', ')}` : ''),
-  )
+  const setText = (set) =>
+    `required ${set.required.join(' + ')}` +
+    (set.optional.length ? ` | optional ${set.optionalThreshold}-of ${set.optional.join(', ')}` : '')
+  log(`  default set: ${setText(dvnSetFor(profile, netKey, undefined))}`)
 
+  // `collect`: gather what is needed as calldata and send NOTHING, whoever
+  // the signer is (scripts/lib-timelock.js batches it for the timelock)
   const act = async (desc, fn, args) => {
     if (dry) return log(`  would: ${desc}`)
-    if (!canConfigure) {
+    if (!canConfigure || opts.collect) {
       const data = endpoint.interface.encodeFunctionData(fn, args)
       result.blocked.push({ desc, target: profile.endpoint, data })
       return log(`  ⏳ ${desc} — needs the delegate: target ${profile.endpoint} data ${data}`)
@@ -156,12 +161,14 @@ async function configureDvn(opts) {
     const r = profile.nets[remote]
     const sendLib = await endpoint.getSendLibrary(oapp, r.eid)
     const [recvLib, recvIsDefault] = await endpoint.getReceiveLibrary(oapp, r.eid)
-    const sendUln = plannedUln(profile, netKey, netKey) // we are the source
-    const recvUln = plannedUln(profile, netKey, remote) // the remote is the source
+    const set = dvnSetFor(profile, netKey, remote)
+    if (set.own) log(`  ${netKey} <-> ${remote} has its OWN set: ${setText(set)}`)
+    const sendUln = plannedUln(profile, netKey, netKey, remote) // we are the source
+    const recvUln = plannedUln(profile, netKey, remote, remote) // the remote is the source
 
     // never configure a verifier that will not quote this pathway: with a
     // DVN that refuses the job, every send on it reverts
-    for (const name of [...d.required, ...(d.optional ?? [])]) {
+    for (const name of [...set.required, ...set.optional]) {
       const addr = ethers.getAddress(d.addresses[name][netKey])
       try {
         await new ethers.Contract(addr, DVN_ABI, provider).getFee(r.eid, sendUln.confirmations, oapp, '0x')
@@ -220,7 +227,7 @@ async function configureDvn(opts) {
         `${effRecv.requiredDVNCount} required + ${effRecv.optionalDVNThreshold}-of-${effRecv.optionalDVNCount} optional, ` +
         `${effRecv.confirmations} confirmations`,
     )
-    if (!dry && canConfigure && (!okSend || !okRecv)) {
+    if (!dry && canConfigure && !opts.collect && (!okSend || !okRecv)) {
       throw new Error(`${netKey} <-> ${remote}: the DVN config read back from the chain does not match the plan`)
     }
   }
@@ -271,10 +278,12 @@ async function verifyDvn({ profile, stateFile, providers, log = console.log }) {
         JSON.stringify(sOpt) === JSON.stringify(rOpt) &&
         Number(s.optionalDVNThreshold) === Number(r.optionalDVNThreshold) &&
         BigInt(s.confirmations) >= BigInt(r.confirmations)
+      const want = profile.dvn ? dvnSetFor(profile, src, dst) : null
       const planned =
-        profile.dvn &&
-        JSON.stringify(sReq) === JSON.stringify([...profile.dvn.required].sort()) &&
-        JSON.stringify(sOpt) === JSON.stringify([...(profile.dvn.optional ?? [])].sort())
+        want &&
+        JSON.stringify(sReq) === JSON.stringify([...want.required].sort()) &&
+        JSON.stringify(sOpt) === JSON.stringify([...want.optional].sort()) &&
+        Number(s.optionalDVNThreshold) === want.optionalThreshold
       rows.push({ src, dst, sReq, rReq, sOpt, rOpt, match, planned: !!planned, confirmations: [s.confirmations, r.confirmations] })
       log(
         `  ${match && planned ? '✓' : '✗'} ${src} -> ${dst}: send [${sReq.join(' + ')}${sOpt.length ? ` | ${s.optionalDVNThreshold}-of ${sOpt.join(', ')}` : ''}]` +

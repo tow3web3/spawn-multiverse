@@ -14,11 +14,11 @@
 const { ethers, network } = require('hardhat')
 const { getProfile, netKeyOf } = require('../config/profiles')
 const { tuneFees } = require('./lib-ops')
-const { MAINNET_CONFIRM, isDevNode } = require('./lib-net')
+const { MAINNET_CONFIRM, isDevNode, cliSigner } = require('./lib-net')
 
 async function main() {
   const profile = getProfile(network.name)
-  const [signer] = await ethers.getSigners()
+  const signer = await cliSigner()
   const dev = await isDevNode(signer.provider)
   const confirmed = !profile.mainnet || dev || process.env.SPAWN_MAINNET_CONFIRM === MAINNET_CONFIRM
   if (process.env.SPAWN_APPLY === '1' && !confirmed) console.log('(mainnet: SPAWN_MAINNET_CONFIRM is not set — showing only)')

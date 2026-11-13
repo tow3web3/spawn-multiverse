@@ -58,7 +58,7 @@ async function main() {
     }
     const tank = profile.tank[role] ?? 0n
     const estimate = exec + l1 + tank
-    const floor = c.budget ?? profile.budget[role]
+    const floor = c.budgetFloor ?? c.budget ?? profile.budget[role]
     // 3x on what moves with gas prices; the tank float is a fixed amount
     const padded = (exec + l1) * 3n + tank
     const fund = padded > floor ? padded : floor
