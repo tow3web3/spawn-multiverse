@@ -9,6 +9,7 @@ contracts/.env.drip
 # the protocol owner's wallet (timelock proposer/executor) — never committed
 contracts/.env.owner
 contracts/deployments/logs
+contracts/deployments/.canary-*
 .claude/worktrees
 
 # Local Netlify folder

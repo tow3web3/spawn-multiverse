@@ -106,7 +106,16 @@
     "usdc": "0x1Af7d7eb1C96d1c2F722B459Af785fE1B655436E",
     "localUsd": "0xC852a74cD1db2e014122815bA2bD64cE5a3A39De",
     "gateway": "0x125213ef1bB6312967c140599198752B00F14a40",
-    "localDist": "0xDCA6749Ea94e2A5288408623EdC197dbd9bf387B"
+    "localDist": "0xDCA6749Ea94e2A5288408623EdC197dbd9bf387B",
+    "timelock": "0x20e48BBadEBDCFD0a3cE463938ccBF66fc3AEcE5",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 0,
+      "timelock": "0x20e48BBadEBDCFD0a3cE463938ccBF66fc3AEcE5",
+      "at": "2026-11-13T17:24:10.753Z"
+    }
   },
   "optimismSepolia": {
     "adapter": "0xAD2dfBCE4bcE6659Be0A73dA3975c1361F300835",
@@ -115,7 +124,16 @@
     "usd": "0xF3E9F846Cff29f893783502F386F632445C4FB97",
     "gateway": "0x1edC76592bc2Ec78A247f65eC2C6c93558B63A83",
     "dist": "0x83bfc70427b3A34A8f5df9742814Cf8C7E20385C",
-    "ready": true
+    "ready": true,
+    "timelock": "0x02F4Ee1c51502A3d81Eb11653Bd4CE49513853b6",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 0,
+      "timelock": "0x02F4Ee1c51502A3d81Eb11653Bd4CE49513853b6",
+      "at": "2026-11-13T17:24:32.145Z"
+    }
   },
   "arbitrumSepolia": {
     "adapter": "0x7f640D441DbAE547Db3cf822bD06a0BDBdD48953",
@@ -124,6 +142,15 @@
     "usd": "0x9E9433B78Ab015d7F797c8df91d78F52B416eE4c",
     "gateway": "0x7ABb22F75FE7c092439Cb751DE6e3AE3a688E7D7",
     "dist": "0x653084E526568a18f7566E74BDb47e80F52f1e1c",
-    "ready": true
+    "ready": true,
+    "timelock": "0x4B7cD60a771a9f37410a955723A43F85232E9b91",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 0,
+      "timelock": "0x4B7cD60a771a9f37410a955723A43F85232E9b91",
+      "at": "2026-11-13T17:25:25.281Z"
+    }
   }
 }

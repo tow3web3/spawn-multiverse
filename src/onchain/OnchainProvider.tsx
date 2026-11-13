@@ -1536,6 +1536,12 @@ export function OnchainProvider({
       if (hubPausedRef.current) throw new Error('The hub is paused — launches are closed for now.')
       if (st.paused) throw new Error(`Launches are paused on ${up(c.id)}.`)
 
+      // Where other people see the token (public testnet, mainnet) it must
+      // carry its real image: the hosted path has to be in the metaURI. A
+      // local devnet has no image function and keeps the creator's own copy.
+      if (networkRef.current !== 'local' && !hostedImagePath(input.imageUrl))
+        throw new Error('A token needs its image — pick one, it is hosted when you launch.')
+
       const { name, ticker, metaURI } = spawnArgs(input)
       if (utf8Len(name) > MAX_NAME_BYTES) throw new Error('That name is too long.')
       if (utf8Len(ticker) > MAX_SYMBOL_BYTES) throw new Error('That ticker is too long.')

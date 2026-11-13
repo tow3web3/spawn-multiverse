@@ -1,15 +1,19 @@
 export interface Chain {
   id: string
   label: string
-  short: string
+  /** The app's pastel for this chain (tints, backgrounds). */
   color: string
+  /** The chain's own brand colour — matches its logo (data marks: the supply bar). */
+  brand: string
 }
 
+// No letter abbreviations on purpose: a chain is always shown by its real
+// logo (components/ChainLogos.tsx), never by an initial.
 export const CHAINS: Chain[] = [
-  { id: 'solana', label: 'SOLANA', short: 'S', color: '#b5e95b' },
-  { id: 'ethereum', label: 'ETHEREUM', short: 'E', color: '#9ccbf5' },
-  { id: 'base', label: 'BASE', short: 'B', color: '#7fa8f8' },
-  { id: 'bnb', label: 'BNB', short: 'BN', color: '#f8d55a' },
-  { id: 'arbitrum', label: 'ARBITRUM', short: 'A', color: '#f5a8c8' },
-  { id: 'optimism', label: 'OPTIMISM', short: 'O', color: '#f58b7e' },
+  { id: 'solana', label: 'SOLANA', color: '#b5e95b', brand: '#9945FF' },
+  { id: 'ethereum', label: 'ETHEREUM', color: '#9ccbf5', brand: '#627EEA' },
+  { id: 'base', label: 'BASE', color: '#7fa8f8', brand: '#0000FF' },
+  { id: 'bnb', label: 'BNB', color: '#f8d55a', brand: '#F0B90B' },
+  { id: 'arbitrum', label: 'ARBITRUM', color: '#f5a8c8', brand: '#12AAFF' },
+  { id: 'optimism', label: 'OPTIMISM', color: '#f58b7e', brand: '#FF0420' },
 ]

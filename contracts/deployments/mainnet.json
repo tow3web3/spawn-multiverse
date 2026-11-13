@@ -1,0 +1,31 @@
+{
+  "base": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "transport": "v7",
+    "usd": "0x008c4d40F61fd650b1DC91fD7ad540483324cE2C",
+    "pad": "0xC2f3855ECcB6bD2261831743Ece9752ec9E53811",
+    "venue": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5",
+    "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "localUsd": "0xada6ceaEA64EA685a3CbA8e8F94A1690B29904C2",
+    "gateway": "0x41EF79573dC463FD08aAD0f6e40Bd78Dea955B4D",
+    "localDist": "0x29E9BD629eB51B232a9026C313f39a2edA103605"
+  },
+  "optimism": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "transport": "v7",
+    "usdc": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+    "usd": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5",
+    "gateway": "0x08B3fa634bd37325aB8322fd7258Fb6A52375E78",
+    "dist": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
+    "ready": true
+  },
+  "arbitrum": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "transport": "v7",
+    "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "usd": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5",
+    "gateway": "0x08B3fa634bd37325aB8322fd7258Fb6A52375E78",
+    "dist": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
+    "ready": true
+  }
+}

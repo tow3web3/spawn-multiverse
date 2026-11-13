@@ -75,6 +75,16 @@ async function handover(opts) {
     gasUsed += (await (await txp()).wait()).gasUsed
     log(`  ${desc} ✓`)
   }
+  // A load-balanced public RPC can answer from a node that has not seen the
+  // transaction just mined (observed on OP Sepolia and OP mainnet). Every
+  // step that depends on the previous one waits until it is VISIBLE here.
+  const until = async (what, fn) => {
+    for (let i = 0; i < 60; i++) {
+      if (await fn().catch(() => false)) return
+      if (live) await new Promise((r) => setTimeout(r, 2000))
+    }
+    throw new Error(`${what}: still not visible on this RPC after 2 minutes — run the hand-over again, it resumes`)
+  }
 
   // 0. the fast roles, while the deployer can still name them
   for (const { key, c } of contracts) {
@@ -115,7 +125,18 @@ async function handover(opts) {
     }
   }
 
-  // 3. it accepts them all in one batch (only while its delay is still 0)
+  if (!dry) {
+    for (const { key, c } of contracts) {
+      await until(`${key}: the nomination of the timelock`, async () =>
+        same(await c.pendingAdmin(), timelock.target) || same(await c.admin(), timelock.target),
+      )
+    }
+  }
+
+  // 3. it accepts them all in one batch (only while its delay is still 0).
+  // Resumable at every point: an operation already scheduled is not
+  // scheduled again (the timelock would refuse), one already executed is
+  // left alone.
   const pending = []
   for (const { key, c } of contracts) if (!dry && same(await c.pendingAdmin(), timelock.target)) pending.push({ key, c })
   if (pending.length) {
@@ -126,20 +147,40 @@ async function handover(opts) {
     const zeros = pending.map(() => 0)
     const accepts = pending.map((p) => p.c.interface.encodeFunctionData('acceptAdmin'))
     const salt = ethers.id(`spawn/handover/${netKey}/${targets.join(',')}`)
-    await send(`timelock: batch acceptAdmin on ${pending.map((p) => p.key).join(', ')}`, async () => {
-      gasUsed += (await (await timelock.scheduleBatch(targets, zeros, accepts, ethers.ZeroHash, salt, 0)).wait()).gasUsed
-      return timelock.executeBatch(targets, zeros, accepts, ethers.ZeroHash, salt)
-    })
+    const id = await timelock.hashOperationBatch(targets, zeros, accepts, ethers.ZeroHash, salt)
+    if (!(await timelock.isOperationDone(id))) {
+      await send(`timelock: batch acceptAdmin on ${pending.map((p) => p.key).join(', ')}`, async () => {
+        if (!(await timelock.isOperation(id))) {
+          gasUsed += (await (await timelock.scheduleBatch(targets, zeros, accepts, ethers.ZeroHash, salt, 0)).wait()).gasUsed
+        }
+        await until('the scheduled acceptAdmin batch', () => timelock.isOperationReady(id))
+        return timelock.executeBatch(targets, zeros, accepts, ethers.ZeroHash, salt)
+      })
+    }
+  }
+  // Every contract must answer to the timelock BEFORE its delay is raised:
+  // a straggler would need an accept scheduled 48h ahead by OWNER.
+  if (!dry) {
+    for (const { key, c } of contracts) {
+      await until(`${key}.admin is the timelock`, async () => same(await c.admin(), timelock.target))
+    }
   }
 
   // 4. it raises its own delay
   if (!dry && (await timelock.getMinDelay()) !== BigInt(delay)) {
     const raise = timelock.interface.encodeFunctionData('updateDelay', [delay])
     const salt = ethers.id(`spawn/handover/${netKey}/delay/${delay}`)
-    await send(`timelock.updateDelay(${delay}s) through itself`, async () => {
-      gasUsed += (await (await timelock.schedule(timelock.target, 0, raise, ethers.ZeroHash, salt, 0)).wait()).gasUsed
-      return timelock.execute(timelock.target, 0, raise, ethers.ZeroHash, salt)
-    })
+    const id = await timelock.hashOperation(timelock.target, 0, raise, ethers.ZeroHash, salt)
+    if (!(await timelock.isOperationDone(id))) {
+      await send(`timelock.updateDelay(${delay}s) through itself`, async () => {
+        if (!(await timelock.isOperation(id))) {
+          gasUsed += (await (await timelock.schedule(timelock.target, 0, raise, ethers.ZeroHash, salt, 0)).wait()).gasUsed
+        }
+        await until('the scheduled delay change', () => timelock.isOperationReady(id))
+        return timelock.execute(timelock.target, 0, raise, ethers.ZeroHash, salt)
+      })
+    }
+    await until(`the timelock delay reads ${delay}s`, async () => (await timelock.getMinDelay()) === BigInt(delay))
   }
 
   // 5. OWNER runs it, GUARDIAN can veto, the deployer keeps nothing
@@ -160,35 +201,51 @@ async function handover(opts) {
       await send(`timelock.grantRole(${name}, ${who})`, () => timelock.grantRole(role, who))
     }
   }
-  for (const [name, role] of [['PROPOSER', PROPOSER], ['EXECUTOR', EXECUTOR], ['CANCELLER', CANCELLER], ['DEFAULT_ADMIN', ROLE_ADMIN]]) {
+  // When the deployer hot key is also the GUARDIAN it keeps exactly one
+  // timelock role — the veto (CANCELLER) — and gives up every other one.
+  const keepsVeto = same(guardian, signer.address)
+  const renounced = [['PROPOSER', PROPOSER], ['EXECUTOR', EXECUTOR], ['CANCELLER', CANCELLER], ['DEFAULT_ADMIN', ROLE_ADMIN]].filter(
+    ([name]) => !(keepsVeto && name === 'CANCELLER'),
+  )
+  for (const [name, role] of renounced) {
     if (await timelock.hasRole(role, signer.address)) {
       await send(`deployer renounces ${name}`, () => timelock.renounceRole(role, signer.address))
     }
   }
   if (dry) return { dry: true, timelock: timelock.target }
 
-  // 6. read it all back
-  const problems = []
-  const want = (what, ok) => {
-    if (!ok) problems.push(what)
-  }
-  for (const { key, c } of contracts) {
-    want(`${key}.admin is the timelock`, same(await c.admin(), timelock.target))
-    want(`${key}.pendingAdmin is empty`, (await c.pendingAdmin()) === ethers.ZeroAddress)
-    want(`${key}.operator is OPERATOR`, same(await c.operator(), operator))
-    want(`${key}.guardian is GUARDIAN`, same(await c.guardian(), guardian))
-  }
+  // 6. read it all back — a few times if needed: the last transactions may
+  // not be visible yet on a lagging node, and a false alarm here would read
+  // as a failed hand-over
   const endpoint = new ethers.Contract(profile.endpoint, ENDPOINT_ABI, provider)
-  want('the LayerZero delegate of the adapter is the timelock', same(await endpoint.delegates(state.adapter), timelock.target))
-  want(`timelock delay is ${delay}s`, (await timelock.getMinDelay()) === BigInt(delay))
-  for (const [name, role] of [['PROPOSER', PROPOSER], ['EXECUTOR', EXECUTOR], ['CANCELLER', CANCELLER], ['DEFAULT_ADMIN', ROLE_ADMIN]]) {
-    want(`the deployer no longer holds ${name}`, !(await timelock.hasRole(role, signer.address)))
+  const readBack = async () => {
+    const problems = []
+    const want = (what, ok) => {
+      if (!ok) problems.push(what)
+    }
+    for (const { key, c } of contracts) {
+      want(`${key}.admin is the timelock`, same(await c.admin(), timelock.target))
+      want(`${key}.pendingAdmin is empty`, (await c.pendingAdmin()) === ethers.ZeroAddress)
+      want(`${key}.operator is OPERATOR`, same(await c.operator(), operator))
+      want(`${key}.guardian is GUARDIAN`, same(await c.guardian(), guardian))
+    }
+    want('the LayerZero delegate of the adapter is the timelock', same(await endpoint.delegates(state.adapter), timelock.target))
+    want(`timelock delay is ${delay}s`, (await timelock.getMinDelay()) === BigInt(delay))
+    for (const [name, role] of renounced) {
+      want(`the deployer no longer holds ${name}`, !(await timelock.hasRole(role, signer.address)))
+    }
+    want('OWNER is proposer', await timelock.hasRole(PROPOSER, owner))
+    want('OWNER is executor', await timelock.hasRole(EXECUTOR, owner))
+    want('GUARDIAN can cancel', await timelock.hasRole(CANCELLER, guardian))
+    // the timelock administers its own roles from now on
+    want('the timelock is its own role admin', await timelock.hasRole(ROLE_ADMIN, timelock.target))
+    return problems
   }
-  want('OWNER is proposer', await timelock.hasRole(PROPOSER, owner))
-  want('OWNER is executor', await timelock.hasRole(EXECUTOR, owner))
-  want('GUARDIAN can cancel', await timelock.hasRole(CANCELLER, guardian))
-  // the timelock administers its own roles from now on
-  want('the timelock is its own role admin', await timelock.hasRole(ROLE_ADMIN, timelock.target))
+  let problems = await readBack()
+  for (let i = 0; problems.length && live && i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 3000))
+    problems = await readBack().catch((e) => [`read-back failed: ${e.shortMessage ?? e.message}`])
+  }
   if (problems.length) throw new Error(`hand-over incomplete:\n  - ${problems.join('\n  - ')}`)
 
   state.handover = { owner, operator, guardian, delay, timelock: timelock.target, at: new Date().toISOString() }

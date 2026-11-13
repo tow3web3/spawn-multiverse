@@ -152,7 +152,7 @@ export function Hero({
                 key={id}
                 className="flex items-center gap-1.5 rounded-full border-2 border-ink bg-white px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide shadow-brutal-sm"
               >
-                <ChainLogo id={id} size={16} />
+                <ChainLogo id={id} size={18} />
                 {label}
               </span>
             ))}
@@ -169,8 +169,8 @@ export function Hero({
                     key={id}
                     className="flex items-center gap-1.5 rounded-full border-2 border-dashed border-ink/50 px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide opacity-60"
                   >
-                    <span className="grayscale">
-                      <ChainLogo id={id} size={16} />
+                    <span className="inline-flex grayscale">
+                      <ChainLogo id={id} size={18} />
                     </span>
                     {label} · SOON
                   </span>

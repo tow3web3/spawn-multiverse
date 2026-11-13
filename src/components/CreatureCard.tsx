@@ -61,7 +61,10 @@ function ImageArt({ src, face, size }: { src: string; face: FaceId; size: number
         decoding="async"
         referrerPolicy="no-referrer"
         style={{ width: size, height: size, opacity: phase === 'ok' ? 1 : 0 }}
-        className="relative rounded-full border-3 border-ink bg-white object-cover"
+        // Small avatars sit in a ringed frame already (trending, hero charts,
+        // token page, portfolio, dev zone): a second ring there would eat a
+        // third of a 34px image. Only the big card art draws its own.
+        className={`relative rounded-full bg-white object-cover ${size >= 100 ? 'border-3 border-ink' : ''}`}
         draggable={false}
       />
     </span>

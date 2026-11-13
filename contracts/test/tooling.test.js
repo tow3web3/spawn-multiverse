@@ -301,11 +301,13 @@ describe('hand-over with a separate operator (hot ops key)', function () {
       deployNet({ profile, netKey: HUB, signer: deployer, dry: false, preflight: false, providers, log: quiet, ...extra })
     expect((await run()).check.ok).to.equal(true)
 
+    // the launch configuration: the hot key is operator AND guardian
     const res = await handover({
-      profile, netKey: HUB, signer: deployer, owner: owner.address, operator: deployer.address, guardian: guardian.address, log: quiet,
+      profile, netKey: HUB, signer: deployer, owner: owner.address, operator: deployer.address, guardian: deployer.address, log: quiet,
     })
     const s = loadState(profile.stateFile)[HUB]
     expect(s.handover.operator).to.equal(deployer.address)
+    expect(s.handover.guardian).to.equal(deployer.address)
     expect(s.handover.owner).to.equal(owner.address)
 
     const pad = await ethers.getContractAt('SpawnPad', s.pad)
@@ -314,15 +316,24 @@ describe('hand-over with a separate operator (hot ops key)', function () {
     for (const c of [pad, adapter, vault]) {
       expect(await c.admin()).to.equal(res.timelock.target)
       expect(await c.operator()).to.equal(deployer.address)
-      expect(await c.guardian()).to.equal(guardian.address)
+      expect(await c.guardian()).to.equal(deployer.address)
     }
-    // the timelock answers to OWNER alone
-    expect(await res.timelock.hasRole(await res.timelock.PROPOSER_ROLE(), owner.address)).to.equal(true)
-    expect(await res.timelock.hasRole(await res.timelock.PROPOSER_ROLE(), deployer.address)).to.equal(false)
-    expect(await res.timelock.hasRole(await res.timelock.DEFAULT_ADMIN_ROLE(), deployer.address)).to.equal(false)
+    // the timelock answers to OWNER alone; the hot key keeps the veto and nothing else
+    const tl = res.timelock
+    expect(await tl.hasRole(await tl.PROPOSER_ROLE(), owner.address)).to.equal(true)
+    expect(await tl.hasRole(await tl.EXECUTOR_ROLE(), owner.address)).to.equal(true)
+    expect(await tl.hasRole(await tl.PROPOSER_ROLE(), deployer.address)).to.equal(false)
+    expect(await tl.hasRole(await tl.EXECUTOR_ROLE(), deployer.address)).to.equal(false)
+    expect(await tl.hasRole(await tl.DEFAULT_ADMIN_ROLE(), deployer.address)).to.equal(false)
+    expect(await tl.hasRole(await tl.CANCELLER_ROLE(), deployer.address)).to.equal(true)
+    // running it again changes nothing and still reads back clean
+    await handover({
+      profile, netKey: HUB, signer: deployer, owner: owner.address, operator: deployer.address, guardian: deployer.address, log: quiet,
+    })
+    expect(await tl.hasRole(await tl.CANCELLER_ROLE(), deployer.address)).to.equal(true)
 
     // operator powers still work from the hot key…
-    await (await pad.connect(guardian).pause()).wait()
+    await (await pad.pause()).wait()
     await (await pad.unpause()).wait()
     await (await vault.setDepositCap(U(100))).wait()
     // …admin powers do not

@@ -25,6 +25,7 @@ import {
   timeShort,
 } from '../lib/format'
 import { CreatureArt } from './CreatureCard'
+import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 import { PriceChart } from './PriceChart'
 
 const QUICK_USD = [10, 50, 100]
@@ -139,6 +140,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   const netFee = instant ? rawFee : rawFee * 1.1
   const buyBlocked = side === 'buy' && (!!onchain?.hubPaused || !!ci?.paused)
   const fmtFee = (n: number) => `${n.toFixed(n < 0.001 ? 6 : 5)} ${ci?.nativeSymbol ?? 'ETH'}`
+  const feeCoin = coinOf(ci?.nativeSymbol ?? 'ETH')
 
   const hf = onchain?.holderFees?.[num]
   const claimableNow = onchain?.holderRewards?.[num] ?? 0
@@ -421,8 +423,11 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                         className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-xl border-2 border-dashed border-ink/50 bg-cream/60 px-3 py-2"
                       >
                         <div>
-                          <p className="font-mono text-[8.5px] font-bold tracking-wide opacity-55">
-                            WAITING ON THE HUB FOR {chainId.toUpperCase()} HOLDERS
+                          <p className="flex items-center gap-1.5 font-mono text-[8.5px] font-bold tracking-wide">
+                            <ChainLogo id={chainId} size={14} />
+                            <span className="opacity-55">
+                              WAITING ON THE HUB FOR {chainId.toUpperCase()} HOLDERS
+                            </span>
                           </p>
                           <p className="font-mono text-[13px] font-bold">
                             {fmtUsd(w.pot)}{' '}
@@ -468,19 +473,21 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
             <div className={card}>
               <p className={label}>WHERE THE SUPPLY LIVES</p>
               <div className="mt-2 flex h-3.5 overflow-hidden rounded-full border-2 border-ink">
+                {/* segments wear the chain's brand colour, so they match the logos below */}
                 {chainAlloc.map((ch) => (
                   <div
                     key={ch.id}
                     title={`${ch.label} ${(ch.share * 100).toFixed(0)}%`}
-                    style={{ width: `${ch.share * 100}%`, background: ch.color }}
-                    className="border-r border-ink/30 last:border-r-0"
+                    style={{ width: `${ch.share * 100}%`, background: ch.brand }}
+                    className="border-r-2 border-white last:border-r-0"
                   />
                 ))}
               </div>
-              <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[8.5px] font-bold opacity-55">
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] font-bold">
                 {chainAlloc.map((ch) => (
-                  <span key={ch.id}>
-                    {ch.short} {(ch.share * 100).toFixed(0)}%
+                  <span key={ch.id} className="inline-flex items-center gap-1.5" title={ch.label}>
+                    <ChainLogo id={ch.id} size={15} />
+                    <span className="opacity-60">{(ch.share * 100).toFixed(0)}%</span>
                   </span>
                 ))}
               </div>
@@ -506,11 +513,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                       } ${i % 2 ? 'bg-cream/50' : 'bg-white'}`}
                     >
                       <span className="w-7 opacity-45">{timeShort(t.ts)}</span>
-                      <span
-                        className="flex h-4 min-w-4 items-center justify-center rounded-full border border-ink px-0.5 text-[7px]"
-                        style={{ background: ch?.color }}
-                      >
-                        {ch?.short}
+                      <span className="flex h-4 w-4 shrink-0 items-center justify-center" title={ch?.label}>
+                        {ch && <ChainLogo id={ch.id} size={15} />}
                       </span>
                       <span className={t.side === 'buy' ? 'text-up' : 'text-down'}>
                         {t.side.toUpperCase()}
@@ -605,13 +609,20 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   key={ch.id}
                   onClick={() => setChain(ch.id)}
                   title={info?.[ch.id]?.local ? `${ch.label} — instant, no cross-chain wait` : ch.label}
-                  className={`rounded-lg border-2 border-ink px-2.5 py-1 font-mono text-[10px] font-bold transition ${
-                    chain === ch.id ? 'shadow-brutal-sm -translate-y-0.5' : 'opacity-50 hover:opacity-100'
+                  aria-pressed={chain === ch.id}
+                  className={`group inline-flex items-center gap-1.5 rounded-lg border-2 py-1 pl-1.5 pr-2.5 font-mono text-[10px] font-bold transition ${
+                    chain === ch.id
+                      ? 'border-ink shadow-brutal-sm -translate-y-0.5'
+                      : 'border-ink/30 bg-white hover:border-ink'
                   }`}
-                  style={{ background: ch.color }}
+                  style={chain === ch.id ? { background: ch.color } : undefined}
                 >
-                  {ch.short}
-                  {info?.[ch.id]?.local ? ' ⚡' : ''}
+                  {/* the logo never fades: it is what identifies the chain */}
+                  <ChainLogo id={ch.id} size={18} />
+                  <span className={chain === ch.id ? '' : 'opacity-50 group-hover:opacity-100'}>
+                    {ch.label}
+                    {info?.[ch.id]?.local ? ' ⚡' : ''}
+                  </span>
                 </button>
               ))}
             </div>
@@ -704,15 +715,31 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
             {/* what the signature will cost, before it is asked for */}
             {onchain && onchain.status === 'ready' && ci && (
-              <p className="mt-1 font-mono text-[9px] font-bold tracking-wide opacity-60">
-                {onchain.sponsored
-                  ? 'NETWORK FEE: SPONSORED ON THIS TESTNET — YOU ONLY PAY GAS'
-                  : netFee > 0
-                    ? `NETWORK FEE ≈ ${fmtFee(netFee)} + GAS${instant ? '' : ' · PAYS THE LAYERZERO ROUND TRIP, NOT REFUNDABLE'}`
-                    : instant && onchain.network !== 'local'
-                      ? 'NO MESSAGE FEE FROM THIS CHAIN — YOU ONLY PAY GAS'
-                      : 'NO NETWORK FEE — YOU ONLY PAY GAS'}
-                {side === 'buy' && onchain.network !== 'local' ? ' · USDC IS APPROVED FOR THIS EXACT AMOUNT' : ''}
+              <p className="mt-1 font-mono text-[9px] font-bold tracking-wide">
+                <span className="opacity-60">
+                  {onchain.sponsored ? (
+                    'NETWORK FEE: SPONSORED ON THIS TESTNET — YOU ONLY PAY GAS'
+                  ) : netFee > 0 ? (
+                    <>NETWORK FEE ≈ </>
+                  ) : instant && onchain.network !== 'local' ? (
+                    'NO MESSAGE FEE FROM THIS CHAIN — YOU ONLY PAY GAS'
+                  ) : (
+                    'NO NETWORK FEE — YOU ONLY PAY GAS'
+                  )}
+                </span>
+                {/* the fee is paid in the chain's gas coin: show which one */}
+                {!onchain.sponsored && netFee > 0 && (
+                  <>
+                    {feeCoin && <CoinLogo id={feeCoin} size={13} className="-mt-0.5 mr-1" />}
+                    <span className="opacity-60">
+                      {fmtFee(netFee)} + GAS
+                      {instant ? '' : ' · PAYS THE LAYERZERO ROUND TRIP, NOT REFUNDABLE'}
+                    </span>
+                  </>
+                )}
+                <span className="opacity-60">
+                  {side === 'buy' && onchain.network !== 'local' ? ' · USDC IS APPROVED FOR THIS EXACT AMOUNT' : ''}
+                </span>
               </p>
             )}
             {buyBlocked && (
@@ -761,7 +788,10 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               className="flex flex-wrap items-center justify-between gap-2 rounded-xl border-3 border-ink bg-tang px-4 py-3 shadow-brutal-sm"
             >
               <div>
-                <p className={label}>PARKED ON {chainId.toUpperCase()} — YOURS TO CLAIM</p>
+                <p className="flex items-center gap-1.5">
+                  <ChainLogo id={chainId} size={15} />
+                  <span className={label}>PARKED ON {chainId.toUpperCase()} — YOURS TO CLAIM</span>
+                </p>
                 <p className="font-mono text-[13px] font-bold">
                   {fmtTokens(tokens)} ${c.ticker}
                 </p>
@@ -790,10 +820,15 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   {fmtTokens(pos.tokens)} ${c.ticker}
                 </p>
                 {bagsByChain && Object.keys(bagsByChain).length > 0 && (
-                  <p className="font-mono text-[9px] font-bold tracking-wide opacity-50">
-                    {Object.entries(bagsByChain)
-                      .map(([id, t]) => `${fmtTokens(t)} ON ${id.toUpperCase()}`)
-                      .join(' · ')}
+                  <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[9px] font-bold tracking-wide">
+                    {Object.entries(bagsByChain).map(([id, t]) => (
+                      <span key={id} className="inline-flex items-center gap-1" title={id.toUpperCase()}>
+                        <ChainLogo id={id} size={13} />
+                        <span className="opacity-50">
+                          {fmtTokens(t)} ON {id.toUpperCase()}
+                        </span>
+                      </span>
+                    ))}
                   </p>
                 )}
               </div>
@@ -827,12 +862,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   key={ch.id}
                   className="flex items-center gap-2 rounded-lg border-2 border-ink/20 bg-cream/60 px-2 py-1.5"
                 >
-                  <span
-                    className="flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-ink px-0.5 font-mono text-[8px] font-bold"
-                    style={{ background: ch.color }}
-                  >
-                    {ch.short}
-                  </span>
+                  <ChainLogo id={ch.id} size={20} />
                   <span className="font-mono text-[10px] font-bold">{fmtPrice(c.price)}</span>
                   <span className="ml-auto font-mono text-[8px] font-bold text-up">✓</span>
                 </div>

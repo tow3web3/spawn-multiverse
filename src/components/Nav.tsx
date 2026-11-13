@@ -3,6 +3,7 @@ import { useStore, shortAddr, type WalletSource } from '../store'
 import { fmtUsd } from '../lib/format'
 import { PUBLIC_DEMO, type AppMode } from '../App'
 import { GuardedBanner } from './Guarded'
+import { CoinLogo } from './ChainLogos'
 
 function scrollTo(id: string) {
   // From a sub-page (#/token/…), go home first, then scroll.
@@ -159,9 +160,10 @@ export function Nav({
             }}
             disabled={minting}
             title="Mint 1,337 play USDC on every chain your wallet has gas on"
-            className="shrink-0 whitespace-nowrap rounded-xl border-2 border-ink bg-lime px-3 py-2 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:opacity-60"
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border-2 border-ink bg-lime px-3 py-2 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:opacity-60"
           >
-            {minting ? '✳ MINTING…' : '💸 MINT USDC'}
+            <CoinLogo id="usdc" size={15} />
+            {minting ? 'MINTING…' : 'MINT USDC'}
           </button>
         )}
 
@@ -235,11 +237,15 @@ function ConnectButton() {
     <div className="relative shrink-0">
       <button
         onClick={onPillClick}
-        className="whitespace-nowrap rounded-xl border-3 border-ink bg-ink px-4 py-2.5 font-mono text-[11px] font-bold tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
+        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border-3 border-ink bg-ink px-4 py-2.5 font-mono text-[11px] font-bold tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
       >
         {wallet ? (
           <>
-            {onchain?.walletSource === 'injected' ? '🦊' : '●'} {shortAddr(wallet.address)}{' '}
+            <span>
+              {onchain?.walletSource === 'injected' ? '🦊' : '●'} {shortAddr(wallet.address)}
+            </span>
+            {/* on-chain the wallet's dollars are USDC; the simulation's are not */}
+            {onchainMode && <CoinLogo id="usdc" size={15} />}
             <span className="text-lime">{fmtUsd(wallet.balance)}</span>
           </>
         ) : busy ? (

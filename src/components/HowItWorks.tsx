@@ -3,6 +3,7 @@ import { useStore } from '../store'
 import { fmtPrice } from '../lib/format'
 import { useChainSet, type ChainSet } from '../lib/liveChains'
 import { Asterisk } from './bits'
+import { ChainLogo } from './ChainLogos'
 
 /** The four pillars. The copy counts and names the chains this mode really
  * runs — the simulation runs all six, a deployment runs what its manifest
@@ -155,11 +156,8 @@ export function HowItWorks() {
                   key={ch.id}
                   className="rounded-xl border-2 border-white/15 bg-ink px-3 py-3 text-center"
                 >
-                  <span
-                    className="mx-auto flex h-7 w-fit min-w-7 items-center justify-center rounded-full border-2 border-ink px-1 font-mono text-[10px] font-bold text-ink"
-                    style={{ background: ch.color }}
-                  >
-                    {ch.short}
+                  <span className="mx-auto flex h-8 w-8 items-center justify-center">
+                    <ChainLogo id={ch.id} size={30} />
                   </span>
                   <p className="mt-2 font-mono text-[9px] font-bold tracking-wide text-white/40">
                     {ch.label}
@@ -173,8 +171,8 @@ export function HowItWorks() {
                   key={ch.id}
                   className="rounded-xl border-2 border-dashed border-white/15 px-3 py-3 text-center opacity-50"
                 >
-                  <span className="mx-auto flex h-7 w-fit min-w-7 items-center justify-center rounded-full border-2 border-white/30 px-1 font-mono text-[10px] font-bold text-white/60">
-                    {ch.short}
+                  <span className="mx-auto flex h-8 w-8 items-center justify-center grayscale">
+                    <ChainLogo id={ch.id} size={30} />
                   </span>
                   <p className="mt-2 font-mono text-[9px] font-bold tracking-wide text-white/40">
                     {ch.label}

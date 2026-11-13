@@ -1,4 +1,5 @@
 import { useChainSet } from '../lib/liveChains'
+import { ChainChip } from './ChainLogos'
 
 export function Sparkle({
   className = '',
@@ -36,24 +37,14 @@ export function Asterisk({ className = '', size = 24, color = '#141414' }: { cla
   )
 }
 
+/** The chains this mode really runs, as their real logos, overlapping. */
 export function ChainDots({ size = 'md' }: { size?: 'sm' | 'md' }) {
-  const cls =
-    size === 'sm'
-      ? 'h-5 min-w-5 px-0.5 text-[8px] border-2'
-      : 'h-7 min-w-7 px-1 text-[10px] border-2'
   // only the chains this mode really runs (a deployment may run fewer than six)
   const { live } = useChainSet()
   return (
     <div className="flex items-center -space-x-1">
       {live.map((c) => (
-        <span
-          key={c.id}
-          title={c.label}
-          className={`${cls} inline-flex items-center justify-center rounded-full border-ink font-mono font-bold text-ink`}
-          style={{ background: c.color }}
-        >
-          {c.short}
-        </span>
+        <ChainChip key={c.id} id={c.id} size={size === 'sm' ? 22 : 28} />
       ))}
     </div>
   )

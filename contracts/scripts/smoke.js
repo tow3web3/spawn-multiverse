@@ -191,10 +191,17 @@ async function main() {
     const w = await dist.withdrawable(rep, dev.address)
     return w > 0n ? w : undefined
   })
+  const oUsdBefore = await usd.balanceOf(dev.address)
   await (await dist.claim(rep)).wait()
-  // Read the amount from the receipt, not from a balance: a load-balanced
-  // public RPC (OP Sepolia) can serve a stale balance right after the tx.
-  const unwrapRc = await (await usd.unwrap(await usd.balanceOf(dev.address))).wait()
+  // A load-balanced public RPC can serve a stale balance right after a tx
+  // (seen on OP Sepolia AND on OP mainnet, where unwrapping the stale dust
+  // reverted "oUSD: dust"): wait until the claim is visible, then unwrap
+  // exactly what it paid, and read the result from the receipt.
+  const claimed = await waitFor('the claimed oUSD in the wallet', async () => {
+    const b = await usd.balanceOf(dev.address)
+    return b >= oUsdBefore + owed ? b : undefined
+  })
+  const unwrapRc = await (await usd.unwrap(claimed)).wait()
   const unwrapped = unwrapRc.logs
     .map((l) => {
       try {

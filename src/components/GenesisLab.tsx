@@ -5,7 +5,8 @@ import { fmtNum, fmtPrice } from '../lib/format'
 import { cleanLinks, LINK_META } from '../lib/links'
 import { processImage, uploadTokenImage } from '../lib/tokenImage'
 import { IMAGE_PATH_SAMPLE, MAX_META_BYTES, buildMetaURI, utf8Len } from '../lib/tokenMeta'
-import { Sparkle } from './bits'
+import { ChainDots, Sparkle } from './bits'
+import { ChainChip, ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 
 const PREVIEW_BG = '#9ccbf5'
 
@@ -56,7 +57,11 @@ export function GenesisLab({
       : undefined
   const fromInfo = from ? info?.[from.id] : undefined
   const fromInstant = !!onchain && (onchain.network === 'local' || !!fromInfo?.local)
+  const feeCoin = coinOf(fromInfo?.nativeSymbol ?? 'ETH')
   const devBuyNum = Number.parseFloat(devBuyStr) || 0
+  /** Where a launch reaches other people (public testnet, mainnet) a token
+   * must carry its real, hosted image: no launch without one, no placeholder. */
+  const imageMustBeHosted = !!onchain && onchain.network !== 'local'
 
   // the launch fee depends on the strings and on the dev buy: quote it live
   const linksKey = JSON.stringify(cleanLinks(links))
@@ -114,9 +119,7 @@ export function GenesisLab({
     }
   }
 
-  /** `withoutHosting`: the creator chose to launch with the placeholder
-   * face after hosting failed. */
-  const submit = async (withoutHosting = false) => {
+  const submit = async () => {
     if (!ready || !image || busy) return
     setBusy(true)
     setSpawnErr(null)
@@ -125,7 +128,7 @@ export function GenesisLab({
       // Host the face first: a launch cannot be edited, so the image path
       // has to be in the metaURI the wallet is about to sign.
       let imageUrl: string | undefined
-      if (onchain && imageBlob && !withoutHosting) {
+      if (onchain && imageBlob) {
         if (hosted.current?.blob === imageBlob) {
           imageUrl = hosted.current.path
         } else {
@@ -134,9 +137,10 @@ export function GenesisLab({
             imageUrl = await uploadTokenImage(imageBlob)
             hosted.current = { blob: imageBlob, path: imageUrl }
           } catch (e) {
-            // a local devnet usually runs without the image function: the
-            // face simply stays in this browser, as it always did there
-            if (onchain.network !== 'local') {
+            // A local devnet usually runs without the image function: the
+            // face simply stays in this browser, as it always did there.
+            // Anywhere other people can see the token, no image = no launch.
+            if (imageMustBeHosted) {
               setHostErr(e instanceof Error && e.message ? e.message : 'image hosting is unavailable')
               return
             }
@@ -252,7 +256,12 @@ export function GenesisLab({
               </div>
             </div>
 
-            <p className={`${label} mt-7`}>02 — GIVE IT A FACE</p>
+            <p className={`${label} mt-7`}>
+              02 — GIVE IT A FACE{' '}
+              <span className={image ? 'text-lime' : 'text-tang'}>
+                {image ? '✓' : imageMustBeHosted ? '— REQUIRED: NO IMAGE, NO LAUNCH' : '— REQUIRED'}
+              </span>
+            </p>
             <label
               className="mt-3 flex cursor-pointer items-center gap-4 rounded-xl border-3 border-dashed border-white/25 bg-void p-4 transition hover:border-lime"
               onDragOver={(e) => e.preventDefault()}
@@ -279,9 +288,11 @@ export function GenesisLab({
                 <span className="mt-1 block font-mono text-[10px] leading-relaxed text-white/40">
                   Click or drop it here. Square works best — this face follows your token onto
                   all {chainSet.lower} chains.
-                  {onchain
-                    ? ' It is shrunk in your browser and hosted by SPAWN! when you launch, so every visitor sees it.'
-                    : ''}
+                  {imageMustBeHosted
+                    ? ' Every token here wears its real image: it is shrunk in your browser and hosted by SPAWN! when you launch, so every visitor sees it — and it cannot be changed afterwards.'
+                    : onchain
+                      ? ' It is shrunk in your browser and hosted by SPAWN! when you launch, so every visitor sees it.'
+                      : ''}
                 </span>
                 {imageError && (
                   <span className="mt-1 block font-mono text-[10px] font-bold text-down">
@@ -341,15 +352,13 @@ export function GenesisLab({
 
             <p className={`${label} mt-7`}>05 — ALL CHAINS SPAWN TOGETHER</p>
             <div className="mt-3 flex items-center justify-between rounded-xl border-3 border-white/20 bg-void px-4 py-3">
-              <div className="flex gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
                 {liveChains.map((ch) => (
-                  <span
-                    key={ch.id}
-                    title={ch.label}
-                    className="flex h-7 min-w-7 items-center justify-center rounded-md border-2 border-ink bg-lime px-1 font-mono text-[10px] font-bold text-ink"
-                  >
-                    {ch.short}
-                  </span>
+                  <ChainChip key={ch.id} id={ch.id} size={30} />
+                ))}
+                {/* the rest of the six-chain design: shown, greyed, not promised */}
+                {chainSet.soon.map((ch) => (
+                  <ChainChip key={ch.id} id={ch.id} size={30} dim />
                 ))}
               </div>
               <span className="font-mono text-[11px] font-bold text-lime">
@@ -382,12 +391,13 @@ export function GenesisLab({
                       onClick={() => setFromChain(ch.id)}
                       aria-pressed={from.id === ch.id}
                       title={info?.[ch.id]?.local ? `${ch.label} — the hub chain: instant` : ch.label}
-                      className={`rounded-lg border-2 px-2.5 py-1.5 font-mono text-[10px] font-bold transition ${
+                      className={`inline-flex items-center gap-1.5 rounded-lg border-2 py-1.5 pl-2 pr-2.5 font-mono text-[10px] font-bold transition ${
                         from.id === ch.id
                           ? 'border-lime bg-lime text-ink'
                           : 'border-white/25 text-white/60 hover:border-white/50'
                       }`}
                     >
+                      <ChainLogo id={ch.id} size={16} />
                       {ch.label}
                       {info?.[ch.id]?.local ? ' ⚡' : ''}
                     </button>
@@ -400,13 +410,21 @@ export function GenesisLab({
                       : `${from.label} is the hub chain: your token exists there in one transaction, and reaches the other chains a minute or two later.`
                     : `From ${from.label} the launch crosses LayerZero to the hub first: allow 1–3 minutes before it appears.`}{' '}
                   <span className="text-lime">
-                    {onchain.sponsored
-                      ? 'Network fee: sponsored on this testnet — you only pay gas.'
-                      : launchFee === null
-                        ? 'Network fee: quoting…'
-                        : launchFee > 0
-                          ? `Network fee ≈ ${launchFee.toFixed(launchFee < 0.001 ? 6 : 5)} ${fromInfo?.nativeSymbol ?? 'ETH'} + gas — it pays the messages that create your token on the other chains${devBuyNum > 0 && !fromInstant ? ' and bring your dev buy home' : ''}. Not refundable.`
-                          : 'No network fee — you only pay gas.'}
+                    {onchain.sponsored ? (
+                      'Network fee: sponsored on this testnet — you only pay gas.'
+                    ) : launchFee === null ? (
+                      'Network fee: quoting…'
+                    ) : launchFee > 0 ? (
+                      <>
+                        Network fee ≈{' '}
+                        {feeCoin && <CoinLogo id={feeCoin} size={13} className="-mt-0.5 mr-0.5" />}
+                        {launchFee.toFixed(launchFee < 0.001 ? 6 : 5)} {fromInfo?.nativeSymbol ?? 'ETH'} + gas — it
+                        pays the messages that create your token on the other chains
+                        {devBuyNum > 0 && !fromInstant ? ' and bring your dev buy home' : ''}. Not refundable.
+                      </>
+                    ) : (
+                      'No network fee — you only pay gas.'
+                    )}
                   </span>
                 </p>
               </>
@@ -449,7 +467,11 @@ export function GenesisLab({
 
             <p className={`${label} mt-7`}>07 — SNIPE YOUR OWN SPAWN (OPTIONAL)</p>
             <div className="mt-3 flex items-center gap-3 rounded-xl border-3 border-white/20 bg-void px-4 py-3">
-              <span className="font-mono text-[13px] font-bold text-white/50">DEV BUY $</span>
+              <span className="inline-flex items-center gap-1.5 font-mono text-[13px] font-bold text-white/50">
+                {/* on-chain the dev buy is paid in USDC; the simulation's dollars are not */}
+                {onchain && <CoinLogo id="usdc" size={16} />}
+                DEV BUY $
+              </span>
               <input
                 value={devBuyStr}
                 onChange={(e) => setDevBuyStr(e.target.value.replace(/[^0-9.]/g, ''))}
@@ -487,12 +509,24 @@ export function GenesisLab({
                   ? '✳ SPAWNING ACROSS THE MULTIVERSE…'
                   : '✳ SPAWN ACROSS THE MULTIVERSE ↗'}
             </button>
+            {/* why the button is closed, said next to it */}
+            {!ready && !busy && (
+              <p className="mt-3 font-mono text-[10px] font-bold tracking-wide text-tang">
+                {!name.trim() || !ticker.trim()
+                  ? 'NAME IT AND GIVE IT A STICKER TO LAUNCH.'
+                  : !image
+                    ? imageMustBeHosted
+                      ? 'ADD ITS IMAGE TO LAUNCH — A TOKEN CANNOT GO LIVE WITHOUT ITS REAL IMAGE.'
+                      : 'GIVE IT A FACE TO LAUNCH.'
+                    : 'SHORTEN THE LINKS TO LAUNCH.'}
+              </p>
+            )}
             {hostErr && (
               <div className="mt-3 rounded-xl border-3 border-tang bg-tang/10 p-3">
                 <p className="font-mono text-[10px] font-bold leading-relaxed tracking-wide text-tang">
                   COULDN'T HOST YOUR IMAGE — {hostErr.toUpperCase()}. NOTHING HAS BEEN SIGNED. A
-                  LAUNCH CAN'T BE EDITED: IF YOU GO ON WITHOUT IT, YOUR TOKEN SHOWS A PLACEHOLDER
-                  FACE TO EVERYONE BUT THIS BROWSER, FOR GOOD.
+                  TOKEN CANNOT LAUNCH WITHOUT ITS REAL IMAGE, AND A LAUNCH CAN'T BE EDITED: TRY
+                  AGAIN, OR PICK ANOTHER IMAGE.
                 </p>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <button
@@ -502,14 +536,6 @@ export function GenesisLab({
                     className="rounded-lg border-2 border-lime bg-lime px-3 py-1.5 font-mono text-[10px] font-bold text-ink disabled:opacity-40"
                   >
                     TRY HOSTING AGAIN
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void submit(true)}
-                    disabled={busy}
-                    className="rounded-lg border-2 border-white/30 px-3 py-1.5 font-mono text-[10px] font-bold text-white/70 hover:border-white/60 disabled:opacity-40"
-                  >
-                    LAUNCH WITH THE PLACEHOLDER
                   </button>
                 </div>
               </div>
@@ -521,7 +547,7 @@ export function GenesisLab({
             )}
             <p className="mt-3 font-mono text-[10px] leading-relaxed text-white/35">
               {!ready
-                ? 'Name it, tick it, give it a face — then the multiverse opens.'
+                ? '' // the reason the button is closed is said just above
                 : !onchain
                   ? 'Simulation — demo money only, no transaction is submitted.'
                   : onchain.network === 'mainnet'
@@ -583,9 +609,12 @@ export function GenesisLab({
                     ${previewTicker}
                   </span>
                 </div>
-                <p className="mt-1 font-mono text-[10px] font-bold tracking-wide opacity-50">
-                  ↗ {chainSet.count} NATIVE DEPLOYMENTS · 1 TOTAL SUPPLY
-                </p>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <ChainDots size="sm" />
+                  <p className="font-mono text-[10px] font-bold tracking-wide opacity-50">
+                    ↗ {chainSet.count} NATIVE DEPLOYMENTS · 1 TOTAL SUPPLY
+                  </p>
+                </div>
               </div>
             </div>
 

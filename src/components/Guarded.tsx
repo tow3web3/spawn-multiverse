@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useStore } from '../store'
 import { CHAINS } from '../lib/chains'
+import { ChainLogo, CoinLogo } from './ChainLogos'
 
 const money = (n: number) => `$${Math.round(n).toLocaleString('en-US')}`
 
@@ -18,15 +19,14 @@ export function GuardedBanner() {
         <span className="rounded-full border-2 border-ink bg-ink px-2.5 py-0.5 text-lime">
           ⚠ GUARDED BETA — UNAUDITED
         </span>
-        <span>REAL USDC · REAL RISK · DEPOSITS CAPPED PER CHAIN:</span>
+        {/* one USDC mark for the whole strip: every figure after it is USDC */}
+        <span className="inline-flex items-center gap-1.5">
+          <CoinLogo id="usdc" size={15} />
+          REAL USDC · REAL RISK · DEPOSITS CAPPED PER CHAIN:
+        </span>
         {caps.map((c) => (
-          <span key={c.id} className="whitespace-nowrap">
-            <span
-              className="mr-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-ink px-0.5 text-[7px]"
-              style={{ background: c.color }}
-            >
-              {c.short}
-            </span>
+          <span key={c.id} className="inline-flex items-center gap-1.5 whitespace-nowrap" title={c.label}>
+            <ChainLogo id={c.id} size={15} />
             {money(c.liquidity)} / {money(c.depositCap)}
             {c.depositsPaused || c.paused ? ' · PAUSED' : ''}
           </span>

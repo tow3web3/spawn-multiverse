@@ -4,6 +4,7 @@ import { fmtChange, fmtPrice, fmtTokens, fmtUsd } from '../lib/format'
 import { CHAINS } from '../lib/chains'
 import { useChainSet } from '../lib/liveChains'
 import { CreatureArt } from './CreatureCard'
+import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 
 const label = 'font-mono text-[10px] font-bold tracking-[0.15em] opacity-60'
 
@@ -134,17 +135,15 @@ export function PortfolioPage({
                   const canUnwrap = c.ousd >= 0.01 && c.liquidity > 0
                   return (
                     <div key={c.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2">
-                      <span
-                        className="flex h-6 min-w-6 items-center justify-center rounded-full border-2 border-ink px-1 font-mono text-[9px] font-bold"
-                        style={{ background: c.color }}
-                      >
-                        {c.short}
-                      </span>
+                      <ChainLogo id={c.id} size={24} />
                       <span className="w-24 font-mono text-[11px] font-bold">
                         {c.label}
                         {c.local ? ' ⚡' : ''}
                       </span>
-                      <span className="font-mono text-[12px] font-bold">{fmtUsd(c.usdc)} USDC</span>
+                      <span className="inline-flex items-center gap-1.5 font-mono text-[12px] font-bold">
+                        <CoinLogo id="usdc" size={16} />
+                        {fmtUsd(c.usdc)} USDC
+                      </span>
                       {c.ousd >= 0.01 && (
                         <span
                           className="font-mono text-[11px] font-bold opacity-60"
@@ -153,8 +152,12 @@ export function PortfolioPage({
                           + {fmtUsd(c.ousd)} oUSD
                         </span>
                       )}
-                      <span className="font-mono text-[10px] font-bold opacity-40">
-                        GAS {c.gas.toFixed(c.gas < 0.01 ? 5 : 3)} {c.nativeSymbol}
+                      <span className="inline-flex items-center gap-1 font-mono text-[10px] font-bold">
+                        <span className="opacity-40">GAS</span>
+                        {coinOf(c.nativeSymbol) && <CoinLogo id={coinOf(c.nativeSymbol)!} size={13} />}
+                        <span className="opacity-40">
+                          {c.gas.toFixed(c.gas < 0.01 ? 5 : 3)} {c.nativeSymbol}
+                        </span>
                       </span>
                       {c.ousd >= 0.01 && (
                         <button
