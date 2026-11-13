@@ -33,9 +33,37 @@ end of this file; one of them caught a wrong Ethereum USDC address quoted
 from memory (it failed the EIP-55 checksum). Never type these from memory.
 
 Scope: the four EVM chains that have native USDC **and** CCTP V2 — Base
-(hub), Optimism, Arbitrum One, Ethereum. BNB Chain is not listed in Circle's
-USDC address table (its "USDC" is a Binance-pegged 18-decimal token, which
-`OmniUSD`'s constructor rejects) and has no CCTP: it cannot be a v7 leg.
+(hub), Optimism, Arbitrum One, Ethereum — for the core universe's checks.
+BNB Chain is not listed in Circle's USDC address table (its "USDC" is a
+Binance-pegged 18-decimal token, which `OmniUSD`'s constructor rejects) and
+has no CCTP: it cannot be a leg of the core. It is a **universe of its own**,
+settled in BSC USDT; so is Ethereum, settled in USDC — both below.
+
+## The BNB universe — BNB Chain, settled in USDT (v7.1, verified 2026-11-13)
+
+| Address | What | How it is checked |
+|---|---|---|
+| `0x55d398326f99059fF775485246999027B3197955` | **BSC USDT** ("Tether USD" / `USDT`, **18 decimals**), Binance-Peg BEP20 behind a `BEP20UpgradeableProxy`; owner `0xF68a4b64162906efF0fF6aE34E2bB1Cd42FEf62d` (`getOwner()`), which can `mint` | preflight (live): `symbol() == "USDT"`, `decimals() == 18`, `totalSupply()` inside 1–100 B whole USDT (9.18 B on 2026-11-13); **fork**: pulled, paid out and unwrapped by the real scripts on an anvil fork of BNB Chain (`npm run rehearse:bnb`) |
+| `0x1a44076050125825900e736c501f859c50fE728c` | LayerZero EndpointV2 on BNB Chain, **eid 30102** | preflight (live): `eid() == 30102`; fork: the adapter constructed against it as a loopback, **zero `PacketSent`** over a whole launch + finish |
+| chain id **56** | | preflight (live) |
+
+No CCTP, no Circle check, no verifier set, no gas tank: nothing leaves this
+chain. The peg is Binance's — one key can mint the dollar of this universe —
+which is why it is separate and never under the core's USDC claims
+([BNB-UNIVERSE.md](BNB-UNIVERSE.md) §11.1).
+
+## The Ethereum universe — Ethereum, settled in USDC (v7.1, verified 2026-11-13)
+
+| Address | What | How it is checked |
+|---|---|---|
+| `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | Circle-native **USDC** on Ethereum (6 decimals) | preflight (live): `symbol`, `decimals`, `isMinter(TokenMessengerV2.localMinter())` → `0xfd78EE919681417d192449715b2594ab58f5D002` is a minter; **fork**: minted by that minter (impersonated) and used by the real scripts (`npm run rehearse:ethereum`) |
+| `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d` | Circle `TokenMessengerV2` — only to prove the token is Circle's; no CCTP is used in this universe | preflight (live) |
+| `0x1a44076050125825900e736c501f859c50fE728c` | LayerZero EndpointV2 on Ethereum, **eid 30101** | preflight (live): `eid() == 30101`; fork: loopback only, zero `PacketSent` |
+| chain id **1** | | preflight (live) |
+
+Why a universe and not a leg: see the cost table at the end of this file.
+Deployer today: **0 ETH, 0 USDC** — the preflight reports it (not fatal):
+fund ~0.02 ETH and ~5 USDC before `bash scripts/launch.sh ethereum`.
 
 ## Native USDC
 

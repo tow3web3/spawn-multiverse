@@ -23,9 +23,14 @@
 const fs = require('fs')
 const path = require('path')
 const { ethers, network } = require('hardhat')
-const { activeNets } = require('../config/profiles')
+const { activeNets, dollarUnits, dollarScale } = require('../config/profiles')
 
 const MAINNET_CONFIRM = 'I_UNDERSTAND_THIS_IS_REAL_MONEY'
+/** The contract generation a state entry was deployed from. A deployment is
+ * never "resumed" across generations: v7.1 fixed the adapter (an unset peer
+ * matched a zero sender — SPEC F-11), so a `v7` entry (v7.0 bytecode) must
+ * be archived and the network deployed fresh. */
+const GENERATION = 'v7.1'
 const b32 = (addr) => ethers.zeroPadValue(addr, 32)
 const fmt = (wei) => ethers.formatEther(wei)
 const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase()
@@ -46,6 +51,7 @@ const USDC_ABI = [
   'function symbol() view returns (string)',
   'function decimals() view returns (uint8)',
   'function isMinter(address) view returns (bool)',
+  'function totalSupply() view returns (uint256)',
   'function balanceOf(address) view returns (uint256)',
   'function allowance(address,address) view returns (uint256)',
   'function approve(address,uint256) returns (bool)',
@@ -85,6 +91,16 @@ const spokeGas = (profile, cfg) => cfg.gasToSpoke ?? profile.gasToSpoke
 const vaultOf = (profile, net, entry) => (net === profile.hub ? entry?.localUsd : entry?.usd)
 const distOf = (profile, net, entry) => (net === profile.hub ? entry?.localDist : entry?.dist)
 
+/** The contract users' dollars sit in: `OmniUSD` (6-decimal USDC, CCTP
+ * rebalancing between the universe's vaults) or `OmniUSDLocal` (a dollar of
+ * any decimals, no CCTP — a single-chain universe). Both answer the same
+ * calls wherever the gateway, the pad, the pool and these scripts touch
+ * them; only OmniUSD has `tokenMessenger` / `peers` / `rebalance`. */
+const vaultName = (profile) => profile.vault ?? 'OmniUSD'
+const hasCctp = (profile) => vaultName(profile) === 'OmniUSD' && !profile.mockUsdc
+const nativeOf = (profile) => profile.native ?? 'ETH'
+const dollarOf = (profile) => profile.dollar?.symbol ?? 'USDC'
+
 /** Every contract of one net that answers to the three Roles, by state key. */
 function roleKeys(profile, net) {
   return net === profile.hub
@@ -92,13 +108,13 @@ function roleKeys(profile, net) {
         ['adapter', 'LayerZeroOmniMessenger'],
         ['usd', 'OmniUSD'],
         ['pad', 'SpawnPad'],
-        ['localUsd', 'OmniUSD'],
+        ['localUsd', vaultName(profile)],
         ['gateway', 'SpawnGateway'],
         ['localDist', 'FeeDistributor'],
       ]
     : [
         ['adapter', 'LayerZeroOmniMessenger'],
-        ['usd', 'OmniUSD'],
+        ['usd', vaultName(profile)],
         ['gateway', 'SpawnGateway'],
         ['dist', 'FeeDistributor'],
       ]
@@ -111,7 +127,11 @@ function makeCtx(opts) {
   const cfg = profile.nets[netKey]
   if (!cfg) throw new Error(`"${netKey}" is not a network of the ${profile.name} profile`)
   if (cfg.enabled === false) {
-    throw new Error(`${netKey} is disabled in the ${profile.name} profile — SPAWN_ENABLE=${netKey} switches it on`)
+    throw new Error(
+      cfg.rehearsalOnly
+        ? `${netKey} is not a network of the ${profile.name} profile: ${cfg.rehearsalOnly}`
+        : `${netKey} is disabled in the ${profile.name} profile — SPAWN_ENABLE=${netKey} switches it on`,
+    )
   }
   const stateFile = opts.stateFile ?? profile.stateFile
   const all = loadState(stateFile)
@@ -275,7 +295,8 @@ async function deployBudget(ctx) {
   const floor = cfg.budgetFloor ?? cfg.budget ?? profile.budget[cfg.role]
   const spokes = Object.values(activeNets(profile)).filter((c) => c.role === 'spoke').length
   const g = LIFE_GAS[cfg.role]
-  const gas = g.deploy + g.dvnPerPathway * BigInt(cfg.role === 'hub' ? spokes : 1) + g.handover
+  const pathways = profile.dvn ? BigInt(cfg.role === 'hub' ? spokes : 1) : 0n
+  const gas = g.deploy + g.dvnPerPathway * pathways + g.handover
   let gasPrice = 0n
   try {
     // what a transaction really pays (base fee + tip), not the 1559 CEILING
@@ -325,7 +346,6 @@ async function preflight(ctx) {
 
   if (!profile.mockUsdc) {
     const usdc = new ethers.Contract(cfg.usdc, USDC_ABI, provider)
-    const tm = new ethers.Contract(cfg.tokenMessenger, CCTP_MESSENGER_ABI, provider)
     const get = async (p) => {
       try {
         return await p
@@ -333,37 +353,80 @@ async function preflight(ctx) {
         return `call failed: ${e.shortMessage ?? e.message}`
       }
     }
+    // the dollar of THIS universe: its symbol and decimals come from the
+    // profile — USDC/6 for the core and Ethereum, USDT/18 on BNB Chain
+    const want = profile.dollar ?? { symbol: 'USDC', decimals: 6 }
     const symbol = await get(usdc.symbol())
-    check('USDC symbol()', symbol === 'USDC', `"${symbol}" at ${cfg.usdc}`)
+    check(`${want.symbol} symbol()`, symbol === want.symbol, `"${symbol}" at ${cfg.usdc}`)
     const decimals = await get(usdc.decimals())
-    check('USDC decimals()', Number(decimals) === 6, String(decimals))
-    const minter = await get(tm.localMinter())
-    const isMinter = ethers.isAddress(minter) ? await get(usdc.isMinter(minter)) : false
-    check(
-      'USDC is the Circle-native token (isMinter(TokenMessengerV2.localMinter()))',
-      isMinter === true,
-      `minter ${minter} → ${isMinter}`,
-    )
-    const transmitter = await get(tm.localMessageTransmitter())
-    const domain = ethers.isAddress(transmitter)
-      ? await get(new ethers.Contract(transmitter, CCTP_TRANSMITTER_ABI, provider).localDomain())
-      : 'no transmitter'
-    check(
-      'CCTP domain (TokenMessengerV2.localMessageTransmitter().localDomain())',
-      Number(domain) === cfg.cctpDomain,
-      `${domain} (expected ${cfg.cctpDomain}) via ${transmitter}`,
-    )
+    check(`${want.symbol} decimals()`, Number(decimals) === want.decimals, `${decimals} (expected ${want.decimals})`)
+    if (want.minSupply !== undefined) {
+      // No issuer registry to ask on this chain: a look-alike token has the
+      // name and the decimals, not billions of dollars outstanding.
+      const supply = await get(usdc.totalSupply())
+      const whole = typeof supply === 'bigint' ? supply / 10n ** BigInt(want.decimals) : -1n
+      check(
+        `${want.symbol} totalSupply() within the sanity bound`,
+        whole >= want.minSupply && (want.maxSupply === undefined || whole <= want.maxSupply),
+        `${typeof supply === 'bigint' ? whole : supply} whole ${want.symbol} (expected ${want.minSupply}–${want.maxSupply ?? '∞'})`,
+      )
+    }
+    if (cfg.tokenMessenger) {
+      const tm = new ethers.Contract(cfg.tokenMessenger, CCTP_MESSENGER_ABI, provider)
+      const minter = await get(tm.localMinter())
+      const isMinter = ethers.isAddress(minter) ? await get(usdc.isMinter(minter)) : false
+      check(
+        'USDC is the Circle-native token (isMinter(TokenMessengerV2.localMinter()))',
+        isMinter === true,
+        `minter ${minter} → ${isMinter}`,
+      )
+      if (hasCctp(profile)) {
+        // only where CCTP is actually used (vault-to-vault rebalancing)
+        const transmitter = await get(tm.localMessageTransmitter())
+        const domain = ethers.isAddress(transmitter)
+          ? await get(new ethers.Contract(transmitter, CCTP_TRANSMITTER_ABI, provider).localDomain())
+          : 'no transmitter'
+        check(
+          'CCTP domain (TokenMessengerV2.localMessageTransmitter().localDomain())',
+          Number(domain) === cfg.cctpDomain,
+          `${domain} (expected ${cfg.cctpDomain}) via ${transmitter}`,
+        )
+      }
+    }
   }
 
+  let budget
   if (profile.budget) {
-    const { need, how } = await deployBudget(ctx)
+    budget = await deployBudget(ctx)
+    const { need, how } = budget
     const bal = await provider.getBalance(signer.address)
     // a finished deployment re-runs for a few wiring txs: no full budget needed
     const fresh = !ctx.state.gateway
+    const coin = nativeOf(profile)
     check(
       'deployer balance covers the deploy budget',
       !fresh || bal >= need,
-      `${fmt(bal)} ETH, budget ${fmt(need)} ETH (${how})${fresh ? '' : ' (already deployed — not required)'}`,
+      `${fmt(bal)} ${coin}, budget ${fmt(need)} ${coin} (${how})${fresh ? '' : ' (already deployed — not required)'}`,
+    )
+  }
+
+  // What a user pays in gas here, at the live gas price — shown so the owner
+  // sees it before deploying a universe where every action costs L1 gas.
+  if (profile.actionGas) {
+    let gasPrice = budget?.gasPrice
+    if (gasPrice === undefined) {
+      try {
+        const fee = await provider.getFeeData()
+        gasPrice = fee.gasPrice ?? fee.maxFeePerGas ?? 0n
+      } catch {
+        gasPrice = 0n
+      }
+    }
+    const coin = nativeOf(profile)
+    const cost = (gas) => `${fmt(gas * gasPrice)} ${coin}`
+    log(
+      `  ℹ gas for a user at ${ethers.formatUnits(gasPrice, 'gwei')} gwei: a launch ≈ ${cost(profile.actionGas.launch)}, ` +
+        `a buy ≈ ${cost(profile.actionGas.buy)}, a sell ≈ ${cost(profile.actionGas.sell)} (no messaging fee in this universe)`,
     )
   }
 
@@ -388,15 +451,16 @@ async function setRoles(ctx, contract, what, roles) {
 
 async function deployAdapter(ctx) {
   const { state, profile, cfg, netKey } = ctx
-  if (state.adapter && state.transport !== 'v7') {
+  if (state.adapter && state.transport !== GENERATION) {
     throw new Error(
-      `${netKey}: pre-v7 deployment in the state — archive this network's entry before deploying v7 ` +
-        `(node scripts/archive-state.js; the old gas tank is recoverable with scripts/recover-tanks.js)`,
+      `${netKey}: the state holds a ${state.transport ?? 'pre-v7'} deployment — ${GENERATION} never resumes an older ` +
+        `generation. Archive this network's entry first (node scripts/archive-state.js ${profile.name} _v70_pre71 ${netKey}); ` +
+        `its gas tank is recoverable with scripts/recover-tanks.js (through the timelock if it was handed over)`,
     )
   }
   const adapter = await deployOnce(ctx, 'adapter', 'LayerZeroOmniMessenger', () => [profile.endpoint, cfg.eid])
-  if (!isStub(adapter) && state.transport !== 'v7') {
-    state.transport = 'v7'
+  if (!isStub(adapter) && state.transport !== GENERATION) {
+    state.transport = GENERATION
     ctx.save()
   }
   return adapter
@@ -407,19 +471,29 @@ async function deployUserSide(ctx, adapter, padAddr, keys, roles) {
   const { profile, cfg } = ctx
   let usdcAddr = cfg.usdc
   let usdc
+  const dollar = profile.dollar ?? { symbol: 'USDC', decimals: 6 }
   if (profile.mockUsdc) {
-    usdc = await deployOnce(ctx, 'usdc', 'MockUSDC', () => [])
+    // play money: MockUSDC (6 decimals), or a MockDollar of the universe's
+    // own decimals when the profile's dollar is not a 6-decimal one
+    usdc =
+      dollar.decimals === 6
+        ? await deployOnce(ctx, 'usdc', 'MockUSDC', () => [])
+        : await deployOnce(ctx, 'usdc', 'MockDollar', () => [`Mock ${dollar.symbol}`, dollar.symbol, dollar.decimals])
     usdcAddr = usdc.target
   } else if (ctx.state.usdc !== cfg.usdc) {
     // recorded for the frontend manifest; the real token is never deployed
     ctx.state.usdc = cfg.usdc
     if (!ctx.dry) ctx.save()
   }
-  const usd = await deployOnce(ctx, keys.usd, 'OmniUSD', () => [
-    cfg.label,
-    usdcAddr,
-    profile.mockUsdc ? ethers.ZeroAddress : cfg.tokenMessenger,
-  ])
+  const usd =
+    vaultName(profile) === 'OmniUSDLocal'
+      ? // a dollar of any decimals, no CCTP surface at all
+        await deployOnce(ctx, keys.usd, 'OmniUSDLocal', () => [cfg.label, usdcAddr])
+      : await deployOnce(ctx, keys.usd, 'OmniUSD', () => [
+          cfg.label,
+          usdcAddr,
+          profile.mockUsdc ? ethers.ZeroAddress : cfg.tokenMessenger,
+        ])
   const gateway = await deployOnce(ctx, 'gateway', 'SpawnGateway', () => [
     adapter.target,
     usd.target,
@@ -431,10 +505,12 @@ async function deployUserSide(ctx, adapter, padAddr, keys, roles) {
     on: usd, fn: 'setAgent', args: () => [gateway.target], uses: [gateway],
     needed: async () => (await usd.agent()) === ethers.ZeroAddress,
   })
-  const cap = profile.depositCapUsdc * 10n ** 6n
+  // the cap is in the dollar's OWN smallest units (6 decimals for USDC, 18
+  // for BSC USDT)
+  const cap = dollarUnits(profile, profile.depositCapUsdc)
   if (profile.openDeposits) {
     await ensure(ctx, {
-      desc: `${keys.usd}.setDepositCap(${profile.depositCapUsdc} USDC) — deposits open`,
+      desc: `${keys.usd}.setDepositCap(${profile.depositCapUsdc} ${dollarOf(profile)}) — deposits open`,
       on: usd, fn: 'setDepositCap', args: [cap], role: 'operator',
       needed: async () => (await usd.depositCap()) === 0n,
     })
@@ -480,7 +556,7 @@ async function deployUserSide(ctx, adapter, padAddr, keys, roles) {
  * the vault of another chain of the deployment. Set once per peer. */
 async function setCctpPeers(ctx, usd, what) {
   const { profile, netKey, nets, all } = ctx
-  if (profile.mockUsdc) return
+  if (!hasCctp(profile)) return // play money, or a single-chain universe: nothing to rebalance with
   for (const [net, c] of Object.entries(nets)) {
     if (net === netKey) continue
     const peerVault = vaultOf(profile, net, all[net])
@@ -498,7 +574,7 @@ async function setCctpPeers(ctx, usd, what) {
 
 async function setDestination(ctx, adapter, label, gas, unit, what) {
   await ensure(ctx, {
-    desc: `${what}: adapter.setDestination(${label}, gas ${gas}, reply budget ${fmt(unit)} ETH/leg)`,
+    desc: `${what}: adapter.setDestination(${label}, gas ${gas}, reply budget ${fmt(unit)} ${nativeOf(ctx.profile)}/leg)`,
     on: adapter, fn: 'setDestination', args: [label, gas, unit], role: 'operator',
     // an existing destination is the operator's to tune (tune-fees.js): only
     // a missing one is set here
@@ -596,12 +672,15 @@ async function deployHub(ctx, roles) {
       needed: async () => !(await adapter.isLocal(label)),
     })
   }
-  // a locally-initiated spawn prepays the hub's remote SYNC fan-out
-  await ensure(ctx, {
-    desc: `local fan-out budget: adapter.setDestination(0, 0, ${fmt(profile.returnUnit)} ETH/leg)`,
-    on: adapter, fn: 'setDestination', args: [0, 0n, profile.returnUnit], role: 'operator',
-    needed: async () => (await adapter.returnUnit(0)) === 0n,
-  })
+  // a locally-initiated spawn prepays the hub's remote SYNC fan-out — in a
+  // single-chain universe there is none (and a zero budget is not a step)
+  if (profile.returnUnit > 0n) {
+    await ensure(ctx, {
+      desc: `local fan-out budget: adapter.setDestination(0, 0, ${fmt(profile.returnUnit)} ${nativeOf(profile)}/leg)`,
+      on: adapter, fn: 'setDestination', args: [0, 0n, profile.returnUnit], role: 'operator',
+      needed: async () => (await adapter.returnUnit(0)) === 0n,
+    })
+  }
   const local = await deployUserSide(ctx, adapter, pad.target, { usd: 'localUsd', dist: 'localDist' }, roles)
   await ensure(ctx, {
     desc: `pad.setGateway(${cfg.label}, ${netKey} — local)`,
@@ -634,8 +713,12 @@ async function deployHub(ctx, roles) {
     // queued (blocked) for the timelock, with pad.setGateway right behind it
     const routeQueued = ctx.last === 'blocked' || ctx.last === 'planned'
     // BEFORE the pad learns the gateway: from that moment every spawn SYNCs
-    // this chain, and a send without a gas limit reverts. Hub -> spoke
-    // messages are replies: they carry no further budget.
+    // this chain, and a send without a gas limit fails. Since v7.1 a failed
+    // SYNC no longer undoes the spawn (the pad logs SyncFailed and goes on) —
+    // but every token launched meanwhile is born WITHOUT a replica there and
+    // has to be repaired one by one (scripts/resync.js, paid by the hub
+    // tank). So the order still matters. Hub -> spoke messages are replies:
+    // they carry no further budget.
     await ensure(ctx, {
       desc: `options hub -> ${net}: adapter.setDestination(${c.label}, gas ${spokeGas(profile, c)}, 0)`,
       on: adapter, fn: 'setDestination', args: [c.label, spokeGas(profile, c), 0n], role: 'operator',
@@ -650,7 +733,7 @@ async function deployHub(ctx, roles) {
       // even queued: the timelock batch is setRoute then setGateway, and the
       // moment it executes every spawn SYNCs this chain.
       if (!(gasSet || gasQueued) || !(routeSet || routeQueued)) {
-        ctx.log(`  (${net}: route or options missing — pad.setGateway withheld so spawns cannot break)`)
+        ctx.log(`  (${net}: route or options missing — pad.setGateway withheld: tokens would be launched without a replica there)`)
         continue
       }
     }
@@ -669,7 +752,9 @@ async function deploySpoke(ctx, roles) {
   const hubCfg = profile.nets[profile.hub]
   const hub = ctx.all[profile.hub]
   if (!hub?.pad || !hub?.adapter) throw new Error(`deploy the hub first (${profile.hub})`)
-  if (hub.transport !== 'v7') throw new Error(`the hub (${profile.hub}) is pre-v7 — redeploy it first`)
+  if (hub.transport !== GENERATION) {
+    throw new Error(`the hub (${profile.hub}) is a ${hub.transport ?? 'pre-v7'} deployment — redeploy it as ${GENERATION} first`)
+  }
   const adapter = await deployAdapter(ctx)
   await setRoles(ctx, adapter, 'adapter', roles)
   const side = await deployUserSide(ctx, adapter, hub.pad, { usd: 'usd', dist: 'dist' }, roles)
@@ -725,19 +810,19 @@ async function selfCheck({ profile, netKey, stateFile, provider, roles, log = co
   row('adapter.localEid', await adapter.localEid(), cfg.eid)
   row('endpoint.delegates(adapter) == adapter.admin', await endpoint.delegates(s.adapter), await adapter.admin())
 
-  const vault = await at('OmniUSD', s[vaultKey])
+  const vault = await at(vaultName(profile), s[vaultKey])
   const gateway = await at('SpawnGateway', s.gateway)
   const dist = await at('FeeDistributor', s[distKey])
   row(`${vaultKey}.chainLabel`, await vault.chainLabel(), cfg.label)
-  if (!profile.mockUsdc) {
-    row(`${vaultKey}.usdc`, await vault.usdc(), cfg.usdc)
-    row(`${vaultKey}.tokenMessenger`, await vault.tokenMessenger(), cfg.tokenMessenger)
-  }
+  if (!profile.mockUsdc) row(`${vaultKey}.usdc`, await vault.usdc(), cfg.usdc)
+  if (hasCctp(profile)) row(`${vaultKey}.tokenMessenger`, await vault.tokenMessenger(), cfg.tokenMessenger)
+  // the vault and the dollar must agree on the scale: SCALE × 10^decimals = 1e18
+  row(`${vaultKey}.SCALE`, await vault.SCALE(), dollarScale(profile))
   row(`${vaultKey}.agent`, await vault.agent(), s.gateway)
   row(
     `${vaultKey}.depositCap`,
     await vault.depositCap(),
-    profile.openDeposits ? profile.depositCapUsdc * 10n ** 6n : 0n,
+    profile.openDeposits ? dollarUnits(profile, profile.depositCapUsdc) : 0n,
     true,
   )
   row('gateway.messenger', await gateway.messenger(), s.adapter)
@@ -751,10 +836,25 @@ async function selfCheck({ profile, netKey, stateFile, provider, roles, log = co
   row(`${distKey}.agent`, await dist.agent(), s.gateway)
   row(`${distKey}.exclusionsSealed`, await dist.exclusionsSealed(), true)
   const spokes = Object.entries(nets).filter(([n, c]) => c.role === 'spoke' && all[n]?.gateway)
-  row('gateway.tradeLegs', await gateway.tradeLegs(), hubSide ? 0 : 1, true)
+  const tradeLegs = await gateway.tradeLegs()
+  if (hubSide) {
+    row('gateway.tradeLegs', tradeLegs, 0, true)
+  } else {
+    // HARD, not operator-tunable: tradeLegs defaults to 0 and nothing on
+    // chain enforces it. A REMOTE gateway left at 0 lets every buy, sell,
+    // claim and pull from that chain ride the HUB TANK for its reply — a
+    // drain anyone can run. (How MANY legs is the operator's to tune.)
+    rows.push({
+      what: 'gateway.tradeLegs ≥ 1 on a REMOTE gateway (0 = replies paid by the hub tank)',
+      actual: String(tradeLegs),
+      expected: '≥ 1',
+      ok: tradeLegs >= 1n,
+      soft: false,
+    })
+  }
   row('gateway.spawnLegs', await gateway.spawnLegs(), spokes.length, true)
 
-  if (!profile.mockUsdc) {
+  if (hasCctp(profile)) {
     for (const [net, c] of Object.entries(nets)) {
       if (net === netKey) continue
       const peerVault = vaultOf(profile, net, all[net])
@@ -822,18 +922,35 @@ async function selfCheck({ profile, netKey, stateFile, provider, roles, log = co
 
 /**
  * The frontend manifest: what the site needs to talk to this deployment.
- * Testnet → public/onchain/testnet.json. Mainnet → public/onchain/mainnet.json
- * with `"network": "mainnet"`, a per-chain `depositCap` (USDC units, as
- * planned at deploy — the live value is `usd.depositCap()`), and no gasDrip.
+ * Testnet → public/onchain/testnet.json. A mainnet universe → its own file
+ * (mainnet.json for the core, mainnet-bnb.json, mainnet-ethereum.json) with
+ * `"network": "mainnet"`, `"universe"`, `"dollar": { symbol, decimals }`, a
+ * per-chain `depositCap` in the dollar's OWN smallest units (as planned at
+ * deploy — the live value is `usd.depositCap()`), and no gasDrip. Per chain
+ * the field `usdc` is "the dollar token" whatever its name (USDT on BNB).
  */
-async function buildManifest({ profile, stateFile, hubProvider, previous }) {
+async function buildManifest({ profile, stateFile, hubProvider, previous, providers }) {
   const all = loadState(stateFile ?? profile.stateFile)
   const hub = all[profile.hub]
   if (!hub?.pad) return null
   const hubCfg = profile.nets[profile.hub]
   let fromBlock = previous?.pad === hub.pad ? previous.fromBlock : undefined
   if (!fromBlock) fromBlock = Math.max(0, Number(await hubProvider.getBlockNumber()) - 300)
-  const cap = profile.openDeposits ? String(profile.depositCapUsdc * 10n ** 6n) : '0'
+  // in the dollar's own smallest units (USDC: 6 decimals; BSC USDT: 18) —
+  // read from the vault itself (set-cap.js moves it after the deploy: canary
+  // cap, launch cap, 0 when closed); the profile's figure only when the
+  // chain cannot be asked
+  const planned = profile.openDeposits ? String(dollarUnits(profile, profile.depositCapUsdc)) : '0'
+  const capOf = async (vault, provider) => {
+    try {
+      const v = new ethers.Contract(vault, ['function depositCap() view returns (uint256)'], provider)
+      return String(await v.depositCap())
+    } catch {
+      return planned
+    }
+  }
+  const spokeProvider = (net, cfg) =>
+    providers?.[net] ?? new ethers.JsonRpcProvider(cfg.rpc, cfg.chainId, { staticNetwork: true })
   const chains = []
   // the hub chain is a user-facing chain too — trades there are local (one
   // transaction, no LayerZero message, no messaging fee)
@@ -843,7 +960,7 @@ async function buildManifest({ profile, stateFile, hubProvider, previous }) {
       gateway: hub.gateway, usd: hub.localUsd, usdc: hub.usdc, dist: hub.localDist,
       chainId: hubCfg.chainId, rpc: hubCfg.rpc,
       local: true,
-      ...(profile.mainnet ? { depositCap: cap } : {}),
+      ...(profile.mainnet ? { depositCap: await capOf(hub.localUsd, hubProvider) } : {}),
     })
   }
   // A spoke is listed only once the hub has WIRED it. A spoke that joins a
@@ -875,11 +992,15 @@ async function buildManifest({ profile, stateFile, hubProvider, previous }) {
       label: cfg.label, id: cfg.id,
       gateway: all[net].gateway, usd: all[net].usd, usdc: all[net].usdc, dist: all[net].dist,
       chainId: cfg.chainId, rpc: cfg.rpc,
-      ...(profile.mainnet ? { depositCap: cap } : {}),
+      ...(profile.mainnet ? { depositCap: await capOf(all[net].usd, spokeProvider(net, cfg)) } : {}),
     })
   }
   return {
     ...(profile.mainnet ? { network: 'mainnet' } : {}),
+    // which separate market this is, and what it is settled in — the site
+    // reads the dollar's symbol and decimals from here, never assumes 6
+    ...(profile.universe ? { universe: profile.universe } : {}),
+    dollar: { symbol: dollarOf(profile), decimals: profile.dollar?.decimals ?? 6 },
     chainId: hubCfg.chainId,
     rpc: hubCfg.rpc,
     pad: hub.pad,
@@ -908,7 +1029,7 @@ async function writeManifest(ctx) {
     (netKey === profile.hub
       ? signer.provider
       : new ethers.JsonRpcProvider(hubCfg.rpc, hubCfg.chainId, { staticNetwork: true }))
-  const manifest = await buildManifest({ profile, stateFile, hubProvider, previous })
+  const manifest = await buildManifest({ profile, stateFile, hubProvider, previous, providers: ctx.providers })
   if (!manifest) return null
   fs.mkdirSync(path.dirname(manifestFile), { recursive: true })
   fs.writeFileSync(manifestFile, JSON.stringify(manifest, null, 2))
@@ -928,13 +1049,16 @@ async function deployNet(opts) {
   const { profile, netKey, cfg, signer, log } = ctx
   const provider = signer.provider
   const bal0 = await provider.getBalance(signer.address)
+  const coin = nativeOf(profile)
   log(
-    `${profile.name}/${netKey} (${cfg.role}) — deployer ${signer.address} — ${fmt(bal0)} ETH` +
+    `${profile.name}/${netKey} (${cfg.role}) — deployer ${signer.address} — ${fmt(bal0)} ${coin}` +
       (ctx.dry ? ' — DRY RUN: nothing will be sent' : ''),
   )
   // a programmatic `dry: false` is only honoured on a development node (a
   // local fork); against a live chain the confirmation phrase is the only way in
   const devNode = await isDevNode(provider)
+  // a net kept in a profile only so the tooling can be rehearsed on forks
+  if (cfg.rehearsalOnly && !devNode) throw new Error(`${netKey}: ${cfg.rehearsalOnly}`)
   if (profile.mainnet && !ctx.dry && !devNode && process.env.SPAWN_MAINNET_CONFIRM !== MAINNET_CONFIRM) {
     throw new Error(`refusing to send mainnet transactions without SPAWN_MAINNET_CONFIRM=${MAINNET_CONFIRM}`)
   }
@@ -970,8 +1094,8 @@ async function deployNet(opts) {
 
   const bal1 = await provider.getBalance(signer.address)
   log(
-    `cost: ${fmt(bal0 - bal1)} ETH (gas tank top-up and L1 data fees included) in ${ctx.gas.txs} tx(s), ` +
-      `${ctx.gas.used} gas — ${fmt(bal1)} ETH left`,
+    `cost: ${fmt(bal0 - bal1)} ${coin} (gas tank top-up and L1 data fees included) in ${ctx.gas.txs} tx(s), ` +
+      `${ctx.gas.used} gas — ${fmt(bal1)} ${coin} left`,
   )
   if (ctx.dry) {
     log(ctx.plan.length ? `plan: ${ctx.plan.length} step(s) to run` : 'plan: nothing to do — already deployed and wired')
@@ -993,6 +1117,7 @@ async function deployNet(opts) {
 
 module.exports = {
   MAINNET_CONFIRM,
+  GENERATION,
   ENDPOINT_ABI,
   USDC_ABI,
   CCTP_MESSENGER_ABI,
@@ -1002,6 +1127,10 @@ module.exports = {
   loadState,
   saveState,
   vaultOf,
+  vaultName,
+  hasCctp,
+  nativeOf,
+  dollarOf,
   distOf,
   spokeGas,
   roleKeys,
@@ -1011,6 +1140,7 @@ module.exports = {
   deployNet,
   selfCheck,
   buildManifest,
+  writeManifest,
   hasRole,
   isDevNode,
   cliSigner,

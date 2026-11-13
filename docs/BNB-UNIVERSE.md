@@ -57,10 +57,23 @@ transaction. With `tradeLegs = 0` and `spawnLegs = 0` every `quote*` returns
 The reused contracts are compiled from the same sources as the live USDC
 universe. This chantier added files only; no existing file changed.
 
-## 3. The transport — one decision to make before deploying
+## 3. The transport — decided: the fixed v7.1 adapter, loopback only
 
-Both candidates are existing contracts; the universe was built and tested
-over each (`test/bnb-universe.test.js`, last section).
+**Decision (v7.1, 2026-11-13): (a) `LayerZeroOmniMessenger`**, constructed
+against BSC's EndpointV2 (`0x1a44…728c`, eid 30102), with labels 0 and 4
+marked local and **no route ever set** — the same bytecode as the core
+universe. The reason (b) was recommended below no longer exists: the hole it
+avoided was finding **F-11**, fixed in v7.1 (`_isPeer` matches a SET peer
+only — an unset peer matches nothing, not even an all-zero sender), proved
+by `test/v71.test.js` and `test/layerzero.test.js`; it is also what retired
+the v7.0 mainnet deployment. With (a) the three universes run one adapter
+bytecode, and the single-chain ones are rehearsed by the same scripts as the
+core (`scripts/fork-universe.js`: the two wrappers against a fork of BNB
+Chain with the real endpoint — zero `PacketSent`). The §3 analysis is kept
+as the record of why the choice was open; (b) stays in `OmniMessenger.sol` as
+the devnet transport.
+
+The two candidates, as they were weighed:
 
 **(a) `LayerZeroOmniMessenger`, loopback only** — the production adapter,
 constructed against BSC's EndpointV2 (`0x1a44…728c`, eid 30102), with labels
@@ -72,8 +85,9 @@ of the test suite). It has no LayerZero side at all: a message can only be
 sent by a registered contract on this chain, and its source label and sender
 are taken from `msg.sender`.
 
-**Recommendation: (b).** While testing what can reach the vault from outside
-the chain, the adapter turned out to accept one thing it should not:
+**What spoke for (b) before v7.1.** While testing what can reach the vault
+from outside the chain, the v7.0 adapter turned out to accept one thing it
+should not (fixed since — F-11):
 
 > `lzReceive` checks `peers[origin.srcEid] == origin.sender`. For a chain
 > with no peer configured, `peers[eid]` is `bytes32(0)` — so a packet whose
@@ -126,7 +140,7 @@ the one mechanical rename (`usdc6` → `units`, `_trySendUsdc` → `_trySend`):
 | Ledger mode (`usdc == 0`) | yes (the hub instance) | **none** — always a vault; the `backed` modifier is gone because it is always true. The hub ledger is a plain `OmniUSD(0,0,0)` |
 | CCTP | `tokenMessenger`, `peers`, `setPeer`, `rebalance`, `CCTP_FINALITY_STANDARD`, events `PeerSet` / `Rebalanced` | **absent** (not disabled). The contract has no function that sends the token anywhere but to a redeeming user or a protocol payout |
 | Admin power | names the agent (once) and peers | names the agent (once) — nothing else |
-| `depositFor` | no floor needed: one USDC unit is 1e12 oUSD wei | `require(amount18 >= MIN_DEPOSIT)` with `MIN_DEPOSIT = 1e12` (new public constant) |
+| `depositFor` | `require(amount18 >= MIN_DEPOSIT)`, `MIN_DEPOSIT = 1e12` — since v7.1 the same floor on both vaults (one USDC unit) | `require(amount18 >= MIN_DEPOSIT)` with `MIN_DEPOSIT = 1e12`: at 18 decimals that is 1e-6 USDT, the smallest amount the message path can carry |
 | Constructor | `(label, usdc, tokenMessenger)` | `(label, token)`; rejects a zero token and decimals outside 6…18 |
 | Everything else | — | identical: `wrap`, `unwrap`, `payout` (never reverts: token if liquid and accepted, else the whole amount as a claim; dust minted), balance-delta deposits, the cap, the deposit pause, `nonReentrant`, Roles, the events, the revert strings, the ERC-20 name and symbol (`OmniUSD` / `oUSD`) |
 
@@ -283,24 +297,37 @@ plumbing does not change. What the frontend must do:
   lists and portfolios, and copy that never says "same token" across them;
 - show the universe's own risk notice (Binance-pegged USDT, separate market).
 
-## 9. What the tooling chantier must add
+## 9. What the tooling chantier added (v7.1, 2026-11-13)
 
-- a `bnb` deploy profile: one net, role hub, label 4, chain id 56 (eid 30102
-  only if transport (a) is kept), `dollar = { token: 0x55d3…7955, decimals:
-  18, vault: 'OmniUSDLocal' }`, the transport choice, legs 0/0, no tank, no
-  CCTP, no DVN set (no pathway exists), its own state file and manifest;
-- `deployUserSide` deploying `OmniUSDLocal(label, token)` when the profile
-  says so, skipping the CCTP peers, and scaling the deposit cap by the
-  token's decimals;
-- a preflight for the dollar instead of the Circle checks: chain id, token
-  `symbol()` / `decimals()` and the address pinned in config, non-proxy
-  (empty EIP-1967 slot) — and a refusal if any differs;
-- `status.js`, `set-cap.js` and `smoke.js` reading the token's decimals;
-  status must not look for peers or DVN pathways here;
-- a BSC fork suite (anvil): the real script deploys the universe against the
-  real USDT (and the real EndpointV2 if transport (a)); a whole token life
-  in real USDT; the hand-over;
-- a canary cap, then the launch cap, as on the USDC universe.
+- the `bnb` profile (`config/profiles.js`): one net, role hub, label 4,
+  chain id 56, eid 30102, `usdc: 0x55d3…7955` (the name "usdc" stays the name
+  of *the dollar token* everywhere), `dollar: { symbol: 'USDT', decimals: 18,
+  minSupply, maxSupply }`, `vault: 'OmniUSDLocal'`, legs 0/0, no tank, no
+  CCTP, no DVN set, `native: 'BNB'`, `deployments/mainnet-bnb.json` and
+  `public/onchain/mainnet-bnb.json`; the `ethereum` profile is the same shape
+  over USDC;
+- `deployUserSide` deploys `OmniUSDLocal(label, token)` when the profile says
+  so, skips the CCTP peers, and scales the cap by the token's decimals
+  (`dollarUnits`); the self-check reads `SCALE` back; the manifest carries
+  `universe`, `dollar` and `depositCap` in the token's own units — read from
+  the vault, so `set-cap.js` moves it too;
+- the preflight: chain id, `endpoint.eid()`, `symbol()` / `decimals()`
+  against the profile, `totalSupply()` inside 1–100 B USDT (a look-alike has
+  the name, not the float), the deployer's budget in BNB, and what a launch,
+  a buy and a sell cost a user at the live gas price; no CCTP checks. (The
+  non-proxy check was not added: BSC USDT *is* behind a proxy
+  (`BEP20UpgradeableProxy`), which is the peg risk of §11.1, not a lie about
+  the address.);
+- `status.js`, `set-cap.js`, `smoke.js`, `estimate-budget.js` read the
+  decimals; status shows no tank, no peers, no pathways here;
+- the fork rehearsal `npm run rehearse:bnb` (`scripts/fork-universe.js`):
+  the two wrappers the owner pastes, against an anvil fork of BNB Chain with
+  the real USDT and the real EndpointV2, as the real deployer (impersonated);
+  then `test-fork/universe.fork.test.js` — §10;
+- `bash scripts/launch.sh bnb` (canary cap 100 USDT, local canary through
+  `buyTokenUsdcMin` / `sellTokenMin` after proving the refusal of an
+  impossible minimum) and `bash scripts/finish.sh bnb` (hand-over, launch cap
+  25,000 USDT) — RUNBOOK §3.
 
 ## 10. Proof so far
 
@@ -327,38 +354,57 @@ endpoint the adapter is constructed against):
 - the transport (§3): what each messenger lets in from outside, and the
   whole universe again over `LocalOmniMessenger`.
 
-Full suite: 156 passing (the 123 that existed + 33).
+Full suite at the time: 156 passing (the 123 that existed + 33). With v7.1
+and the tooling: **215**.
+
+**Tooling and fork proof (2026-11-13, v7.1):**
+
+- `test/tooling.test.js`: the `bnb` profile deployed in process by the real
+  scripts over a mock endpoint and an 18-decimal `MockDollar` — re-run sends
+  0 tx; cap 100 USDT = `100e18`; `SCALE == 1`; manifest with `universe`,
+  `dollar`, `depositCap` in USDT units and one `local: true` chain; the
+  canary with the `*Min` refusal; a cap overrun refused at the vault;
+  hand-over (operator = guardian = the hot key), caps to 25,000, status clean,
+  `endpoint.packetsSent() == 0` from the first deploy to the end;
+- `npm run rehearse:bnb`: `launch.sh bnb` then `finish.sh bnb` against an
+  anvil fork of BNB Chain (block 133411149, upstream Blast; the deployer
+  `0x483E…1B904` impersonated, holding its real 5.07 USDT): preflight ✓,
+  deploy **17,121,230 gas** in 33 tx, canary **2,943,361 gas** (spawn,
+  refusal of an impossible minimum, $3 buy with minimum 371,664 CANARY,
+  sell of half with minimum $1.03, payout in USDT, holder fees claimed and
+  unwrapped to USDT), hand-over + cap **2,266,262 gas**; then the assertions:
+  **zero `PacketSent`** from `0x1a44…728c` since the fork began, `USDT held
+  × 1 == oUSD supply` to the wei, every admin the 48h timelock, the hot key
+  refused as admin, cap `25000e18`, the manifest, and a stranger's launch
+  (2,208,720 gas), refused impossible minimum, protected buy (413,596 gas,
+  $10 → 1,767,533 CANARY) and protected sell (248,728 gas) — 7 passing.
 
 ## 11. What is not safe yet
 
 1. **The peg.** One key can mint BSC USDT; the backing is Binance's. Nothing
    on-chain protects a holder of this universe from that. It is the reason
    the universe is separate.
-2. **The transport, if (a) is kept** — §3. With (b) this item disappears.
+2. ~~The transport, if (a) is kept~~ — **closed by v7.1 (F-11)**: an unset
+   peer matches nothing; (a) is the decision (§3).
 3. **The vault is new custody code and unaudited** — small (115 code lines,
    98 shared with the live vault), but it will hold the dollars.
-4. **Sandwiching.** Trades here are single transactions on a chain with a
-   public mempool and active searchers, and the gateway has **no
-   minimum-out argument** (the wire format has none; it is immutable). The
-   curve starts on $6,000 of virtual reserves, so a $300 buy moves the price
-   about 10%: a front-run / back-run around it costs the attacker 2% in fees
-   and can cost the buyer far more. Inside the 10-minute FAIR GENESIS window
-   the snipe tax makes it unprofitable; after it, nothing does. Mitigations
-   to decide before launch: route the wallet's transactions through a
-   private (MEV-protected) BSC RPC and show the expected price impact; or a
-   small periphery contract that buys/sells for the user and reverts below a
-   minimum (it would hold funds for the length of one transaction, and it
-   cannot be used inside the genesis window, where the $250 cap is per
-   caller). The live Base-local path has the same missing argument; Base's
-   sequencer does not expose a public mempool, which is why it has mattered
-   less there.
-5. **Decimals in everything around the contracts.** Scripts and frontend
-   assume 6 today (§4 Units, §8, §9). The vault's floor turns the most
-   likely mistake into a refusal, not a loss — but nothing is deployable
-   until the tooling reads the decimals.
-6. **Proven on mocks only.** No run against the real USDT (or BSC's real
-   EndpointV2) yet — that is the fork suite of §9, then a capped canary.
-7. **`LocalOmniMessenger` has never held mainnet traffic.** It is small
-   (about 60 code lines) and is the transport under most of the existing
-   suite, but it was written as the devnet transport: read it once more as
-   production code before choosing (b), and keep its operator unset.
+4. **Sandwiching — half closed.** v7.1 gives the local path a minimum-out
+   argument: `buyTokenUsdcMin` / `buyTokenMin` / `sellTokenMin` revert with
+   `"GW: min out"` unless at least the minimum reaches the caller in the
+   same transaction (the cross-chain path still has none: the wire format is
+   immutable). The tooling's canary uses them with a client-side curve quote
+   less 1% (`scripts/lib-smoke.js` → `quoteBuy` / `quoteSell`) and proves
+   the refusal first; **the frontend must do the same on every local trade**
+   (sibling chantier). The plain entrypoints still exist for the genesis
+   window, where a clamped buy is the design, not a sandwich. A
+   MEV-protected RPC remains a good idea on BSC.
+5. ~~Decimals in everything around the contracts~~ — **the tooling reads
+   them** (§9): profile `dollar.decimals`, `dollarUnits` / `dollarScale`,
+   the manifest's `dollar`. The frontend is the sibling chantier.
+6. **Proven on a fork, not live.** The two wrappers ran end to end against
+   an anvil fork of BNB Chain with the real USDT and the real EndpointV2
+   (§10) — a fork cannot show BSC's real block times, its RPCs' lag, or an
+   MEV searcher. The first `bash scripts/launch.sh bnb` is the first live
+   transaction of this universe; its canary is capped at 100 USDT and buys 3.
+7. ~~`LocalOmniMessenger` has never held mainnet traffic~~ — moot: (a) is
+   the decision; (b) stays the devnet transport.

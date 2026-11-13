@@ -5,7 +5,17 @@
  * from the live chain before a single transaction is sent.
  *
  *   SPAWN_PROFILE=testnet   (default)   public testnets, MockUSDC, sponsored
- *   SPAWN_PROFILE=mainnet               Base hub + Optimism + Arbitrum One
+ *   SPAWN_PROFILE=mainnet               the CORE universe: Base hub + Optimism + Arbitrum One, USDC
+ *   SPAWN_PROFILE=bnb                   the BNB universe: BNB Chain alone, settled in BSC USDT
+ *   SPAWN_PROFILE=ethereum              the Ethereum universe: Ethereum alone, settled in USDC
+ *
+ * A UNIVERSE is one complete, separate SPAWN! market: its own hub, its own
+ * tokens, its own dollars. The core universe spans three chains over
+ * LayerZero. `bnb` and `ethereum` are SINGLE-CHAIN universes: hub + local
+ * gateway on one chain, every action one transaction, no LayerZero message
+ * (the adapter is used as a loopback only — no route is ever set), vault =
+ * OmniUSDLocal (any-decimals dollar, no CCTP). A token launched in one
+ * universe does not exist in another.
  *
  * Chain labels (the protocol's own ids, see lib-deploy CHAINS):
  *   0 = the hub (protocol-only)  1 = solana  2 = ethereum  3 = base
@@ -17,9 +27,12 @@
  *   RPC_<NET>                  RPC url of a network key, upper-cased (RPC_BASE…)
  *   SPAWN_SPONSORED=0|1        gateways ride their adapter's tank (testnet default 1)
  *   SPAWN_RETURN_UNIT=<eth>    reply budget per leg
- *   SPAWN_DEPOSIT_CAP_USDC=<n> vault deposit cap, whole USDC (mainnet default 25000)
+ *   SPAWN_DEPOSIT_CAP_USDC=<n> vault deposit cap, in WHOLE units of the universe's dollar
+ *                              (mainnet universes default 25000) — the tooling scales it
+ *                              by the dollar's own decimals, never by 6
  *   SPAWN_OPEN_DEPOSITS=0      leave every vault closed (cap 0) at deploy
- *   SPAWN_ENABLE=<net,net>     switch on nets that are disabled by default (ethereum)
+ *   SPAWN_ENABLE=<net,net>     switch on nets that are disabled by default — REHEARSAL ONLY
+ *                              for `ethereum` in the core profile (see its entry)
  *   SPAWN_STATE_FILE / SPAWN_MANIFEST_FILE   redirect the state / manifest (tests, dry runs)
  *   SPAWN_NET=<net>            the profile network to act on when the hardhat network
  *                              is only a transport (a local fork) — see netKeyOf
@@ -66,6 +79,9 @@ const testnet = {
   },
   // money: a MockUSDC anyone can mint, no CCTP (tokenMessenger = 0)
   mockUsdc: true,
+  dollar: { symbol: 'USDC', decimals: 6 },
+  vault: 'OmniUSD',
+  native: 'ETH',
   depositCapUsdc: 1_000_000_000n, // wide open — it is play money
   openDeposits: env('SPAWN_OPEN_DEPOSITS', '1') !== '0',
   // fees: gateways ride their tank so visitors need no fee logic
@@ -80,6 +96,8 @@ const testnet = {
   // LayerZero's testnet defaults are fine for play money
   dvn: null,
   timelockDelay: 0,
+  // the spokes the launch wrappers deploy (the other two were never funded)
+  launchSpokes: ['optimismSepolia', 'arbitrumSepolia'],
 }
 
 /* ------------------------------- mainnet ------------------------------- */
@@ -95,6 +113,7 @@ const CCTP_TOKEN_MESSENGER_V2 = '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d'
 
 const mainnet = {
   name: 'mainnet',
+  universe: 'core',
   mainnet: true,
   stateFile: env('SPAWN_STATE_FILE', path.join(ROOT, 'deployments', 'mainnet.json')),
   manifestFile: env('SPAWN_MANIFEST_FILE', path.join(ROOT, '..', 'public', 'onchain', 'mainnet.json')),
@@ -122,8 +141,15 @@ const mainnet = {
       tokenMessenger: CCTP_TOKEN_MESSENGER_V2, cctpDomain: 3,
       confirmations: 20,
     },
-    // Present, verified, and OFF: an L1 leg costs every user real gas and
-    // its hub replies are ~2x the price. SPAWN_ENABLE=ethereum switches it on.
+    // NOT A LEG OF THE CORE UNIVERSE, and not meant to become one:
+    // pad.setGateway is permanent and every spawn SYNCs every chain, so an
+    // L1 leg ties the fee of EVERY launch to L1 gas ($0.72 → $3.07 at 0.14
+    // gwei, $111 at 30 gwei) and above ~2–3 gwei a launch from a spoke can
+    // no longer prepay it — the hub tank pays (docs/MAINNET-ADDRESSES.md).
+    // Ethereum has its own single-chain universe instead: SPAWN_PROFILE=ethereum.
+    // The entry stays, disabled, only so the add-a-chain tooling can be
+    // rehearsed against forks (scripts/fork-addchain.js, SPAWN_ENABLE):
+    // every script refuses it on a live network (`rehearsalOnly`).
     ethereum: {
       eid: 30101, role: 'spoke', label: 2, id: 'ethereum',
       chainId: 1, rpc: rpc('ethereum', 'https://ethereum-rpc.publicnode.com'),
@@ -139,9 +165,15 @@ const mainnet = {
       // 1.0M (+28%) instead of the profile's 1.2M.
       gasToSpoke: 1_000_000n,
       enabled: enabledExtra.has('ethereum'),
+      rehearsalOnly:
+        'an Ethereum L1 leg must not be added to the core hub (permanent, and it ties every launch fee to L1 gas — ' +
+        'docs/MAINNET-ADDRESSES.md). Ethereum is its own universe: SPAWN_PROFILE=ethereum.',
     },
   },
   mockUsdc: false,
+  dollar: { symbol: 'USDC', decimals: 6 },
+  vault: 'OmniUSD', // CCTP-capable: vaults rebalance among themselves
+  native: 'ETH',
   // guarded launch: 25,000 USDC per vault until the caps are raised on purpose
   depositCapUsdc: BigInt(env('SPAWN_DEPOSIT_CAP_USDC', '25000')),
   openDeposits: env('SPAWN_OPEN_DEPOSITS', '1') !== '0',
@@ -219,9 +251,117 @@ const mainnet = {
   timelockDelay: Number(env('SPAWN_TIMELOCK_DELAY', String(48 * 3600))),
 }
 
+/* ------------------------- single-chain universes ------------------------- */
+
+/**
+ * What every single-chain universe shares. Hub + local gateway on ONE chain:
+ *   SpawnPad + InternalCurveVenue + a ledger OmniUSD(0,0,0) for the books
+ *   + LayerZeroOmniMessenger as a LOOPBACK (built against the chain's real
+ *     EndpointV2, no route ever set: since v7.1 an eid with no peer matches
+ *     nothing, so nothing can come in from outside)
+ *   + SpawnGateway(label) + FeeDistributor + OmniUSDLocal(label, dollar).
+ * chainLabels = [label]: a spawn SYNCs only the local gateway. tradeLegs =
+ * spawnLegs = 0, every quote is 0, the tank is never used.
+ */
+const singleChain = {
+  mainnet: true,
+  singleChain: true,
+  mockUsdc: false,
+  vault: 'OmniUSDLocal',
+  openDeposits: env('SPAWN_OPEN_DEPOSITS', '1') !== '0',
+  // guarded launch: 25,000 of the universe's dollar until raised on purpose
+  depositCapUsdc: BigInt(env('SPAWN_DEPOSIT_CAP_USDC', '25000')),
+  sponsored: false,
+  returnUnit: 0n, // no reply ever leaves: nothing to prepay
+  gasToHub: 4_600_000n, // unused (no spoke) — kept so shared code has a number
+  gasToSpoke: 1_200_000n,
+  tank: { mode: 'fixed', hub: 0n, spoke: 0n },
+  gasDrip: null,
+  dvn: null, // no pathway, no verifier set
+  timelockDelay: Number(env('SPAWN_TIMELOCK_DELAY', String(48 * 3600))),
+}
+
+/**
+ * The BNB universe — settled in BSC USDT ("BSC-USD", 18 decimals, a
+ * Binance-custodied peg: one key can mint it; that risk is why this universe
+ * is SEPARATE and never sits under the core's USDC claims).
+ * Preflight: chain id, endpoint.eid(), the dollar's symbol/decimals and a
+ * supply sanity bound (a look-alike token does not have billions out) — no
+ * CCTP checks: Circle has no USDC here.
+ */
+const bnb = {
+  ...singleChain,
+  name: 'bnb',
+  universe: 'bnb',
+  stateFile: env('SPAWN_STATE_FILE', path.join(ROOT, 'deployments', 'mainnet-bnb.json')),
+  manifestFile: env('SPAWN_MANIFEST_FILE', path.join(ROOT, '..', 'public', 'onchain', 'mainnet-bnb.json')),
+  endpoint: '0x1a44076050125825900e736c501f859c50fE728c',
+  hub: 'bnb',
+  nets: {
+    bnb: {
+      eid: 30102, role: 'hub', label: 4, id: 'bnb',
+      chainId: 56, rpc: rpc('bnb', 'https://bsc-rpc.publicnode.com'),
+      usdc: '0x55d398326f99059fF775485246999027B3197955', // "the dollar token" of this universe: BSC USDT
+    },
+  },
+  native: 'BNB',
+  dollar: { symbol: 'USDT', decimals: 18, minSupply: 1_000_000_000n, maxSupply: 100_000_000_000n },
+  // Measured 2026-11-13 on a BSC fork (scripts/fork-universe.js bnb): deploy
+  // 17,121,230 gas + canary 2,943,361 + hand-over and caps 2,266,262 ≈ 22.4M
+  // gas — 0.0011 BNB at the live 0.05 gwei, 0.022 BNB at 1 gwei. The
+  // preflight asks for 2 × LIFE_GAS at the live price, never less than this
+  // floor (which alone covers a 0.07 gwei day with the ×2 margin).
+  budget: { hub: eth('0.003') },
+  // gas of the user actions on this chain — measured on the same fork
+  // (launch 2,208,720 · buy 413,596 · sell 248,728), rounded up; the
+  // preflight prints them as a cost at the live gas price, and the fork
+  // suite fails if they drift under or more than 50% over the measurement
+  actionGas: { launch: 2_500_000n, buy: 450_000n, sell: 300_000n },
+}
+
+/**
+ * The Ethereum universe — settled in Circle's native USDC (6 decimals).
+ * Same single-chain shape, same OmniUSDLocal vault (no CCTP is used: there
+ * is no other vault to rebalance with). The preflight still proves the token
+ * is the Circle-native USDC (isMinter(TokenMessengerV2.localMinter())) — a
+ * bridged look-alike has the same symbol and decimals.
+ * Every action here costs L1 gas: the preflight prints what a launch and a
+ * buy cost at the live gas price.
+ */
+const ethereumUniverse = {
+  ...singleChain,
+  name: 'ethereum',
+  universe: 'ethereum',
+  stateFile: env('SPAWN_STATE_FILE', path.join(ROOT, 'deployments', 'mainnet-ethereum.json')),
+  manifestFile: env('SPAWN_MANIFEST_FILE', path.join(ROOT, '..', 'public', 'onchain', 'mainnet-ethereum.json')),
+  endpoint: '0x1a44076050125825900e736c501f859c50fE728c',
+  hub: 'ethereum',
+  nets: {
+    ethereum: {
+      eid: 30101, role: 'hub', label: 2, id: 'ethereum',
+      chainId: 1, rpc: rpc('ethereum', 'https://ethereum-rpc.publicnode.com'),
+      usdc: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      // only to prove the token is Circle's (the preflight's isMinter check)
+      tokenMessenger: CCTP_TOKEN_MESSENGER_V2,
+    },
+  },
+  native: 'ETH',
+  dollar: { symbol: 'USDC', decimals: 6, nativeCircle: true },
+  // an L1: the budget is 2 × the life-cycle gas (LIFE_GAS: 17.7M deploy +
+  // 2.6M hand-over) at the LIVE gas price (lib-net.js → deployBudget) — 0.003
+  // ETH at 0.07 gwei, 0.04 ETH at 1 gwei, 1.2 ETH at 30 gwei; this is only
+  // the absolute floor. The same bytecode as the BNB universe, so the same
+  // gas: scripts/fork-universe.js ethereum re-measures it on a fork.
+  budget: { hub: eth('0.004') },
+  // measured 2026-11-13 on the forks (launch ≈ 2.21M · buy ≈ 414k · sell ≈
+  // 249k), rounded up — what the preflight prices at the live gas: a launch
+  // is 0.0002 ETH at 0.07 gwei and 0.075 ETH at 30 gwei
+  actionGas: { launch: 2_500_000n, buy: 450_000n, sell: 300_000n },
+}
+
 /* ------------------------------- access ------------------------------- */
 
-const PROFILES = { testnet, mainnet }
+const PROFILES = { testnet, mainnet, bnb, ethereum: ethereumUniverse }
 
 /**
  * The profile network a script acts on: the hardhat network's own name, or
@@ -239,11 +379,27 @@ function getProfile(networkName) {
   networkName = netKeyOf(networkName)
   const explicit = process.env.SPAWN_PROFILE
   if (explicit) {
-    if (!PROFILES[explicit]) throw new Error(`unknown SPAWN_PROFILE "${explicit}" (testnet | mainnet)`)
+    if (!PROFILES[explicit]) {
+      throw new Error(`unknown SPAWN_PROFILE "${explicit}" (${Object.keys(PROFILES).join(' | ')})`)
+    }
     return PROFILES[explicit]
   }
-  for (const p of Object.values(PROFILES)) if (networkName && p.nets[networkName]) return p
+  // a net that is DISABLED in a profile does not make that profile the
+  // answer: "ethereum" is the Ethereum universe, not the core's rehearsal leg
+  for (const p of Object.values(PROFILES)) {
+    if (networkName && p.nets[networkName] && p.nets[networkName].enabled !== false) return p
+  }
   return testnet
+}
+
+/** `amount` whole dollars of this profile's universe, in the token's own
+ * smallest units. NOTHING in the tooling may assume 6 decimals. */
+function dollarUnits(profile, whole) {
+  return BigInt(whole) * 10n ** BigInt(profile.dollar?.decimals ?? 6)
+}
+/** One smallest unit of the dollar, in oUSD wei (18 decimals). */
+function dollarScale(profile) {
+  return 10n ** BigInt(18 - (profile.dollar?.decimals ?? 6))
 }
 
 /** Nets that take part in a deployment (ethereum is off unless enabled). */
@@ -280,4 +436,4 @@ function dvnSetFor(profile, a, b) {
   }
 }
 
-module.exports = { PROFILES, getProfile, netKeyOf, activeNets, hubGasFor, dvnSetFor, eth }
+module.exports = { PROFILES, getProfile, netKeyOf, activeNets, hubGasFor, dvnSetFor, dollarUnits, dollarScale, eth }

@@ -112,6 +112,12 @@ module.exports = {
       chainId: 1,
       accounts: mainnetAccounts(),
     },
+    // BNB Chain — the BNB universe (SPAWN_PROFILE=bnb), settled in BSC USDT
+    bnb: {
+      url: process.env.RPC_BNB ?? 'https://bsc-rpc.publicnode.com',
+      chainId: 56,
+      accounts: mainnetAccounts(),
+    },
   },
   mocha: { timeout: fork ? 600_000 : 120_000 },
 }

@@ -3,7 +3,12 @@
  * new protocol version can deploy fresh while the old addresses (and their
  * recoverable gas tanks) stay on record. Plain node, sends nothing.
  *
- *   node scripts/archive-state.js testnet _v6_pre7 baseSepolia optimismSepolia arbitrumSepolia
+ *   node scripts/archive-state.js testnet _v70_pre71 baseSepolia optimismSepolia arbitrumSepolia
+ *   node scripts/archive-state.js bnb _v71_pre72 bnb
+ *
+ * (The v7.0 MAINNET deployment is not archived this way: it was retired and
+ * its state file renamed deployments/mainnet-v7_0.retired.json — see
+ * scripts/recover-retired.sh.)
  */
 const { PROFILES } = require('../config/profiles')
 const fs = require('fs')
@@ -11,7 +16,7 @@ const fs = require('fs')
 const [profileName, suffix, ...nets] = process.argv.slice(2)
 const profile = PROFILES[profileName]
 if (!profile || !suffix || !suffix.startsWith('_') || !nets.length) {
-  console.error('usage: node scripts/archive-state.js <testnet|mainnet> <_suffix> <net> [net…]')
+  console.error(`usage: node scripts/archive-state.js <${Object.keys(PROFILES).join('|')}> <_suffix> <net> [net…]`)
   process.exit(2)
 }
 const all = JSON.parse(fs.readFileSync(profile.stateFile, 'utf8'))

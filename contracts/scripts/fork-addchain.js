@@ -34,7 +34,17 @@ const FORKS = require('../config/forks')
 
 const NEW = process.argv[2] ?? 'ethereum'
 const cwd = path.join(__dirname, '..')
-const live = JSON.parse(fs.readFileSync(path.join(cwd, 'deployments', 'mainnet.json'), 'utf8'))
+const liveFile = path.join(cwd, 'deployments', 'mainnet.json')
+if (!fs.existsSync(liveFile)) {
+  console.error(
+    `no ${path.relative(cwd, liveFile)}: the core universe is not deployed right now (v7.0 was retired — its state is ` +
+      `deployments/mainnet-v7_0.retired.json). Deploy v7.1 first (bash scripts/launch.sh, then finish.sh); this rehearsal ` +
+      `starts from the LIVE state. (Ethereum L1 is only a rehearsal candidate here: as a chain of its own it is the ` +
+      `"ethereum" universe — node scripts/fork-universe.js ethereum.)`,
+  )
+  process.exit(2)
+}
+const live = JSON.parse(fs.readFileSync(liveFile, 'utf8'))
 const hub = 'base'
 const chains = [hub, ...Object.keys(live).filter((n) => n !== hub && FORKS[n] && live[n].handover), NEW].filter(
   (n, i, a) => a.indexOf(n) === i,

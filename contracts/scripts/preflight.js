@@ -1,13 +1,16 @@
 /**
- * READ-ONLY: runs the deploy preflight on every network of the mainnet
- * profile, over each chain's RPC — the same checks `deploy.js` makes before
+ * READ-ONLY: runs the deploy preflight on every network of a mainnet
+ * universe, over each chain's RPC — the same checks `deploy.js` makes before
  * it will send anything (scripts/lib-net.js → preflight):
- *   chain id · LayerZero endpoint.eid() · USDC symbol / decimals ·
- *   USDC.isMinter(CCTP minter) · CCTP domain · deployer balance vs budget
+ *   chain id · LayerZero endpoint.eid() · the dollar's symbol / decimals ·
+ *   core: USDC.isMinter(CCTP minter) + CCTP domain · ethereum: isMinter ·
+ *   bnb: USDT supply sanity bound · deployer balance vs budget ·
+ *   single-chain universes: what a launch and a buy cost in gas right now
  *
- *   npx hardhat run scripts/preflight.js                 # the launch chains
- *   SPAWN_ENABLE=ethereum npx hardhat run scripts/preflight.js
- *   SPAWN_DEPLOYER=0x… …                                 # another deployer address
+ *   npx hardhat run scripts/preflight.js                        # the core universe (Base, Optimism, Arbitrum)
+ *   SPAWN_PROFILE=bnb npx hardhat run scripts/preflight.js      # the BNB universe
+ *   SPAWN_PROFILE=ethereum npx hardhat run scripts/preflight.js # the Ethereum universe
+ *   SPAWN_DEPLOYER=0x… …                                        # another deployer address
  *
  * Exit code 1 if an address check fails; an unfunded deployer alone is
  * reported, not fatal (exit 0) — it is the one thing expected before funding.
@@ -19,7 +22,9 @@ const { preflight } = require('./lib-net')
 const DEPLOYER = process.env.SPAWN_DEPLOYER ?? '0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904'
 
 async function main() {
-  const profile = PROFILES.mainnet
+  const name = process.env.SPAWN_PROFILE ?? 'mainnet'
+  const profile = PROFILES[name]
+  if (!profile || !profile.mainnet) throw new Error(`SPAWN_PROFILE must be a mainnet universe (mainnet | bnb | ethereum), got "${name}"`)
   let bad = 0
   let unfunded = 0
   for (const [netKey, cfg] of Object.entries(activeNets(profile))) {

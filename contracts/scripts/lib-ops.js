@@ -7,13 +7,14 @@
  * "network" of a simulated deployment on one in-process chain.
  */
 const { ethers } = require('hardhat')
-const { activeNets, hubGasFor } = require('../config/profiles')
-const { loadState, b32, same, hasRole, vaultOf, distOf, roleKeys, USDC_ABI, ENDPOINT_ABI } = require('./lib-net')
+const { activeNets, hubGasFor, dollarUnits, dollarScale } = require('../config/profiles')
+const {
+  loadState, b32, same, hasRole, vaultOf, vaultName, nativeOf, dollarOf, distOf, roleKeys, USDC_ABI, ENDPOINT_ABI, writeManifest,
+} = require('./lib-net')
 const { verifyDvn } = require('./lib-dvn')
 
 const coder = ethers.AbiCoder.defaultAbiCoder()
 const fmt = (wei) => ethers.formatEther(wei)
-const SCALE = 10n ** 12n
 
 function providerOf(profile, net, providers) {
   if (providers?.[net]) return providers[net]
@@ -275,12 +276,17 @@ async function status(opts) {
   const deployed = Object.keys(nets).filter((n) => all[n]?.gateway)
 
   // ── vaults and the global backing check ──
-  log('\nVAULTS (USDC held ↔ oUSD claims on this chain)')
+  // every amount goes through the dollar's OWN decimals (6 for USDC, 18 for
+  // BSC USDT): SCALE is one smallest unit of it in oUSD wei
+  const SCALE = dollarScale(profile)
+  const DEC = profile.dollar?.decimals ?? 6
+  const SYM = dollarOf(profile)
+  log(`\nVAULTS (${SYM} held ↔ oUSD claims on this chain)`)
   let held = 0n
   let supply = await hubUsd.totalSupply()
   for (const net of deployed) {
     const vaultAddr = vaultOf(profile, net, all[net])
-    const vault = await at('OmniUSD', vaultAddr, net)
+    const vault = await at(vaultName(profile), vaultAddr, net)
     const usdc = new ethers.Contract(await vault.usdc(), USDC_ABI, P(net))
     const bal = await usdc.balanceOf(vaultAddr)
     const claims = await vault.totalSupply()
@@ -289,16 +295,21 @@ async function status(opts) {
     held += bal * SCALE
     supply += claims
     log(
-      `  ${net.padEnd(16)} ${ethers.formatUnits(bal, 6).padStart(14)} USDC | oUSD here ${ethers.formatEther(claims).padStart(12)} | ` +
-        `cap ${ethers.formatUnits(cap, 6)}${closed ? ' | DEPOSITS PAUSED' : cap === 0n ? ' | deposits closed' : ''}`,
+      `  ${net.padEnd(16)} ${ethers.formatUnits(bal, DEC).padStart(14)} ${SYM} | oUSD here ${ethers.formatEther(claims).padStart(12)} | ` +
+        `cap ${ethers.formatUnits(cap, DEC)}${closed ? ' | DEPOSITS PAUSED' : cap === 0n ? ' | deposits closed' : ''}`,
     )
-    if (claims > bal * SCALE) warn(`${net}: vault is locally short — some oUSD here cannot be unwrapped until a rebalance`)
+    if (claims > bal * SCALE) {
+      warn(
+        `${net}: vault is locally short — some oUSD here cannot be unwrapped until ` +
+          (profile.singleChain ? 'dollars come back in (a single-chain universe has no rebalancing)' : 'a rebalance'),
+      )
+    }
   }
   log(`  hub ledger (books of the curve and fee pots): ${ethers.formatEther(await hubUsd.totalSupply())} oUSD`)
-  const inflight = BigInt(opts.inflightUsdc ?? 0) * 10n ** 6n * SCALE
+  const inflight = dollarUnits(profile, opts.inflightUsdc ?? 0) * SCALE
   const backed = held + inflight >= supply
   log(
-    `\nBACKING  Σ vault USDC ${ethers.formatEther(held)}  vs  Σ oUSD supply ${ethers.formatEther(supply)}  →  ` +
+    `\nBACKING  Σ vault ${SYM} ${ethers.formatEther(held)}  vs  Σ oUSD supply ${ethers.formatEther(supply)}  →  ` +
       (backed
         ? `✓ covered (surplus ${ethers.formatEther(held + inflight - supply)} — value in flight, parked or dust)`
         : `✗ DEFICIT ${ethers.formatEther(supply - held - inflight)} — PAUSE AND INVESTIGATE`),
@@ -309,7 +320,14 @@ async function status(opts) {
   for (const net of deployed) {
     const bal = await P(net).getBalance(all[net].adapter)
     const isHub = net === profile.hub
-    log(`  ${net.padEnd(16)} ${fmt(bal)} ${isHub ? '(pays every reply — refilled by prepaid budgets)' : ''}`)
+    log(
+      `  ${net.padEnd(16)} ${fmt(bal)} ${nativeOf(profile)} ` +
+        (profile.singleChain
+          ? '(unused: nothing leaves this chain)'
+          : isHub
+            ? '(pays every reply — refilled by prepaid budgets)'
+            : ''),
+    )
     const floor = isHub && profile.tank.mode === 'fixed' ? profile.tank.hub / 3n : 0n
     if (isHub && bal < floor) warn(`hub tank is low (${fmt(bal)}): replies will stall when it empties — top it up and run tune-fees`)
   }
@@ -340,6 +358,18 @@ async function status(opts) {
   }
   for (const net of deployed) log(`  ${net.padEnd(16)} $${ethers.formatEther(waiting[net] ?? 0n)}`)
   log(`  (${total} token(s)${from > 0 ? `, last ${total - from} scanned` : ''})`)
+
+  // ── tokens without a replica (v7.1: a SYNC that could not be sent no
+  // longer undoes the spawn — the pad logs SyncFailed and the token is born
+  // without a replica on that chain until the operator resyncs it) ──
+  log('\nTOKENS WITHOUT A REPLICA (a SYNC failed or is still in flight — repair: scripts/resync.js)')
+  const missing = await missingReplicas({ ...opts, all, nets, deployed })
+  if (!missing.length) log('  none')
+  for (const m of missing) {
+    log(`  ${m.token} ${m.symbol.padEnd(8)} no replica on ${m.net}${m.fresh ? ' (spawned < 10 min ago: may still be in flight)' : ''}`)
+  }
+  const stale = missing.filter((m) => !m.fresh)
+  if (stale.length) warn(`${stale.length} token/chain pair(s) have no replica — run scripts/resync.js on ${profile.hub}`)
 
   // ── roles ──
   log('\nROLES')
@@ -381,7 +411,205 @@ async function status(opts) {
   }
 
   log(`\n${backed ? '✓' : '✗'} backing ${backed ? 'holds' : 'FAILS'} — ${warnings.length} warning(s)`)
-  return { ok: backed, deployed: true, held, supply, warnings, dvn, waiting }
+  return { ok: backed, deployed: true, held, supply, warnings, dvn, waiting, missing }
 }
 
-module.exports = { tuneFees, keeperPull, status, SAMPLE_DELIVER, SAMPLE_SYNC, distOf }
+/* ------------------------- missing replicas, resync ------------------------- */
+
+/**
+ * Every (token, chain) pair of the last `maxTokens` tokens whose gateway has
+ * NO replica. State, not logs: public RPCs cap `eth_getLogs` to a few
+ * hundred blocks, and "is there a replica" is the fact that matters anyway —
+ * whether the SYNC failed at spawn (SyncFailed), was lost, or the chain was
+ * wired after the token was launched (never synced: resync backfills it).
+ */
+async function missingReplicas(opts) {
+  const { profile } = opts
+  const all = opts.all ?? loadState(opts.stateFile ?? profile.stateFile)
+  const nets = opts.nets ?? activeNets(profile)
+  const deployed = opts.deployed ?? Object.keys(nets).filter((n) => all[n]?.gateway)
+  const hub = all[profile.hub]
+  if (!hub?.pad) return []
+  const P = (net) => providerOf(profile, net, opts.providers)
+  const pad = await ethers.getContractAt('SpawnPad', hub.pad, P(profile.hub))
+  const gws = {}
+  for (const net of deployed) gws[net] = await ethers.getContractAt('SpawnGateway', all[net].gateway, P(net))
+  // only chains the pad actually SYNCs: a deployed spoke the hub has not
+  // wired yet (inside its timelock delay) is not "missing" anything
+  const wired = []
+  for (const net of deployed) {
+    if ((await pad.gateways(nets[net].label)) !== ethers.ZeroHash) wired.push(net)
+  }
+  const total = Number(await pad.tokensLength())
+  const from = Math.max(0, total - (opts.maxTokens ?? 200))
+  // the CHAIN's clock: a fork that travelled in time, or a quiet devnet,
+  // does not share this machine's
+  const now = Number((await P(profile.hub).getBlock('latest')).timestamp)
+  const out = []
+  for (let i = total - 1; i >= from; i--) {
+    const token = await pad.allTokens(i)
+    const reps = await Promise.all(wired.map((net) => gws[net].replicaOf(token)))
+    if (reps.every((r) => r !== ethers.ZeroAddress)) continue
+    const meta = await pad.metas(token)
+    reps.forEach((r, k) => {
+      if (r !== ethers.ZeroAddress) return
+      out.push({
+        token, symbol: meta.symbol, net: wired[k], label: nets[wired[k]].label,
+        fresh: now - Number(meta.spawnedAt) < 600,
+      })
+    })
+  }
+  return out
+}
+
+/**
+ * Sends a token's SYNC to one chain again (operator only; the hub tank pays
+ * the message). For a leg whose SYNC failed at spawn or was lost, and to
+ * backfill tokens launched before a chain was wired. A gateway ignores a
+ * SYNC for a replica it already has; whatever reached that chain before its
+ * replica (a dev-buy DELIVER, a FEE_DROP) is parked there until this lands.
+ * opts: { profile, netKey (the hub), signer, token ('0x…' | 'missing'), chain? (net key), apply?, providers?, stateFile?, maxTokens?, log? }
+ */
+async function resync(opts) {
+  const { profile, netKey, signer, log = console.log } = opts
+  if (netKey !== profile.hub) throw new Error(`resync is sent on the hub (${profile.hub}), not on ${netKey}`)
+  const all = loadState(opts.stateFile ?? profile.stateFile)
+  const hub = all[profile.hub]
+  if (!hub?.pad) throw new Error(`${profile.hub}: not deployed`)
+  const nets = activeNets(profile)
+  const pad = await ethers.getContractAt('SpawnPad', hub.pad, signer)
+  const adapter = await ethers.getContractAt('LayerZeroOmniMessenger', hub.adapter, signer)
+  let pairs
+  if (opts.token === 'missing') {
+    pairs = (await missingReplicas({ ...opts, all, nets })).filter((m) => !opts.chain || m.net === opts.chain)
+  } else {
+    if (!ethers.isAddress(opts.token)) throw new Error('SPAWN_TOKEN must be a token address, or "missing"')
+    if (!opts.chain || !nets[opts.chain]) throw new Error(`SPAWN_CHAIN must be one of ${Object.keys(nets).join(', ')}`)
+    pairs = [{ token: ethers.getAddress(opts.token), net: opts.chain, label: nets[opts.chain].label, symbol: '' }]
+  }
+  log(`resync — ${profile.name}/${netKey} — ${pairs.length} token/chain pair(s)`)
+  const out = []
+  if (!pairs.length) {
+    log('  nothing to resync')
+    return out
+  }
+  const isOperator = await hasRole(pad, 'operator', signer.address)
+  let tank = await signer.provider.getBalance(hub.adapter)
+  for (const p of pairs) {
+    const meta = await pad.metas(p.token)
+    const gw = await pad.gateways(p.label)
+    if (meta.spawnedAt === 0n || gw === ethers.ZeroHash) {
+      log(`  ${p.token} → ${p.net}: the pad does not know this token or has no gateway for that chain — skipped`)
+      continue
+    }
+    const payload = coder.encode(
+      ['uint8', 'bytes'],
+      [10, coder.encode(['bytes32', 'string', 'string'], [b32(p.token), meta.name, meta.symbol])],
+    )
+    let fee
+    try {
+      fee = await adapter.quote(p.label, gw, payload, 0)
+    } catch (e) {
+      // the leg still refuses the send: resync would revert like the SYNC did
+      log(`  ${p.token} ${meta.symbol} → ${p.net}: the leg still cannot be quoted (${e.shortMessage ?? e.message}) — repair it first`)
+      out.push({ ...p, sent: false, error: 'leg' })
+      continue
+    }
+    const item = { ...p, fee, sent: false }
+    out.push(item)
+    const data = pad.interface.encodeFunctionData('resync', [p.token, p.label])
+    if (!isOperator) {
+      log(`  ⏳ ${p.token} ${meta.symbol} → ${p.net} needs the operator: target ${pad.target} data ${data}`)
+      continue
+    }
+    if (!opts.apply) {
+      log(`  ${p.token} ${meta.symbol} → ${p.net}: would resync (the hub tank pays ${fmt(fee)} ${nativeOf(profile)})`)
+      continue
+    }
+    if (tank < fee) {
+      log(`  ⚠ ${p.token} → ${p.net}: the hub tank (${fmt(tank)}) cannot pay ${fmt(fee)} — top it up first`)
+      item.error = 'tank'
+      tank = 0n // every later pair is short too; sum the whole shortfall
+      continue
+    }
+    await (await pad.resync(p.token, p.label)).wait()
+    tank -= fee
+    item.sent = true
+    log(`  ${p.token} ${meta.symbol} → ${p.net}: resync sent (${fmt(fee)} ${nativeOf(profile)} from the hub tank) ✓`)
+  }
+  const short = out.filter((o) => o.error === 'tank')
+  if (short.length) {
+    const need = short.reduce((a, o) => a + o.fee, 0n)
+    log(
+      `  ➜ ${short.length} resync(s) wait for gas: send ≥ ${fmt((need * 11n) / 10n)} ${nativeOf(profile)} to the hub adapter ` +
+        `${hub.adapter} (its gas tank), then run this again`,
+    )
+  }
+  return out
+}
+
+/* --------------------------------- set-cap --------------------------------- */
+
+/**
+ * Sets one network's vault deposit cap (operator) — the guarded launch's
+ * exposure dial. `wholeDollars` is in WHOLE units of the universe's dollar;
+ * it is scaled by the token's own decimals here. 0 closes the vault to new
+ * deposits (exits stay open). Without the role, or without `apply`, the
+ * calldata is printed.
+ * opts: { profile, netKey, signer, wholeDollars, apply?, live?, stateFile?, log? }
+ */
+async function setCap(opts) {
+  const { profile, netKey, signer, log = console.log } = opts
+  const cfg = profile.nets[netKey]
+  if (!cfg) throw new Error(`${netKey} is not a network of the ${profile.name} profile`)
+  const DEC = profile.dollar?.decimals ?? 6
+  const SYM = dollarOf(profile)
+  const want = dollarUnits(profile, opts.wholeDollars)
+  const state = loadState(opts.stateFile ?? profile.stateFile)[netKey]
+  const vaultAddr = vaultOf(profile, netKey, state)
+  if (!vaultAddr) throw new Error(`${netKey}: no vault deployed in ${opts.stateFile ?? profile.stateFile}`)
+  const vault = await ethers.getContractAt(vaultName(profile), vaultAddr, signer)
+  const [cap, held] = await Promise.all([vault.depositCap(), vault.liquidity()])
+  const usdc = (v) => ethers.formatUnits(v, DEC)
+  log(`set-cap — ${profile.name}/${netKey} — vault ${vaultAddr}`)
+  log(`  holds ${usdc(held)} ${SYM} · cap ${usdc(cap)} → wanted ${usdc(want)}`)
+  if (cap === want) {
+    log('  ✓ already set')
+    return { changed: false, cap }
+  }
+  const mine = await hasRole(vault, 'operator', signer.address)
+  if (!opts.apply || !mine) {
+    if (!mine) log(`  the operator is ${await vault.operator()} — not this key. Calldata for it:`)
+    else log('  (not applied — SPAWN_APPLY=1 sends it)')
+    const data = vault.interface.encodeFunctionData('setDepositCap', [want])
+    log(`    target ${vaultAddr}\n    data   ${data}`)
+    return { changed: true, applied: false, blocked: mine ? undefined : { target: vaultAddr, data } }
+  }
+  await (await vault.setDepositCap(want)).wait()
+  // a lagging public RPC may still serve the old cap: wait until it is visible
+  let now = await vault.depositCap()
+  for (let i = 0; now !== want && opts.live && i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 2000))
+    now = await vault.depositCap()
+  }
+  if (now !== want) throw new Error(`cap reads back ${usdc(now)}, wanted ${usdc(want)}`)
+  log(`  setDepositCap(${usdc(want)} ${SYM}) ✓`)
+  // the site reads the cap from the manifest: keep it true to the chain
+  if (opts.manifest !== false) {
+    try {
+      await writeManifest({
+        profile, netKey, signer, log,
+        stateFile: opts.stateFile ?? profile.stateFile,
+        manifestFile: opts.manifestFile ?? profile.manifestFile,
+        providers: opts.providers,
+      })
+    } catch (e) {
+      log(`  ⚠ manifest not refreshed (${e.shortMessage ?? e.message}) — the next deploy run rewrites it`)
+    }
+  }
+  return { changed: true, applied: true, cap: want }
+}
+
+module.exports = {
+  tuneFees, keeperPull, status, missingReplicas, resync, setCap, SAMPLE_DELIVER, SAMPLE_SYNC, distOf,
+}

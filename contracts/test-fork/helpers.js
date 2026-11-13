@@ -11,7 +11,7 @@ const path = require('path')
 const { ethers } = require('hardhat')
 const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
 const { PROFILES } = require('../config/profiles')
-const { USDC_ABI, CCTP_MESSENGER_ABI, ENDPOINT_ABI, b32, loadState, saveState } = require('../scripts/lib-net')
+const { USDC_ABI, CCTP_MESSENGER_ABI, ENDPOINT_ABI, GENERATION, b32, loadState, saveState } = require('../scripts/lib-net')
 
 const coder = ethers.AbiCoder.defaultAbiCoder()
 const U = (n) => ethers.parseUnits(String(n), 6)
@@ -46,7 +46,7 @@ function injectRemote(profile, net, extra = {}) {
   const hubSide = net === profile.hub
   all[net] = {
     adapter: fakeAddr(`${net}/adapter`),
-    transport: 'v7',
+    transport: GENERATION,
     usdc: profile.nets[net].usdc,
     gateway: fakeAddr(`${net}/gateway`),
     ...(hubSide
@@ -74,6 +74,18 @@ async function mintUsdc(cfg, to, amount) {
 }
 
 const usdcAt = (cfg, signer) => new ethers.Contract(cfg.usdc, USDC_ABI, signer ?? ethers.provider)
+
+const BEP20_OWNER_ABI = ['function getOwner() view returns (address)', 'function mint(uint256) returns (bool)', 'function transfer(address,uint256) returns (bool)']
+/** Real dollars of a universe for a test account, in the token's own units:
+ * Circle's minter for USDC, the BEP20 owner (mints to itself, then pays) for
+ * Binance-Peg USDT on BNB Chain. Fork only, by impersonation. */
+async function fundDollars(profile, cfg, to, amount) {
+  if (cfg.tokenMessenger) return mintUsdc(cfg, to, amount)
+  const token = new ethers.Contract(cfg.usdc, BEP20_OWNER_ABI, ethers.provider)
+  const owner = await impersonate(await token.getOwner())
+  await (await token.connect(owner).mint(amount)).wait()
+  await (await token.connect(owner).transfer(to, amount)).wait()
+}
 
 /** op payload as the pad and gateways encode it */
 const payload = (op, types, values) => coder.encode(['uint8', 'bytes'], [op, coder.encode(types, values)])
@@ -117,5 +129,5 @@ const quiet = process.env.FORK_VERBOSE === '1' ? console.log : () => {}
 
 module.exports = {
   coder, U, E, SCALE, OP,
-  forkProfile, fakeAddr, injectRemote, impersonate, mintUsdc, usdcAt, payload, lzDeliver, packetsSent, eventsOf, quiet,
+  forkProfile, fakeAddr, injectRemote, impersonate, mintUsdc, fundDollars, usdcAt, payload, lzDeliver, packetsSent, eventsOf, quiet,
 }

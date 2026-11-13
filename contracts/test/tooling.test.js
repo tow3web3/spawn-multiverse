@@ -658,9 +658,35 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
       expect(ctx.check.ok, net).to.equal(true)
     }
     expect((await run(HUB)).manifest.chains.map((c) => c.id)).to.deep.equal(['base', 'optimism', 'arbitrum', 'ethereum'])
+
+    // every token launched BEFORE the newcomer joined has no replica there:
+    // status says so, and the operator's last follow-up is one resync per
+    // token (v7.1) — paid by the hub tank, idempotent, then status is clean
+    const { resync } = require('../scripts/lib-ops')
+    const before = await status({ profile, providers, log: quiet })
+    expect(before.missing.length).to.be.gt(0)
+    expect(before.missing.every((m) => m.net === ETH && !m.fresh)).to.equal(true)
+    expect(before.warnings.some((w) => w.includes('have no replica'))).to.equal(true)
+    // the tank was sized for replies, not for a backfill: resync sends what
+    // it can, names the shortfall, and stops — nothing is half done
+    let sent = await resync({ profile, netKey: HUB, signer: deployer, token: 'missing', apply: true, providers, log: quiet })
+    expect(sent).to.have.length(before.missing.length)
+    const short = sent.filter((r) => r.error === 'tank')
+    expect(short.length).to.be.gt(0)
+    expect(sent.filter((r) => r.sent).length + short.length).to.equal(sent.length)
+    const need = short.reduce((a, r) => a + r.fee, 0n)
+    await deliverAll() // the SYNCs that were sent land
+    // the operator tops the hub tank up by the named amount, and runs it again
+    await (await deployer.sendTransaction({ to: state()[HUB].adapter, value: (need * 11n) / 10n })).wait()
+    sent = await resync({ profile, netKey: HUB, signer: deployer, token: 'missing', apply: true, providers, log: quiet })
+    expect(sent).to.have.length(short.length) // the pairs already sent are no longer missing
+    expect(sent.every((r) => r.sent)).to.equal(true)
+    await deliverAll()
+    for (const m of before.missing) expect(await replicaOn(ETH, m.token), m.token).to.not.equal(ethers.ZeroAddress)
     const st = await status({ profile, providers, log: quiet })
     expect(st.ok).to.equal(true)
     expect(st.warnings).to.deep.equal([])
+    expect(st.missing).to.deep.equal([])
   })
 
   it('a pathway can name its own verifier set, and both ends resolve the same names', async () => {
@@ -692,5 +718,307 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
     expect(onA.confirmations).to.equal(onC.confirmations) // both speak of a as the source
     // the default set cannot be planned on c at all: Google has no address there
     expect(() => plannedUln(p, 'c', 'b', 'b')).to.throw(/no c address configured for DVN "Google"/)
+  })
+})
+
+/**
+ * SINGLE-CHAIN UNIVERSES (v7.1): the `bnb` and `ethereum` profiles deployed
+ * in-process by the real scripts — one chain, hub + local gateway, vault =
+ * OmniUSDLocal over a dollar of the universe's own decimals (18 like BSC
+ * USDT, 6 like USDC), the fixed LayerZero adapter as a loopback only.
+ * Launch (deploy + canary with the `*Min` proof), finish (hand-over +
+ * launch caps), status — with ZERO LayerZero packets from start to end.
+ */
+describe('single-chain universes (bnb: 18-decimal dollar, ethereum: 6-decimal dollar)', function () {
+  this.timeout(300_000)
+  const { dollarUnits, dollarScale } = require('../config/profiles')
+  const { selfCheck } = require('../scripts/lib-net')
+  const { setCap } = require('../scripts/lib-ops')
+  const { smoke } = require('../scripts/lib-smoke')
+
+  for (const [name, decimals, symbol] of [
+    ['bnb', 18, 'USDT'],
+    ['ethereum', 6, 'USDC'],
+  ]) {
+    it(`${name}: launch, canary with the slippage proof, hand-over, caps, status — every amount in ${decimals} decimals, no packet`, async () => {
+      const [deployer, , , owner] = await ethers.getSigners()
+      const endpoint = await ethers.deployContract('MockLZEndpointV2', [E('0.001')])
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), `spawn-universe-${name}-`))
+      const base = PROFILES[name]
+      const NET = base.hub
+      expect(base.singleChain).to.equal(true)
+      expect(Object.keys(base.nets)).to.deep.equal([NET])
+      expect(base.dollar.decimals).to.equal(decimals)
+      expect(base.dollar.symbol).to.equal(symbol)
+      expect(base.vault).to.equal('OmniUSDLocal')
+      expect(base.dvn).to.equal(null)
+      const profile = {
+        ...base,
+        nets: { [NET]: { ...base.nets[NET] } },
+        endpoint: endpoint.target,
+        stateFile: path.join(dir, 'state.json'),
+        manifestFile: path.join(dir, 'manifest.json'),
+        // play money of the universe's own decimals instead of the real token
+        mockUsdc: true,
+        dollar: { symbol, decimals },
+        depositCapUsdc: 100n, // the canary cap, in WHOLE dollars
+      }
+      const providers = { [NET]: ethers.provider }
+      const run = (extra = {}) =>
+        deployNet({ profile, netKey: NET, signer: deployer, dry: false, preflight: false, providers, log: quiet, ...extra })
+
+      // ── launch: deploy ──
+      const first = await run()
+      expect(first.check.ok).to.equal(true)
+      expect(first.check.soft).to.deep.equal([])
+      const again = await run()
+      expect(again.gas.txs, 're-run sends nothing').to.equal(0)
+      const s = loadState(profile.stateFile)[NET]
+      const vault = await ethers.getContractAt('OmniUSDLocal', s.localUsd)
+      const dollar = await ethers.getContractAt('MockUSDC', s.usdc)
+      const gw = await ethers.getContractAt('SpawnGateway', s.gateway)
+      const pad = await ethers.getContractAt('SpawnPad', s.pad)
+      expect(await dollar.decimals()).to.equal(BigInt(decimals))
+      expect(await vault.SCALE()).to.equal(10n ** BigInt(18 - decimals))
+      expect(await vault.SCALE()).to.equal(dollarScale(profile))
+      // the cap is 100 WHOLE dollars in the token's own units — not 100e6
+      expect(await vault.depositCap()).to.equal(100n * 10n ** BigInt(decimals))
+      expect(await vault.depositCap()).to.equal(dollarUnits(profile, 100))
+      // nothing leaves this chain: no legs, every quote is 0, one chain on the pad
+      expect(await gw.tradeLegs()).to.equal(0n)
+      expect(await gw.spawnLegs()).to.equal(0n)
+      expect(await gw.quoteBuy()).to.equal(0n)
+      expect(await gw.quoteSpawn('N', 'S', '{}', true)).to.equal(0n)
+      expect(await pad.chainsLength()).to.equal(1n)
+
+      // ── the manifest contract the frontend codes against ──
+      const m = JSON.parse(fs.readFileSync(profile.manifestFile, 'utf8'))
+      expect(m.network).to.equal('mainnet')
+      expect(m.universe).to.equal(name)
+      expect(m.dollar).to.deep.equal({ symbol, decimals })
+      expect(m.sponsored).to.equal(false)
+      expect(m.gasDrip).to.equal(undefined)
+      expect(m.chains).to.have.length(1)
+      expect(m.chains[0].local).to.equal(true)
+      expect(m.chains[0].usdc).to.equal(s.usdc)
+      expect(m.chains[0].usd).to.equal(s.localUsd)
+      expect(m.chains[0].depositCap).to.equal(String(100n * 10n ** BigInt(decimals)))
+
+      // ── launch: the canary, slippage-protected, with the proof ──
+      const lines = []
+      const res = await smoke({ profile, netKey: NET, signer: deployer, providers, buy: 3, pollMs: 1, log: (l) => lines.push(l) })
+      expect(res.local).to.equal(true)
+      expect(res.single).to.equal(true)
+      expect(res.minOut).to.be.gt(0n)
+      expect(res.bought).to.be.gte(res.minOut)
+      expect(lines.some((l) => l.includes('an impossible minimum is refused ("GW: min out")'))).to.equal(true)
+      expect(lines.some((l) => l.includes('buyTokenUsdcMin'))).to.equal(true)
+      expect(lines.some((l) => l.includes('sellTokenMin'))).to.equal(true)
+      expect(lines.at(-1)).to.include(`HUB-LOCAL SPAWN + ${symbol} BUY`)
+      // the same refusal, directly: nothing pulled, nothing delivered
+      const d0 = await dollar.balanceOf(deployer.address)
+      await (await dollar.approve(s.localUsd, ethers.parseUnits('3', decimals))).wait()
+      await expect(
+        gw.buyTokenUsdcMin(res.token, ethers.parseUnits('3', decimals), ethers.parseEther('1000000000')),
+      ).to.be.revertedWith('GW: min out')
+      expect(await dollar.balanceOf(deployer.address)).to.equal(d0)
+      // more than the canary cap is refused at the vault
+      await (await dollar.mint(deployer.address, ethers.parseUnits('500', decimals))).wait()
+      await (await dollar.approve(s.localUsd, ethers.parseUnits('200', decimals))).wait()
+      await expect(gw.buyTokenUsdc(res.token, ethers.parseUnits('200', decimals))).to.be.reverted
+
+      // ── finish: hand-over (hot key = operator + guardian), then the launch caps ──
+      const ho = await handover({
+        profile, netKey: NET, signer: deployer, owner: owner.address, operator: deployer.address, guardian: deployer.address, log: quiet,
+      })
+      expect(await ho.timelock.getMinDelay()).to.equal(BigInt(48 * 3600))
+      for (const key of ['adapter', 'usd', 'pad', 'localUsd', 'gateway', 'localDist']) {
+        const c = await ethers.getContractAt('SpawnPad', s[key]) // Roles surface only
+        expect(await c.admin(), key).to.equal(ho.timelock.target)
+        expect(await c.operator(), key).to.equal(deployer.address)
+      }
+      const capRes = await setCap({ profile, netKey: NET, signer: deployer, wholeDollars: 25_000, apply: true, log: quiet })
+      expect(capRes.applied).to.equal(true)
+      expect(await vault.depositCap()).to.equal(25_000n * 10n ** BigInt(decimals))
+      expect((await setCap({ profile, netKey: NET, signer: deployer, wholeDollars: 25_000, apply: true, log: quiet })).changed).to.equal(false)
+      // a non-operator only gets calldata
+      const blocked = await setCap({ profile, netKey: NET, signer: owner, wholeDollars: 1, apply: true, log: quiet })
+      expect(blocked.applied).to.equal(false)
+      expect(blocked.blocked.target).to.equal(s.localUsd)
+
+      // ── the deploy re-runs clean after the hand-over; status is clean ──
+      const after = await run()
+      expect(after.blocked).to.deep.equal([])
+      expect(after.check.ok).to.equal(true)
+      const out = []
+      const st = await status({ profile, providers, log: (l) => out.push(l) })
+      expect(st.ok).to.equal(true)
+      expect(st.warnings).to.deep.equal([])
+      expect(st.missing).to.deep.equal([])
+      expect(st.held).to.equal(st.supply) // backing exact, to the wei
+      expect(out.some((l) => l.includes(`VAULTS (${symbol} held`))).to.equal(true)
+      expect(out.some((l) => l.includes('(the timelock)'))).to.equal(true)
+
+      // ── and not one LayerZero packet, from the first deploy to here ──
+      expect(await endpoint.packetsSent()).to.equal(0n)
+      expect(await endpoint.pending()).to.equal(0n)
+    })
+  }
+
+  it('the profiles themselves: universes are separate files, and "ethereum" means the universe — never a leg of the core', async () => {
+    const { getProfile, activeNets } = require('../config/profiles')
+    const files = new Set(['mainnet', 'bnb', 'ethereum'].map((n) => PROFILES[n].stateFile))
+    const manifests = new Set(['mainnet', 'bnb', 'ethereum'].map((n) => path.basename(PROFILES[n].manifestFile)))
+    expect(files.size).to.equal(3)
+    expect([...manifests].sort()).to.deep.equal(['mainnet-bnb.json', 'mainnet-ethereum.json', 'mainnet.json'])
+    expect(PROFILES.mainnet.universe).to.equal('core')
+    // inferred from the network name when SPAWN_PROFILE is not set
+    const saved = process.env.SPAWN_PROFILE
+    delete process.env.SPAWN_PROFILE
+    try {
+      expect(getProfile('bnb').name).to.equal('bnb')
+      expect(getProfile('ethereum').name).to.equal('ethereum')
+      expect(getProfile('base').name).to.equal('mainnet')
+    } finally {
+      if (saved !== undefined) process.env.SPAWN_PROFILE = saved
+    }
+    // the core's launch chains do not include Ethereum, and the deploy refuses it
+    expect(Object.keys(activeNets(PROFILES.mainnet))).to.deep.equal(['base', 'optimism', 'arbitrum'])
+    const [deployer] = await ethers.getSigners()
+    await expect(
+      deployNet({ profile: PROFILES.mainnet, netKey: 'ethereum', signer: deployer, dry: true, preflight: false, log: quiet }),
+    ).to.be.rejectedWith(/must not be added to the core hub/)
+    void selfCheck
+  })
+})
+
+/**
+ * v7.1 follow-through on a multi-chain deployment: a SYNC that cannot be
+ * sent no longer undoes the launch (the token is born without a replica
+ * there) — status must SHOW it and resync must repair it; and a remote
+ * gateway left at tradeLegs = 0 must fail the self-check LOUDLY.
+ */
+describe('v7.1: a failed SYNC is seen and repaired; tradeLegs = 0 on a remote gateway is a hard failure', function () {
+  this.timeout(300_000)
+  const { time } = require('@nomicfoundation/hardhat-network-helpers')
+  const { selfCheck } = require('../scripts/lib-net')
+  const { resync, missingReplicas } = require('../scripts/lib-ops')
+  const HUB = 'baseSepolia'
+  const OP = 'optimismSepolia'
+  let deployer, endpoint, profile, providers
+  const state = () => loadState(profile.stateFile)
+  const run = async (net) => {
+    const ctx = await deployNet({ profile, netKey: net, signer: deployer, dry: false, preflight: false, providers, log: quiet })
+    const adapter = state()[net]?.adapter
+    if (adapter && (await endpoint.eidOfAdapter(adapter)) === 0n) {
+      await (await endpoint.registerAdapter(adapter, profile.nets[net].eid)).wait()
+    }
+    return ctx
+  }
+  const deliverAll = async () => {
+    while ((await endpoint.pending()) > 0n) await (await endpoint.deliverAll(32)).wait()
+  }
+
+  before(async () => {
+    ;[deployer] = await ethers.getSigners()
+    endpoint = await ethers.deployContract('MockLZEndpointV2', [E('0.001')])
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-v71-'))
+    const t = PROFILES.testnet
+    profile = {
+      ...t,
+      nets: { [HUB]: { ...t.nets[HUB] }, [OP]: { ...t.nets[OP] } },
+      endpoint: endpoint.target,
+      stateFile: path.join(dir, 'state.json'),
+      manifestFile: path.join(dir, 'manifest.json'),
+      sponsored: false,
+      returnUnit: E('0.002'),
+      gasToHub: 6_000_000n,
+      tank: { mode: 'fixed', hub: E('0.05'), spoke: 0n },
+    }
+    providers = { [HUB]: ethers.provider, [OP]: ethers.provider }
+    await run(HUB)
+    await run(OP)
+    await run(HUB)
+    await run(OP)
+  })
+
+  it('a leg that refuses its SYNC: the launch still succeeds, status lists the token, resync repairs it', async () => {
+    const s = state()
+    const hubAdapter = await ethers.getContractAt('LayerZeroOmniMessenger', s[HUB].adapter)
+    const hubGw = await ethers.getContractAt('SpawnGateway', s[HUB].gateway)
+    const opGw = await ethers.getContractAt('SpawnGateway', s[OP].gateway)
+    const pad = await ethers.getContractAt('SpawnPad', s[HUB].pad)
+    const label = profile.nets[OP].label
+    const gas = await hubAdapter.gasLimit(label)
+
+    // break the leg the reversible way: no executor gas → the send reverts
+    await (await hubAdapter.setDestination(label, 0, 0)).wait()
+    const fee = await hubGw.quoteSpawn('Dead Leg', 'DEAD', '{}', false)
+    const rc = await (await hubGw.spawnToken('Dead Leg', 'DEAD', '{}', 0, 1, { value: fee })).wait()
+    const failed = rc.logs.map((l) => { try { return pad.interface.parseLog(l) } catch { return null } }).filter((e) => e?.name === 'SyncFailed')
+    expect(failed).to.have.length(1)
+    expect(failed[0].args.chain).to.equal(BigInt(label))
+    const token = await pad.allTokens((await pad.tokensLength()) - 1n)
+    // born on the hub chain, missing on the spoke
+    expect(await hubGw.replicaOf(token)).to.not.equal(ethers.ZeroAddress)
+    expect(await opGw.replicaOf(token)).to.equal(ethers.ZeroAddress)
+
+    // fresh: listed, but as possibly in flight — not yet a warning
+    let st = await status({ profile, providers, log: quiet })
+    expect(st.missing.map((m) => [m.token, m.net, m.fresh])).to.deep.equal([[token, OP, true]])
+    expect(st.warnings.filter((w) => w.includes('no replica'))).to.deep.equal([])
+    // ten minutes on, it is a finding
+    await time.increase(601)
+    const lines = []
+    st = await status({ profile, providers, log: (l) => lines.push(l) })
+    expect(st.missing[0].fresh).to.equal(false)
+    expect(st.warnings.some((w) => w.includes('have no replica'))).to.equal(true)
+    expect(lines.some((l) => l.includes(token) && l.includes(`no replica on ${OP}`))).to.equal(true)
+
+    // while the leg is still broken, resync says so and sends nothing
+    let out = await resync({ profile, netKey: HUB, signer: deployer, token: 'missing', apply: true, providers, log: quiet })
+    expect(out).to.have.length(1)
+    expect(out[0].sent).to.equal(false)
+    expect(out[0].error).to.equal('leg')
+    // on the wrong network, or by a stranger: refused / calldata only
+    await expect(resync({ profile, netKey: OP, signer: deployer, token: 'missing', providers, log: quiet })).to.be.rejectedWith(/sent on the hub/)
+    const [, stranger] = await ethers.getSigners()
+    await (await hubAdapter.setDestination(label, gas, 0)).wait() // the leg is repaired
+    out = await resync({ profile, netKey: HUB, signer: stranger, token: 'missing', apply: true, providers, log: quiet })
+    expect(out[0].sent).to.equal(false)
+    await expect(pad.connect(stranger).resync(token, label)).to.be.revertedWith('ROLES: not operator')
+    // shown first (nothing sent), then applied by the operator
+    out = await resync({ profile, netKey: HUB, signer: deployer, token: 'missing', providers, log: quiet })
+    expect(out[0].sent).to.equal(false)
+    expect(out[0].fee).to.be.gt(0n)
+    const tank0 = await ethers.provider.getBalance(s[HUB].adapter)
+    out = await resync({ profile, netKey: HUB, signer: deployer, token, chain: OP, apply: true, providers, log: quiet })
+    expect(out[0].sent).to.equal(true)
+    expect(tank0 - (await ethers.provider.getBalance(s[HUB].adapter))).to.equal(out[0].fee) // the hub tank paid
+    await deliverAll()
+    expect(await opGw.replicaOf(token)).to.not.equal(ethers.ZeroAddress)
+    expect(await missingReplicas({ profile, providers })).to.deep.equal([])
+    st = await status({ profile, providers, log: quiet })
+    expect(st.missing).to.deep.equal([])
+    // a second SYNC for a replica that exists is ignored: resync is safe to repeat
+    const rep = await opGw.replicaOf(token)
+    await (await pad.resync(token, label)).wait()
+    await deliverAll()
+    expect(await opGw.replicaOf(token)).to.equal(rep)
+  })
+
+  it('a REMOTE gateway at tradeLegs = 0 fails the self-check hard — and the next deploy run puts it back', async () => {
+    const s = state()
+    const opGw = await ethers.getContractAt('SpawnGateway', s[OP].gateway)
+    await (await opGw.setLegs(0, await opGw.spawnLegs())).wait()
+    const check = await selfCheck({ profile, netKey: OP, provider: ethers.provider, log: quiet })
+    expect(check.ok).to.equal(false)
+    expect(check.hard.map((r) => r.what).join()).to.include('gateway.tradeLegs ≥ 1 on a REMOTE gateway')
+    // the hub's own gateway is the opposite: 0 is right there (its reply is a free local call)
+    const hubCheck = await selfCheck({ profile, netKey: HUB, provider: ethers.provider, log: quiet })
+    expect(hubCheck.ok).to.equal(true)
+    const fixed = await run(OP)
+    expect(await opGw.tradeLegs()).to.equal(1n)
+    expect(fixed.check.ok).to.equal(true)
   })
 })

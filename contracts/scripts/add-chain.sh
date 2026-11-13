@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Adds a spoke chain to a LIVE, handed-over deployment — through the timelocks.
+# Adds a spoke chain to the LIVE, handed-over CORE universe — through the timelocks.
 #
-#   bash scripts/add-chain.sh ethereum prepare     # from contracts/ — day 0
-#   bash scripts/add-chain.sh ethereum finish      # after the delay (48h on mainnet)
+#   bash scripts/add-chain.sh <network> prepare    # from contracts/ — day 0
+#   bash scripts/add-chain.sh <network> finish     # after the delay (48h on mainnet)
+#
+# <network> is a `nets` entry of the core profile (config/profiles.js) that
+# is not live yet. NOT Ethereum L1: a leg there would make every launch on
+# every chain pay an Ethereum SYNC forever ($3 today, $100+ at 30 gwei), so
+# Ethereum is a universe of its own — bash scripts/launch.sh ethereum. The
+# core profile's `ethereum` entry is rehearsal-only (forks); the deploy
+# refuses it on a live network.
 #
 # Why two commands: once a deployment is handed over, every topology step
 # (the hub's route to the new chain, pad.setGateway, the CCTP peers, the hub
@@ -212,15 +219,16 @@ step "4. $NEW opens with a canary cap ($CANARY_CAP USDC)"
 logged "canary cap $NEW" 'already set|setDepositCap\(' SPAWN_APPLY=1 SPAWN_CAP_USDC="$CANARY_CAP" hh "$NEW" set-cap.js
 logged "unpause $NEW" 'already open|gateway\.unpause\(\) ✓' SPAWN_GATE=unpause hh "$NEW" gate.js
 
-CANARY_MARK="deployments/.canary-$PROFILE-$NEW.ok"
+MARK_DIR="${SPAWN_MARK_DIR:-deployments}"
+source scripts/lib-canary.sh # a mark is bound to the gateway it proved
 if [[ -n "${SPAWN_SKIP_CANARY:-}" ]]; then
   step "canary from $NEW — SKIPPED (SPAWN_SKIP_CANARY)"
-elif [[ -f "$CANARY_MARK" ]]; then
-  step "canary from $NEW — already passed ($(cat "$CANARY_MARK"))"
+elif canary_passed "$NEW"; then
+  step "canary from $NEW — already passed ($(cat "$(canary_mark_file "$NEW")"))"
 else
   step "canary — a full round trip from $NEW (the deployer's own money)"
   LOG_TRIES=1 logged "canary $NEW (cross-chain)" '🎉' "$SMOKE_ENV" hh "$NEW" smoke.js
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$CANARY_MARK"
+  canary_record "$NEW"
 fi
 
 step "5. hand-over of $NEW — OWNER $OWNER"

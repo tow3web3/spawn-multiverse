@@ -1,19 +1,30 @@
 #!/usr/bin/env bash
-# Closes the live mainnet deployment to NEW exposure, for good or for a
-# while: every gateway paused (no new buy, no new launch) and every vault's
-# deposit cap at 0. Nothing is ever locked in: sells, claims, fee pulls and
-# unwraps stay open, and messages already in flight are still handled.
+# Closes ONE live universe to NEW exposure, for good or for a while: every
+# gateway paused (no new buy, no new launch) and every vault's deposit cap at
+# 0. Nothing is ever locked in: sells, claims, fee pulls and unwraps stay
+# open, and messages already in flight are still handled.
 #
-#   bash scripts/close-deployment.sh          # from contracts/
+#   bash scripts/close-deployment.sh              # the CORE universe (Base + Optimism + Arbitrum)
+#   bash scripts/close-deployment.sh bnb          # the BNB universe
+#   bash scripts/close-deployment.sh ethereum     # the Ethereum universe
 #
 # Runs with the deployer hot key (guardian + operator). Idempotent: run it
-# again after a network blip.
+# again after a network blip. SPAWN_CLOSE_NETS="base optimism" limits it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-export SPAWN_PROFILE=mainnet
+PROFILE="${1:-${SPAWN_LAUNCH_PROFILE:-mainnet}}"
+[[ "$PROFILE" == "core" ]] && PROFILE=mainnet
+export SPAWN_PROFILE="$PROFILE"
 export SPAWN_MAINNET_CONFIRM=I_UNDERSTAND_THIS_IS_REAL_MONEY
-NETS="${SPAWN_CLOSE_NETS:-base optimism arbitrum}"
+
+DEFAULT_NETS=$(node -e "
+const {PROFILES,activeNets}=require('./config/profiles');
+const p=PROFILES[process.env.SPAWN_PROFILE];
+if(!p||!p.mainnet){console.error('unknown mainnet universe \"'+process.env.SPAWN_PROFILE+'\" (mainnet | bnb | ethereum, or core)');process.exit(1)}
+const nets=activeNets(p);
+console.log([p.hub,...Object.keys(nets).filter(n=>n!==p.hub&&!nets[n].rehearsalOnly)].join(' '))") || exit 1
+NETS="${SPAWN_CLOSE_NETS:-$DEFAULT_NETS}"
 
 # attempt <label> <success-regex> <command…> — these steps are idempotent,
 # so a lagging node or a network blip is simply retried
@@ -34,6 +45,7 @@ attempt() {
   exit 1
 }
 
+echo "closing — universe $PROFILE — $NETS"
 for n in $NETS; do
   printf '\n════════ %s ════════\n' "$n"
   attempt "pause the $n gateway" 'already paused|gateway\.pause\(\) ✓' env SPAWN_GATE=pause npx hardhat run scripts/gate.js --network "$n"
@@ -43,4 +55,4 @@ done
 
 printf '\n════════ status ════════\n'
 npx hardhat run scripts/status.js
-printf '\n════════ CLOSED TO NEW EXPOSURE — exits stay open ════════\n'
+printf '\n════════ %s: CLOSED TO NEW EXPOSURE — exits stay open ════════\n' "$PROFILE"
