@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {Roles} from "./Roles.sol";
+
 /// @title Omnichain messaging abstraction.
 /// @notice SPAWN! contracts never talk to a bridge directly — they talk to an
 /// IOmniMessenger. In production this is a thin adapter over LayerZero V2 (or
@@ -37,8 +39,7 @@ interface IOmniReceiver {
 /// delivered synchronously. It charges a configurable flat fee per message
 /// (0 by default) so the v7 fee rules — user-paid sends, prepaid return legs,
 /// sponsored senders — are testable without LayerZero.
-contract LocalOmniMessenger is IOmniMessenger {
-    address public immutable admin;
+contract LocalOmniMessenger is IOmniMessenger, Roles {
     mapping(address => uint32) public chainOf;
     mapping(address => bool) public registered;
     /// Senders whose messages ride free (the pad: its replies were prepaid
@@ -49,33 +50,35 @@ contract LocalOmniMessenger is IOmniMessenger {
 
     event EndpointRegistered(address indexed endpoint, uint32 chain);
     event MessageDelivered(uint32 srcChain, address srcSender, uint32 dstChain, address dstAddr);
+    event SponsoredSet(address indexed sender, bool on);
+    event FlatFeeSet(uint256 fee);
+    event Recovered(address to, uint256 amount);
 
-    constructor() {
-        admin = msg.sender;
-    }
+    // Same split as the production adapter: who may speak is the admin's,
+    // what a message costs is the operator's.
 
-    function register(address endpoint, uint32 chain) external {
-        require(msg.sender == admin, "LOM: not admin");
+    function register(address endpoint, uint32 chain) external onlyAdmin {
         chainOf[endpoint] = chain;
         registered[endpoint] = true;
         emit EndpointRegistered(endpoint, chain);
     }
 
-    function setSponsored(address sender, bool on) external {
-        require(msg.sender == admin, "LOM: not admin");
+    function setSponsored(address sender, bool on) external onlyAdmin {
         sponsored[sender] = on;
+        emit SponsoredSet(sender, on);
     }
 
-    function setFlatFee(uint256 fee) external {
-        require(msg.sender == admin, "LOM: not admin");
+    function setFlatFee(uint256 fee) external onlyOperator {
         flatFee = fee;
+        emit FlatFeeSet(fee);
     }
 
     /// Collected fees have nowhere to go in a simulated network.
-    function recover(address payable to) external {
-        require(msg.sender == admin, "LOM: not admin");
-        (bool ok, ) = to.call{value: address(this).balance}("");
+    function recover(address payable to) external onlyAdmin {
+        uint256 amount = address(this).balance;
+        (bool ok, ) = to.call{value: amount}("");
         require(ok, "LOM: recover failed");
+        emit Recovered(to, amount);
     }
 
     function quote(uint32, bytes32, bytes calldata, uint256 returnLegs) public view returns (uint256) {

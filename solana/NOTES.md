@@ -200,6 +200,31 @@ chain. Proven in the hardhat suite (27 tests, incl. a wide creator
 spawning, earning and claiming with the payout packet inspected
 byte-for-byte).
 
+**Hub-side changes since v5 that the program must know about (protocol v7,
+EVM only so far — nothing here was changed in `solana/`):**
+
+- **Wire op 5 `OP_PULL_FEES` exists hub-side** (gateway → pad, payload
+  `(bytes32 token)`). It is ADDITIVE: ops 1–4 and 10–13 are byte-for-byte
+  unchanged, `tests/codec-vectors.json` was NOT regenerated (the Rust codec
+  does not know op 5 and its tests read that file — do not regenerate it
+  from `gen-codec-vectors.js` without adding op 5 to `msg_codec.rs` first),
+  and the program neither sends op 5 nor ever needs to receive it. Until it
+  sends it, holder fees for label 1 simply wait on the hub
+  (`pad.pendingDrop(token, 1)`): the hub no longer pushes OP_FEE_DROP to a
+  remote chain on its own.
+- The hub now REFUSES instead of reverting (a paused pad, a bad fee mode, an
+  unknown token id): a refused BUY/SPAWN comes back as an OP_DELIVER with
+  `tokens = 0` or as an OP_PAYOUT — both already handled here. A sell the
+  curve cannot price comes back as an OP_DELIVER of the same bag.
+- The EVM gateways now refuse at entry what the hub would refuse or choke
+  on: `feeMode > 3`, name > 64 / symbol > 16 / metaURI > 1024 bytes, buys
+  and sells under 1e12 wei (18-decimal units). The program must apply the
+  same limits before sending — the hub refunds a bad fee mode, but an
+  oversized spawn can exhaust the gas its message bought.
+- Still open on this side: F-2 (a DELIVER before its SYNC fails account
+  resolution — the EVM gateways now park it), F-3, F-4, and the v7 fee
+  model (prepaid reply budgets instead of the protocol GasTank).
+
 ## Sources
 
 - [LayerZero metadata API](https://metadata.layerzero-api.com/v1/metadata) (endpoint ids, eids)

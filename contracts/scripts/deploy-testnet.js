@@ -28,6 +28,22 @@
  *   SPAWN_SPONSORED=0     run a testnet the mainnet way (users attach fees)
  *   SPAWN_RETURN_UNIT=…   reply budget per leg, in ETH (default 0.00005)
  *
+ * Holder fees (v7): the hub books each chain's slice and waits for someone
+ * on that chain to pull it (`gateway.pullFees`, prepaid like a trade). Only
+ * the hub chain's own gateway is `autoDrop` — there the drop is a free
+ * same-transaction call.
+ *
+ * Roles (v7): every contract answers to an admin (topology & custody), an
+ * operator (prices & limits, unpause) and a guardian (pause). On testnets
+ * all three are the deployer — a config value, not a code branch:
+ *
+ *   SPAWN_OPERATOR=0x…    operator on every contract (default: the deployer)
+ *   SPAWN_GUARDIAN=0x…    guardian on every contract (default: the deployer)
+ *
+ * On mainnet the admin is then handed to a TimelockController
+ * (contracts/governance/SpawnTimelock.sol) — after that, this script's
+ * admin-only steps must go through it.
+ *
  * State from before v7 cannot be continued (the messenger interface
  * changed): archive that network's entry first. Its gas tank is not lost —
  * `adapter.recover(to)` drains it.
@@ -149,8 +165,20 @@ async function deployAdapter(state, cfg) {
   return adapter
 }
 
+/** Names the operator and the guardian on one contract (idempotent). */
+async function setRoles(contract, what, roles) {
+  if ((await contract.operator()) !== roles.operator) {
+    await (await contract.setOperator(roles.operator)).wait()
+    console.log(`  ${what}.setOperator ✓`)
+  }
+  if ((await contract.guardian()) !== roles.guardian) {
+    await (await contract.setGuardian(roles.guardian)).wait()
+    console.log(`  ${what}.setGuardian ✓`)
+  }
+}
+
 /** One chain's dollar stack + gateway + holder pool, wired to `adapter`. */
-async function deployUserSide(state, cfg, adapter, padAddr, keys) {
+async function deployUserSide(state, cfg, adapter, padAddr, keys, roles) {
   const usdc = await deployOnce(state, 'usdc', 'MockUSDC', [])
   const usd = await deployOnce(state, keys.usd, 'OmniUSD', [
     cfg.label,
@@ -184,10 +212,18 @@ async function deployUserSide(state, cfg, adapter, padAddr, keys) {
     await (await dist.setAgent(gateway.target)).wait()
     console.log(`  ${keys.dist}.setAgent(gateway) ✓`)
   }
+  // the excluded set (the gateway, the pool itself) is final from here on
+  if (!(await dist.exclusionsSealed())) {
+    await (await dist.sealExclusions()).wait()
+    console.log(`  ${keys.dist}.sealExclusions ✓`)
+  }
   if ((await gateway.distributor()) === ethers.ZeroAddress) {
     await (await gateway.setDistributor(dist.target)).wait()
     console.log('  gateway.setDistributor ✓')
   }
+  await setRoles(usd, keys.usd, roles)
+  await setRoles(gateway, 'gateway', roles)
+  await setRoles(dist, keys.dist, roles)
   return { usdc, usd, gateway, dist }
 }
 
@@ -216,6 +252,10 @@ async function main() {
   const all = load()
   const state = all[network.name] ?? {}
   all[network.name] = state
+  const roles = {
+    operator: ethers.getAddress(process.env.SPAWN_OPERATOR ?? deployer.address),
+    guardian: ethers.getAddress(process.env.SPAWN_GUARDIAN ?? deployer.address),
+  }
 
   if (cfg.role === 'hub') {
     const adapter = await deployAdapter(state, cfg)
@@ -241,16 +281,9 @@ async function main() {
       await (await adapter.setSponsored(pad.target, true)).wait()
       console.log('  pad sponsored ✓')
     }
-    const dist = await deployOnce(state, 'dist', 'FeeDistributor', [usd.target])
-    if ((await dist.agent()) === ethers.ZeroAddress) {
-      await (await dist.setAgent(pad.target)).wait()
-      await (await dist.exclude(venue.target)).wait()
-      console.log('  dist.setAgent(pad) ✓')
-    }
-    if ((await pad.distributor()) === ethers.ZeroAddress) {
-      await (await pad.setDistributor(dist.target)).wait()
-      console.log('  pad.setDistributor ✓')
-    }
+    await setRoles(adapter, 'adapter', roles)
+    await setRoles(usd, 'usd', roles)
+    await setRoles(pad, 'pad', roles)
 
     // The hub chain's own user side: vault + gateway + holder pool, label
     // 3, reached by loopback. Labels 0 (the pad) and 3 both live here.
@@ -262,10 +295,18 @@ async function main() {
     }
     // a locally-initiated spawn prepays the hub's remote SYNC fan-out
     await setDestination(adapter, 0, 0n, RETURN_UNIT, 'local fan-out budget')
-    const local = await deployUserSide(state, cfg, adapter, pad.target, { usd: 'localUsd', dist: 'localDist' })
+    const local = await deployUserSide(
+      state, cfg, adapter, pad.target, { usd: 'localUsd', dist: 'localDist' }, roles,
+    )
     if ((await pad.gateways(cfg.label)) === ethers.ZeroHash) {
       await (await pad.setGateway(cfg.label, b32(local.gateway.target))).wait()
       console.log(`  pad.setGateway(${cfg.label}, ${network.name} — local) ✓`)
+    }
+    // holder fees ship at once only here, where shipping is a free loopback;
+    // every remote chain's slice waits on the hub for a user-paid pull
+    if (!(await pad.autoDrop(cfg.label))) {
+      await (await pad.setAutoDrop(cfg.label, true)).wait()
+      console.log(`  pad.setAutoDrop(${cfg.label}) ✓`)
     }
     await topUpTank(adapter.target, deployer)
 
@@ -293,7 +334,8 @@ async function main() {
     if (!hub?.pad || !hub?.adapter) throw new Error('déploie d’abord le hub (baseSepolia)')
     if (hub.transport !== 'v7') throw new Error('le hub (baseSepolia) est pré-v7 — redéploie-le d’abord')
     const adapter = await deployAdapter(state, cfg)
-    const side = await deployUserSide(state, cfg, adapter, hub.pad, { usd: 'usd', dist: 'dist' })
+    await setRoles(adapter, 'adapter', roles)
+    const side = await deployUserSide(state, cfg, adapter, hub.pad, { usd: 'usd', dist: 'dist' }, roles)
 
     if ((await adapter.eidOf(0)) === 0n) {
       await (await adapter.setRoute(0, NETS.baseSepolia.eid, b32(hub.adapter))).wait()

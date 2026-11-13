@@ -91,7 +91,7 @@ describe('Real-money settlement (protocol v7)', () => {
       await expectBacked()
     })
 
-    it('deposits are closed until the admin opens the cap, and never exceed it', async () => {
+    it('deposits are closed until the cap is opened, and never exceed it', async () => {
       // a fresh vault: cap 0 = closed (the guarded-launch default)
       const usdc = await ethers.deployContract('MockUSDC')
       const usd = await ethers.deployContract('OmniUSD', [9, usdc.target, ethers.ZeroAddress])
@@ -100,7 +100,7 @@ describe('Real-money settlement (protocol v7)', () => {
       expect(await usd.depositCap()).to.equal(0n)
       await expect(usd.connect(user).wrap(U(1))).to.be.revertedWith('oUSD: deposit cap')
 
-      await expect(usd.connect(user).setDepositCap(U(100))).to.be.revertedWith('oUSD: not admin')
+      await expect(usd.connect(user).setDepositCap(U(100))).to.be.revertedWith('ROLES: not operator')
       await expect(usd.setDepositCap(U(100))).to.emit(usd, 'DepositCapSet').withArgs(U(100))
 
       await (await usd.connect(user).wrap(U(60))).wait()
@@ -173,8 +173,9 @@ describe('Real-money settlement (protocol v7)', () => {
         .map((f) => f.name)
         .sort()
       expect(writers).to.deep.equal([
-        'approve', 'bridgeBurn', 'bridgeMint', 'depositFor', 'payout', 'rebalance',
-        'setAgent', 'setDepositCap', 'setPeer', 'transfer', 'transferFrom', 'unwrap', 'wrap',
+        'acceptAdmin', 'approve', 'bridgeBurn', 'bridgeMint', 'depositFor', 'pauseDeposits', 'payout',
+        'rebalance', 'setAgent', 'setDepositCap', 'setGuardian', 'setOperator', 'setPeer', 'transfer',
+        'transferAdmin', 'transferFrom', 'unpauseDeposits', 'unwrap', 'wrap',
       ])
       expect(c.usd.interface.getFunction('faucet')).to.equal(null)
 
@@ -491,7 +492,7 @@ describe('Real-money settlement (protocol v7)', () => {
   /* ----------------------------- rebalancing ----------------------------- */
 
   describe('CCTP rebalancing', () => {
-    it('is admin-only, peer-locked, and aims exactly at the configured peer vault', async () => {
+    it('is operator-only, peer-locked (peers are the admin\'s), and aims exactly at the configured peer vault', async () => {
       const A = world.chains[2]
       const B = world.chains[4]
       await fundUsd(A, user, 1_000)
@@ -499,7 +500,7 @@ describe('Real-money settlement (protocol v7)', () => {
 
       // no route until a peer is named
       await expect(A.usd.rebalance(B.label, U(100))).to.be.revertedWith('oUSD: no peer')
-      await expect(A.usd.connect(user).setPeer(B.label, 3, peer)).to.be.revertedWith('oUSD: not admin')
+      await expect(A.usd.connect(user).setPeer(B.label, 3, peer)).to.be.revertedWith('ROLES: not admin')
       await expect(A.usd.setPeer(B.label, 3, ethers.ZeroHash)).to.be.revertedWith('oUSD: bad peer')
       await expect(A.usd.setPeer(A.label, 3, peer)).to.be.revertedWith('oUSD: bad peer') // not itself
       await expect(A.usd.setPeer(B.label, 3, peer)).to.emit(A.usd, 'PeerSet').withArgs(B.label, 3, peer)
@@ -507,7 +508,7 @@ describe('Real-money settlement (protocol v7)', () => {
       // a peer is set once and can never be re-aimed
       await expect(A.usd.setPeer(B.label, 3, b32(user.address))).to.be.revertedWith('oUSD: peer set')
 
-      await expect(A.usd.connect(user).rebalance(B.label, U(100))).to.be.revertedWith('oUSD: not admin')
+      await expect(A.usd.connect(user).rebalance(B.label, U(100))).to.be.revertedWith('ROLES: not operator')
       await expect(A.usd.rebalance(1, U(100))).to.be.revertedWith('oUSD: no peer') // another, unset label
 
       await expect(A.usd.rebalance(B.label, U(400)))

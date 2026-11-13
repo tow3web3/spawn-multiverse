@@ -17,25 +17,26 @@ the honest path, in order. Nothing here is optional; the order is the point.
 
 ## Phase 1 — make the protocol mainnet-shaped (code, free)
 
-The testnet cuts corners that mainnet cannot:
+The testnet cut corners that mainnet cannot. Protocol v7 (branch
+`mainnet-v7`, three chantiers; details and proofs in [SPEC.md](SPEC.md))
+closed the ones that are contract code. **None of v7 is deployed anywhere
+yet** — the live testnet still runs v6.
 
-- **Real settlement money.** OmniUSD is a faucet-minted mock. Mainnet settles
-  in real USDC, moved by Circle CCTP (the OmniUSD/CCTP slot in the design).
-  No mock, no faucet, no agent mint.
-- **Price discovery on indexed rails.** The internal curve works, but mainnet
-  visibility (Axiom, Dexscreener, bots) comes from launching the hub curve on
-  already-indexed venues — Raydium LaunchLab / Meteora DBC on a Solana hub.
-  The `ICurveVenue` interface exists precisely for this swap.
-- **Keys stop being an EOA.** Every admin function moves behind a multisig
-  (Safe) + timelock. The deployer EOA owning the pad is a testnet convenience
-  and a mainnet rug-vector.
-- **Circuit breakers.** Pause switch, per-token and global rate limits on
-  bridge messages, invariant checks (Σ replica supplies ≡ hub accounting).
-- **Test depth.** Unit tests are not audit-grade. Needed: Foundry fuzz +
-  invariant suites, fork tests against real LayerZero endpoints, failure
-  injection (lost messages, reorgs, gas spikes).
-- **Indexing.** The frontend's raw `eth_getLogs` scanning does not scale to
-  mainnet. A proper indexer (subgraph or small backend) + paid RPC endpoints.
+| Corner | Status | What exists now |
+|---|---|---|
+| **Real settlement money** | ✅ code (v7 M1) | `OmniUSD` is a 1:1 USDC vault on every user-facing chain, a pure ledger on the hub; no faucet. Payouts never revert (USDC, or an oUSD claim when a vault is short). Vault-to-vault rebalancing through Circle CCTP V2. Testnets run the same contract over a mock USDC |
+| **Users pay for messages** | ✅ code (v7 M2) | every action attaches its quoted LayerZero fee, replies included; the hub tank funds itself from prepaid reply budgets. The hub chain (Base) trades locally with no LayerZero message at all |
+| **Keys stop being an EOA** | ✅ code (v7 M3) — hand-over not run yet | three roles on every contract: admin (two-step, meant to be a 48–72 h `TimelockController` owned by a Safe), operator (prices, limits, unpause), guardian (pause). The hand-over to a real OpenZeppelin timelock is proved by test. **Still to do at deploy time:** create the Safe, run the hand-over, give the timelock's canceller role to an independent key |
+| **Circuit breakers** | ✅ pause · ⏳ rate limits | the guardian can stop NEW exposure (spawns, buys, deposits) on the pad, each gateway and each vault; exits (sell, claim, pull, unwrap) have no switch. Deposit caps per vault. Not built: per-token / global message rate limits |
+| **No free rides on the hub tank** | ✅ code (v7 M3) | holder fees accrue on the hub and are pulled to a chain by a user-paid message; every remote message the hub sends is prepaid |
+| **A message never strands a user's value** | ✅ code (v7 M3) | the hub refuses with a refund instead of reverting; a gateway parks what it cannot settle yet. Four real stranding bugs found and fixed on the way (SPEC §12, F-7 to F-10) |
+| **LayerZero DVN set** | ⏳ deploy-time | adapters name the admin as delegate, so the set CAN be chosen; it must be, per pathway and on both sides (the default set costs ~5× more per message — MAINNET-ADDRESSES.md) |
+| **Price discovery on indexed rails** | ⏳ not started | the internal curve works, but mainnet visibility (Axiom, Dexscreener, bots) comes from launching the hub curve on already-indexed venues — Raydium LaunchLab / Meteora DBC on a Solana hub. The `ICurveVenue` interface exists for this swap, and the pad now survives a venue that refuses a trade |
+| **Test depth** | ⏳ partial | 106 hardhat tests incl. exact-equality invariants (global USDC backing, pad solvency through random trades, hub tank never dips). Still needed: Foundry fuzz + invariant suites, fork tests against the real LayerZero endpoints and Circle contracts, failure injection |
+| **Frontend** | ⏳ next chantier | the site still speaks v6: it needs USDC approvals, quoted fees, the pull-and-claim flow for holder fees, parked-delivery claims, and a MAINNET mode without faucet or burner |
+| **Deploy tooling** | ⏳ next chantier | mainnet network config with on-chain-verified external addresses, the timelock hand-over script, DVN configuration, a fee-tuning routine for reply budgets |
+| **Indexing** | ⏳ not started | the frontend's raw `eth_getLogs` scanning does not scale to mainnet. A proper indexer (subgraph or small backend) + paid RPC endpoints |
+| **Solana leg** | ⏳ not on devnet | must adopt the v7 fee model and op 5 before it can be a mainnet leg (solana/NOTES.md) |
 
 ## Phase 2 — security (external, costs real money)
 

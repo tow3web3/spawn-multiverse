@@ -72,6 +72,16 @@ async function main() {
         const bot = pick(bots)
         const wantBuy = Math.random() < 0.58
 
+        // v7 keeper duty: holder fees wait on the hub until someone on the
+        // chain pulls them. (The local world ships them at once, so this
+        // only fires on a deployment run the mainnet way.)
+        if ((await pad.pendingDrop(token, chain.label)) > E(1)) {
+          await (
+            await chain.gateway.connect(bot).pullFees(token, { value: await chain.gateway.quotePull() })
+          ).wait()
+          console.log(`PULL ${chain.id}`)
+        }
+
         if (!wantBuy) {
           const rep = await replica(chain, token)
           const bal = rep ? await rep.balanceOf(bot.address) : 0n

@@ -301,7 +301,7 @@ describe('Transport economics (protocol v7)', () => {
           used[op_] = ev.args.gasUsed > (used[op_] ?? 0n) ? ev.args.gasUsed : (used[op_] ?? 0n)
         }
       }
-      // fee mode 0 (holders): the second buy also triggers a FEE_DROP
+      // fee mode 0 (holders): the buys fill this chain's slice of the pot
       const fee = await op.gateway.quoteSpawn('GLOOP SUPREME', 'GLOOP', '{"face":"frog"}', true)
       await (
         await op.gateway
@@ -322,6 +322,10 @@ describe('Transport economics (protocol v7)', () => {
           .sellToken(token, (await rep.balanceOf(user)) / 2n, { value: await op.gateway.quoteSell() })
       ).wait()
       await drain()
+      // the holder-fee slice comes home when someone pulls it (v7)
+      expect(await w.pad.pendingDrop(token, op.label)).to.be.gt(0n)
+      await (await op.gateway.connect(user).pullFees(token, { value: await op.gateway.quotePull() })).wait()
+      await drain()
 
       // spoke side (real work, no mock overhead): a replica deploy and three payouts
       expect(used[10]).to.be.lt(GAS_TO_SPOKE / 2n) // SYNC
@@ -331,6 +335,9 @@ describe('Transport economics (protocol v7)', () => {
       // hub side (each includes the mock endpoint's ~0.5M per reply sent)
       expect(used[2]).to.be.lt(1_500_000n) // BUY
       expect(used[3]).to.be.lt(1_500_000n) // SELL
+      expect(used[5]).to.be.lt(1_500_000n) // PULL_FEES
+      // PRINT_GAS=1 npx hardhat test --grep "executor gas" prints the table SPEC §3 quotes
+      if (process.env.PRINT_GAS) console.log('lzReceive gas by op:', used)
       expect(used[1]).to.be.lt(MOCK_GAS_TO_HUB) // SPAWN: 5 SYNCs + the dev-buy DELIVER
     })
   })
@@ -344,26 +351,28 @@ describe('Transport economics (protocol v7)', () => {
       for (const c of w.chains) {
         expect(await w.endpoint.delegates(c.messenger.target)).to.equal(admin.address)
       }
-      await expect(w.hubMessenger.connect(stranger).setDelegate(stranger.address)).to.be.revertedWith('LZM: not admin')
+      await expect(w.hubMessenger.connect(stranger).setDelegate(stranger.address)).to.be.revertedWith('ROLES: not admin')
       await (await w.hubMessenger.setDelegate(user2.address)).wait()
       expect(await w.endpoint.delegates(w.hubMessenger.target)).to.equal(user2.address)
     })
 
-    it('every setter is admin-only', async () => {
+    it('no setter is open: topology is the admin\'s, prices the operator\'s', async () => {
       const w = await deployWorldAsync()
       const m = w.hubMessenger.connect(stranger)
-      await expect(m.register(stranger.address, 0)).to.be.revertedWith('LZM: not admin')
-      await expect(m.setSponsored(stranger.address, true)).to.be.revertedWith('LZM: not admin')
-      await expect(m.setLocal(6, true)).to.be.revertedWith('LZM: not admin')
-      await expect(m.setRoute(6, 30_006, b32(stranger.address))).to.be.revertedWith('LZM: not admin')
-      await expect(m.setDestination(6, 1, 1)).to.be.revertedWith('LZM: not admin')
-      await expect(m.recover(stranger.address)).to.be.revertedWith('LZM: not admin')
-      await expect(w.chains[5].gateway.connect(stranger).setLegs(0, 0)).to.be.revertedWith('GW: not admin')
+      await expect(m.register(stranger.address, 0)).to.be.revertedWith('ROLES: not admin')
+      await expect(m.unregister(w.pad.target)).to.be.revertedWith('ROLES: not admin')
+      await expect(m.setSponsored(stranger.address, true)).to.be.revertedWith('ROLES: not admin')
+      await expect(m.setLocal(6, true)).to.be.revertedWith('ROLES: not admin')
+      await expect(m.setRoute(6, 30_006, b32(stranger.address))).to.be.revertedWith('ROLES: not admin')
+      await expect(m.repointRoute(6, 30_006, b32(stranger.address))).to.be.revertedWith('ROLES: not admin')
+      await expect(m.recover(stranger.address)).to.be.revertedWith('ROLES: not admin')
+      await expect(m.setDestination(6, 1, 1)).to.be.revertedWith('ROLES: not operator')
+      await expect(w.chains[5].gateway.connect(stranger).setLegs(0, 0)).to.be.revertedWith('ROLES: not operator')
 
       const sync = await deployWorld()
-      await expect(sync.messenger.connect(stranger).setFlatFee(1)).to.be.revertedWith('LOM: not admin')
+      await expect(sync.messenger.connect(stranger).setFlatFee(1)).to.be.revertedWith('ROLES: not operator')
       await expect(sync.messenger.connect(stranger).setSponsored(stranger.address, true)).to.be.revertedWith(
-        'LOM: not admin',
+        'ROLES: not admin',
       )
     })
 

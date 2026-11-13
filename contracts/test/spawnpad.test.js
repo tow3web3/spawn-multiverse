@@ -224,12 +224,18 @@ describe('SPAWN! omnichain protocol', () => {
     // the payout arrived as an oUSD claim instead of reverting
     expect(await claimChain.usd.balanceOf(user.address)).to.equal(E(4))
 
-    await expect(claimChain.gateway.connect(user).claimFees(token)).to.be.revertedWith(
-      'PAD: nothing to claim',
-    )
-    await expect(claimChain.gateway.connect(user2).claimFees(token)).to.be.revertedWith(
-      'PAD: not the dev',
-    )
+    // v7: a claim that pays nothing is REFUSED, not reverted — remotely a
+    // revert would leave a dead packet behind. Reason 5: nothing accrued;
+    // reason 4: not the dev. Neither moves a cent.
+    const b32 = (a) => ethers.zeroPadValue(a, 32)
+    await expect(claimChain.gateway.connect(user).claimFees(token))
+      .to.emit(world.pad, 'Refused')
+      .withArgs(4, claimChain.label, b32(token), b32(user.address), 0, 5)
+    await expect(claimChain.gateway.connect(user2).claimFees(token))
+      .to.emit(world.pad, 'Refused')
+      .withArgs(4, claimChain.label, b32(token), b32(user2.address), 0, 4)
+    expect(await worth(claimChain, user)).to.equal(before + E(4))
+    expect(await worth(claimChain, user2)).to.equal(0n)
   })
 
   it('burn mode buys back on the curve and burns — global supply shrinks', async () => {
@@ -271,7 +277,7 @@ describe('SPAWN! omnichain protocol', () => {
     )
   })
 
-  it('wide token ids revert; wide identities never reach an EVM-local mint', async () => {
+  it('a wide token id is refused and its dollars sent home; wide identities never reach an EVM-local mint', async () => {
     // v5: ACTORS may be wide (Solana pubkeys) — but token ids are hub EVM
     // contracts and must downcast, and an EVM spoke must refuse to mint to a
     // wide recipient.
@@ -286,15 +292,20 @@ describe('SPAWN! omnichain protocol', () => {
     const srcId = b32(src.gateway.target)
     const label = await src.gateway.chainLabel()
 
-    // a wide TOKEN id is corruption — the hub refuses it
-    const wideToken = '0x01' + '00'.repeat(11) + token.slice(2)
+    // a wide TOKEN id is corruption — the hub refuses it. v7: refusing is
+    // not reverting: the $100 the spoke took rides home as a PAYOUT (here
+    // an oUSD claim — nobody funded this vault), reason 2 = unknown token
+    const wideToken = ('0x01' + '00'.repeat(11) + token.slice(2)).toLowerCase()
     const badTokenBuy = coder.encode(
       ['uint8', 'bytes'],
       [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [wideToken, b32(user.address), E(100)])],
     )
-    await expect(world.pad.connect(msgr).onOmniMessage(label, srcId, badTokenBuy)).to.be.revertedWith(
-      'PAD: bad recipient',
-    )
+    const worthBefore = await worth(src, user)
+    await expect(world.pad.connect(msgr).onOmniMessage(label, srcId, badTokenBuy))
+      .to.emit(world.pad, 'Refused')
+      .withArgs(2, label, wideToken, b32(user.address), E(100), 2)
+    expect((await worth(src, user)) - worthBefore).to.equal(E(100))
+    expect(await world.hubUsd.totalSupply()).to.equal(0n) // never touched the hub's books
 
     // a wide BUYER is legal on the hub — but this spoke is EVM, so when the
     // hub's synchronous delivery tries to mint to it, the GATEWAY refuses:
@@ -352,13 +363,16 @@ describe('SPAWN! omnichain protocol', () => {
     await expect(world.pad.connect(msgr).onOmniMessage(1, srcId, claim)).to.be.revertedWith(
       'GW: bad recipient',
     )
-    // and an EVM impostor (padded) cannot claim the wide dev's fees
+    // and an EVM impostor (padded) cannot claim the wide dev's fees: refused
+    // (reason 4), nothing paid, the dev's pot intact
     const impostor = coder.encode(
       ['uint8', 'bytes'],
       [4, coder.encode(['bytes32', 'bytes32'], [b32(token), b32(user.address)])],
     )
-    await expect(world.pad.connect(msgr).onOmniMessage(1, srcId, impostor)).to.be.revertedWith(
-      'PAD: not the dev',
-    )
+    await expect(world.pad.connect(msgr).onOmniMessage(1, srcId, impostor))
+      .to.emit(world.pad, 'Refused')
+      .withArgs(4, 1, b32(token), b32(user.address), 0, 4)
+    const after = await world.pad.feesOf(token)
+    expect(after.dev - after.devClaimed).to.equal(E(5))
   })
 })

@@ -9,6 +9,7 @@ import {
     MessagingFee,
     Origin
 } from "./ILayerZeroV2.sol";
+import {Roles} from "../Roles.sol";
 
 /// @title LayerZeroOmniMessenger — the production transport adapter.
 /// @notice One instance per chain. The protocol contracts (pad, gateway) keep
@@ -41,10 +42,20 @@ import {
 /// direct, same-transaction `onOmniMessage` on a REGISTERED local endpoint of
 /// that label, carrying the caller's registered label and address as source
 /// — the same two facts a peered adapter would vouch for.
-contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver {
+///
+/// WHO CAN DO WHAT (see Roles). Everything that decides WHO may speak and
+/// WHOSE word is believed — senders, routes, local labels, sponsorship, the
+/// LayerZero delegate, the tank's exit — is the admin's, i.e. a timelock's:
+/// a re-pointed route or a fake sender can forge a hub message, and a
+/// forged PAYOUT pays real USDC. The operator only tunes what a message
+/// costs (`setDestination`), within a hard bound.
+contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
+    /// Hard ceiling on the reply budget per leg an operator can make users
+    /// prepay (destination-chain native currency).
+    uint128 public constant MAX_RETURN_UNIT = 0.05 ether;
+
     ILayerZeroEndpointV2 public immutable endpoint;
     uint32 public immutable localEid;
-    address public immutable admin;
 
     /// Local protocol contracts allowed to send through this adapter, and
     /// the chain label each one speaks for.
@@ -78,28 +89,44 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver {
         bool local
     );
 
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "LZM: not admin");
-        _;
-    }
+    event SenderRegistered(address indexed sender, uint32 label);
+    event SenderUnregistered(address indexed sender);
+    event SponsoredSet(address indexed sender, bool on);
+    event LocalSet(uint32 indexed chainLabel, bool on);
+    event RouteSet(uint32 indexed chainLabel, uint32 eid, bytes32 peer);
+    event RouteRepointed(uint32 indexed chainLabel, uint32 oldEid, bytes32 oldPeer, uint32 eid, bytes32 peer);
+    event DestinationSet(uint32 indexed chainLabel, uint128 gas, uint128 unit);
+    event DelegateSet(address delegate);
+    event Recovered(address to, uint256 amount);
 
     constructor(ILayerZeroEndpointV2 _endpoint, uint32 _localEid) {
         endpoint = _endpoint;
         localEid = _localEid;
-        admin = msg.sender;
         // Without a delegate nobody can call endpoint.setConfig for this
         // OApp, and it would ride LayerZero's default DVN set forever.
         _endpoint.setDelegate(msg.sender);
+        emit DelegateSet(msg.sender);
+    }
+
+    /// The DVN set is custody security, so the right to choose it follows
+    /// the admin: a new admin becomes the endpoint delegate as it accepts.
+    function _onAdminChanged(address newAdmin) internal override {
+        endpoint.setDelegate(newAdmin);
+        emit DelegateSet(newAdmin);
     }
 
     /// The gas tank: anyone may top the adapter up with native currency.
     receive() external payable {}
 
+    /* ------------------------- admin (topology) ------------------------- */
+
     /// Tank recovery: lets the admin drain the gas tank when this adapter is
     /// retired (an incompatible upgrade must never strand testnet ETH again).
     function recover(address payable to) external onlyAdmin {
-        (bool ok, ) = to.call{value: address(this).balance}("");
+        uint256 amount = address(this).balance;
+        (bool ok, ) = to.call{value: amount}("");
         require(ok, "LZM: recover failed");
+        emit Recovered(to, amount);
     }
 
     /// Admits a local protocol contract and records the chain label it
@@ -108,34 +135,76 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver {
     function register(address sender_, uint32 label) external onlyAdmin {
         senders[sender_] = true;
         labelOfSender[sender_] = label;
+        emit SenderRegistered(sender_, label);
+    }
+
+    function unregister(address sender_) external onlyAdmin {
+        delete senders[sender_];
+        delete labelOfSender[sender_];
+        delete sponsored[sender_];
+        emit SenderUnregistered(sender_);
     }
 
     function setSponsored(address sender_, bool on) external onlyAdmin {
         sponsored[sender_] = on;
+        emit SponsoredSet(sender_, on);
     }
 
+    /// A label is either hosted here or reached over LayerZero, never both.
     function setLocal(uint32 chainLabel, bool on) external onlyAdmin {
+        require(eidOf[chainLabel] == 0, "LZM: label routed");
         isLocal[chainLabel] = on;
+        emit LocalSet(chainLabel, on);
     }
 
+    /// Opens the route to a chain: one label, one eid, one peer. It refuses
+    /// a label that already has a route and an eid that already has a
+    /// label — changing a live route is `repointRoute`, on purpose.
     function setRoute(uint32 chainLabel, uint32 eid, bytes32 peer) external onlyAdmin {
         require(eid != 0 && peer != bytes32(0), "LZM: bad route");
+        require(!isLocal[chainLabel], "LZM: label is local");
+        require(eidOf[chainLabel] == 0, "LZM: label routed");
+        require(peers[eid] == bytes32(0), "LZM: eid taken");
         eidOf[chainLabel] = eid;
         labelOf[eid] = chainLabel;
         peers[eid] = peer;
+        emit RouteSet(chainLabel, eid, peer);
     }
 
-    /// Per-destination executor settings. `gas` is ignored for a local label
-    /// (no executor involved); `unit` is charged per reply leg either way.
-    function setDestination(uint32 chainLabel, uint128 gas, uint128 unit) external onlyAdmin {
-        gasLimit[chainLabel] = gas;
-        returnUnit[chainLabel] = unit;
+    /// Changes whose word is believed for a chain. The single most
+    /// dangerous call here: the new peer can speak as that chain.
+    function repointRoute(uint32 chainLabel, uint32 eid, bytes32 peer) external onlyAdmin {
+        require(eid != 0 && peer != bytes32(0), "LZM: bad route");
+        uint32 oldEid = eidOf[chainLabel];
+        require(oldEid != 0, "LZM: no route");
+        bytes32 oldPeer = peers[oldEid];
+        if (eid != oldEid) {
+            require(peers[eid] == bytes32(0), "LZM: eid taken");
+            delete labelOf[oldEid];
+            delete peers[oldEid];
+        }
+        eidOf[chainLabel] = eid;
+        labelOf[eid] = chainLabel;
+        peers[eid] = peer;
+        emit RouteRepointed(chainLabel, oldEid, oldPeer, eid, peer);
     }
 
     /// Hands endpoint configuration rights (DVN set, executor, libraries)
     /// to `delegate`.
     function setDelegate(address delegate) external onlyAdmin {
         endpoint.setDelegate(delegate);
+        emit DelegateSet(delegate);
+    }
+
+    /* ------------------------- operator (prices) ------------------------- */
+
+    /// Per-destination executor settings. `gas` is ignored for a local label
+    /// (no executor involved); `unit` is charged per reply leg either way.
+    function setDestination(uint32 chainLabel, uint128 gas, uint128 unit) external onlyOperator {
+        require(unit <= MAX_RETURN_UNIT, "LZM: unit too high");
+        gasLimit[chainLabel] = gas;
+        returnUnit[chainLabel] = unit;
+        emit DestinationSet(chainLabel, gas, unit);
     }
 
     /* ----------------------- IOmniMessenger ----------------------- */

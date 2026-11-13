@@ -65,13 +65,50 @@ const CHAINS = [
   { label: 6, id: 'optimism' },
 ]
 
+/** One chain's holder-dividend pool, wired to its gateway and sealed: the
+ * excluded set (the gateway, the pool itself) is final from here on. */
+async function deployDistributor(usd, gateway) {
+  const dist = await ethers.deployContract('FeeDistributor', [usd.target])
+  await (await dist.setAgent(gateway.target)).wait()
+  await (await dist.sealExclusions()).wait()
+  await (await gateway.setDistributor(dist.target)).wait()
+  return dist
+}
+
+/** Every contract of a deployed world that answers to the three Roles. */
+function roleContracts(world) {
+  const list = [world.pad, world.hubUsd, world.messenger ?? world.hubMessenger]
+  for (const c of world.chains) {
+    list.push(c.usd, c.gateway, c.dist)
+    if (c.messenger && c.messenger.target !== world.hubMessenger?.target) list.push(c.messenger)
+  }
+  return list
+}
+
+/** Names the operator and the guardian on every contract of `world`. On
+ * mainnet: operator = the owner's Safe, guardian = a hot key. Left unset,
+ * only the admin holds those powers (the admin may always act as either). */
+async function assignRoles(world, { operator, guardian } = {}) {
+  for (const c of roleContracts(world)) {
+    if (operator) await (await c.setOperator(operator.address ?? operator)).wait()
+    if (guardian) await (await c.setGuardian(guardian.address ?? guardian)).wait()
+  }
+}
+
 /**
  * Deploys the whole multiverse on one node: the local messenger, the hub
  * (ledger-mode OmniUSD + SpawnPad) and six spokes (MockUSDC + USDC-backed
  * OmniUSD vault + SpawnGateway each), fully wired, deposits open. Used by
  * both the test suite and the local deploy script.
+ *
+ * Holder fees (v7): on a real network a chain's slice waits on the hub until
+ * someone on that chain pulls it. The simulated network is ONE chain — every
+ * delivery is a free synchronous call — so by default every label is
+ * `autoDrop` and slices ship at once. `{ autoDrop: false }` runs the
+ * simulated world the mainnet way. `venueName` swaps the price-discovery
+ * module (tests use a venue that can refuse trades).
  */
-async function deployWorld() {
+async function deployWorld({ autoDrop = true, venueName = 'InternalCurveVenue' } = {}) {
   const messenger = await ethers.deployContract('LocalOmniMessenger')
   await messenger.waitForDeployment()
 
@@ -79,17 +116,12 @@ async function deployWorld() {
   const pad = await ethers.deployContract('SpawnPad', [messenger.target, hubUsd.target])
   // Price discovery is a pluggable venue: the internal curve locally, a
   // Raydium LaunchLab / Meteora DBC adapter on the production Solana hub.
-  const venue = await ethers.deployContract('InternalCurveVenue', [pad.target])
+  const venue = await ethers.deployContract(venueName, [pad.target])
   await (await pad.setVenue(venue.target)).wait()
   await (await hubUsd.setAgent(pad.target)).wait()
   await (await messenger.register(pad.target, 0)).wait()
   // v7 fees: the pad's messages are replies, prepaid by whoever caused them
   await (await messenger.setSponsored(pad.target, true)).wait()
-  // Holder dividends: one FeeDistributor per chain, the hub's wired to the pad.
-  const hubDist = await ethers.deployContract('FeeDistributor', [hubUsd.target])
-  await (await hubDist.setAgent(pad.target)).wait()
-  await (await hubDist.exclude(venue.target)).wait()
-  await (await pad.setDistributor(hubDist.target)).wait()
 
   const chains = []
   for (const c of CHAINS) {
@@ -102,18 +134,20 @@ async function deployWorld() {
     ])
     await (await usd.setAgent(gateway.target)).wait()
     await (await messenger.register(gateway.target, c.label)).wait()
+    // Holder dividends: one FeeDistributor per user-facing chain — in place
+    // BEFORE the pad learns the gateway (a replica cannot be deployed
+    // without its pool: the SYNC would revert).
+    const dist = await deployDistributor(usd, gateway)
     await (await pad.setGateway(c.label, b32(gateway.target))).wait()
+    if (autoDrop) await (await pad.setAutoDrop(c.label, true)).wait()
     // every chain is a "remote" spoke of the simulated network: a trade
     // prepays 1 reply, a spawn the SYNC to all six chains. The simulated
     // fee is 0 unless a test turns it on (`messenger.setFlatFee`).
     await (await gateway.setLegs(1, CHAINS.length)).wait()
-    const dist = await ethers.deployContract('FeeDistributor', [usd.target])
-    await (await dist.setAgent(gateway.target)).wait()
-    await (await gateway.setDistributor(dist.target)).wait()
     chains.push({ ...c, usdc, cctp, usd, gateway, dist })
   }
 
-  return { messenger, hubUsd, pad, venue, hubDist, chains }
+  return { messenger, hubUsd, pad, venue, chains }
 }
 
 /** The chain whose gateway lives on the hub chain itself (Base): its
@@ -175,10 +209,6 @@ async function deployWorldAsync({ sponsored = true } = {}) {
   await (await hubMessenger.setLocal(0, true)).wait()
   await (await hubMessenger.setLocal(HUB_LOCAL_LABEL, true)).wait()
   await (await hubMessenger.setDestination(0, 0, RETURN_UNIT)).wait()
-  const hubDist = await ethers.deployContract('FeeDistributor', [hubUsd.target])
-  await (await hubDist.setAgent(pad.target)).wait()
-  await (await hubDist.exclude(venue.target)).wait()
-  await (await pad.setDistributor(hubDist.target)).wait()
 
   const chains = []
   for (const c of CHAINS) {
@@ -200,22 +230,25 @@ async function deployWorldAsync({ sponsored = true } = {}) {
     await (await usd.setAgent(gateway.target)).wait()
     await (await messenger.register(gateway.target, c.label)).wait()
     if (sponsored) await (await messenger.setSponsored(gateway.target, true)).wait()
-    await (await pad.setGateway(c.label, b32(gateway.target))).wait()
-    // replies a user prepays: 1 per trade on a remote chain, none at home;
-    // a spawn prepays the SYNC to every remote chain wherever it starts
-    await (await gateway.setLegs(local ? 0 : 1, remotes)).wait()
-    const dist = await ethers.deployContract('FeeDistributor', [usd.target])
-    await (await dist.setAgent(gateway.target)).wait()
-    await (await gateway.setDistributor(dist.target)).wait()
-
     if (!local) {
       // spoke <-> hub routes (spokes never talk to each other; the pad relays)
       await (await messenger.setRoute(0, EID(0), b32(hubMessenger.target))).wait()
       await (await hubMessenger.setRoute(c.label, EID(c.label), b32(messenger.target))).wait()
       await (await messenger.setDestination(0, MOCK_GAS_TO_HUB, RETURN_UNIT)).wait()
-      // hub -> spoke messages are replies: they carry no further budget
+      // hub -> spoke messages are replies: they carry no further budget.
+      // Set BEFORE the pad learns the gateway: from that moment every spawn
+      // SYNCs this chain, and a send without a gas limit reverts.
       await (await hubMessenger.setDestination(c.label, GAS_TO_SPOKE, 0)).wait()
     }
+    // the holder pool too must exist before the pad learns the gateway
+    const dist = await deployDistributor(usd, gateway)
+    await (await pad.setGateway(c.label, b32(gateway.target))).wait()
+    // holder fees ship at once only where shipping is free — at home; a
+    // remote chain's slice waits on the hub for a user-paid pull
+    if (local) await (await pad.setAutoDrop(c.label, true)).wait()
+    // replies a user prepays: 1 per trade on a remote chain, none at home;
+    // a spawn prepays the SYNC to every remote chain wherever it starts
+    await (await gateway.setLegs(local ? 0 : 1, remotes)).wait()
     chains.push({ ...c, usdc, cctp, usd, gateway, messenger, dist, local })
   }
 
@@ -223,12 +256,14 @@ async function deployWorldAsync({ sponsored = true } = {}) {
     while ((await endpoint.pending()) > 0n) await (await endpoint.deliverAll(32)).wait()
   }
 
-  return { endpoint, hubMessenger, hubUsd, pad, venue, hubDist, chains, deliverAll, FEE, RETURN_UNIT }
+  return { endpoint, hubMessenger, hubUsd, pad, venue, chains, deliverAll, FEE, RETURN_UNIT }
 }
 
 module.exports = {
   deployWorld,
   deployWorldAsync,
+  assignRoles,
+  roleContracts,
   CHAINS,
   HUB_LOCAL_LABEL,
   GAS_TO_HUB,

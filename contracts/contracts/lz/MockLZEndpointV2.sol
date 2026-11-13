@@ -146,9 +146,15 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
     /// like the real executor: with exactly the gas the sender paid for and
     /// the prepaid native value. Too little gas reverts the delivery.
     function deliverNext() public {
-        require(queue.length > 0, "ENDPOINT: empty");
-        Packet memory p = queue[0];
-        for (uint256 i = 0; i + 1 < queue.length; i++) queue[i] = queue[i + 1];
+        deliverAt(0);
+    }
+
+    /// Lands the packet at queue position `at`, ahead of older ones — the
+    /// real network promises no order between messages (nextNonce = 0).
+    function deliverAt(uint256 at) public {
+        require(at < queue.length, "ENDPOINT: empty");
+        Packet memory p = queue[at];
+        for (uint256 i = at; i + 1 < queue.length; i++) queue[i] = queue[i + 1];
         queue.pop();
         address dst = address(uint160(uint256(p.receiver)));
         uint256 g = gasleft();

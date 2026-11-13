@@ -5,7 +5,7 @@ import {IOmniMessenger, IOmniReceiver} from "./OmniMessenger.sol";
 import {OmniUSD} from "./OmniUSD.sol";
 import {SpawnToken} from "./SpawnToken.sol";
 import {ICurveVenue} from "./ICurveVenue.sol";
-import {FeeDistributor} from "./FeeDistributor.sol";
+import {Roles} from "./Roles.sol";
 
 /// @title SpawnPad — the hub of the multiverse.
 /// @notice One global market per token lives HERE, on the hub chain. The six
@@ -20,7 +20,15 @@ import {FeeDistributor} from "./FeeDistributor.sol";
 /// `ICurveVenue` — the internal genesis curve locally, a Raydium LaunchLab /
 /// Meteora DBC adapter on the production Solana hub, so curve-phase trades
 /// are visible on Axiom / Dexscreener from the first second.
-contract SpawnPad is IOmniReceiver {
+///
+/// NEVER REVERT ON AN AUTHENTICATED MESSAGE (v7). A message that reaches the
+/// pad carries value the spoke already took from a user. Whatever the pad
+/// cannot do, it REFUSES by sending that value home (a refund, or the
+/// tokens back) and logging `Refused` — it does not revert. The only
+/// reverts left on this path are an empty reply tank (LayerZero keeps the
+/// message retryable until it is refilled) and guards that cannot fire
+/// while the protocol's own invariants hold.
+contract SpawnPad is IOmniReceiver, Roles {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
     uint32 public constant HUB_CHAIN = 0;
 
@@ -28,7 +36,8 @@ contract SpawnPad is IOmniReceiver {
     uint256 public constant FEE_BPS = 100;
     /// Burn mode buys back in chunks, not dust.
     uint256 public constant BURN_TRIGGER = 4e18;
-    /// Holder modes distribute in chunks too — cross-chain drops aren't free.
+    /// Holder modes split the pot into per-chain slices in chunks, not on
+    /// every trade.
     uint256 public constant DIST_TRIGGER = 2e18;
 
     /// FAIR GENESIS (v6) — the anti-snipe opening. For GENESIS_WINDOW seconds
@@ -52,11 +61,20 @@ contract SpawnPad is IOmniReceiver {
     uint8 internal constant OP_BUY = 2;
     uint8 internal constant OP_SELL = 3;
     uint8 internal constant OP_CLAIM = 4;
+    uint8 internal constant OP_PULL_FEES = 5;
     // Message opcodes (pad -> gateway)
     uint8 internal constant OP_SYNC_TOKEN = 10;
     uint8 internal constant OP_DELIVER = 11;
     uint8 internal constant OP_PAYOUT = 12;
     uint8 internal constant OP_FEE_DROP = 13;
+
+    // Why a message was refused (`Refused.reason`)
+    uint8 internal constant R_PAUSED = 1;
+    uint8 internal constant R_UNKNOWN_TOKEN = 2;
+    uint8 internal constant R_BAD_FEE_MODE = 3;
+    uint8 internal constant R_NOT_DEV = 4;
+    uint8 internal constant R_NOTHING = 5;
+    uint8 internal constant R_VENUE = 6;
 
     struct Meta {
         string name;
@@ -87,15 +105,19 @@ contract SpawnPad is IOmniReceiver {
 
     IOmniMessenger public immutable messenger;
     OmniUSD public immutable usd; // hub instance
-    address public immutable admin;
     ICurveVenue public venue;
-    FeeDistributor public distributor; // hub-chain instance
+    /// Circuit breaker. While set, buys bounce whole and spawns are refused
+    /// (both refund); sells and claims keep working — exits never close.
+    bool public paused;
 
     uint32[] public chainLabels;
     /// Gateways are wide too (v5): a Solana gateway is an OApp store pubkey,
     /// not an EVM address. EVM gateways are stored left-padded.
     mapping(uint32 => bytes32) public gateways;
-    mapping(bytes32 => uint32) public gatewayChain;
+    /// Chains whose holder slice is shipped the moment it is computed — only
+    /// where shipping is free (the hub chain's own gateway, a loopback).
+    /// Every other chain's slice waits in `pendingDrop` for a user-paid pull.
+    mapping(uint32 => bool) public autoDrop;
 
     address[] public allTokens;
     mapping(address => Meta) public metas;
@@ -110,6 +132,10 @@ contract SpawnPad is IOmniReceiver {
     /// during the token's genesis window.
     mapping(address => uint256) public spawnBlock;
     mapping(address => mapping(bytes32 => uint256)) public genesisSpent;
+    /// Holder-fee slices already attributed to a chain and waiting on the
+    /// hub for someone on that chain to pull them (OP_PULL_FEES). The oUSD
+    /// stays in the pad's books until then.
+    mapping(address => mapping(uint32 => uint256)) public pendingDrop;
 
     // Actors in events are wide (v5): an EVM actor shows up left-padded, a
     // Solana one as its raw 32-byte key. Token addresses stay `address` —
@@ -137,6 +163,24 @@ contract SpawnPad is IOmniReceiver {
     event BuybackBurn(address indexed token, uint256 usd, uint256 tokens);
     event DevClaimed(address indexed token, bytes32 indexed dev, uint256 amount);
     event HoldersDistributed(address indexed token, uint256 amount);
+    event FeesPulled(address indexed token, uint32 indexed chain, uint256 amount);
+    /// A message the pad would not execute. Any value it carried was sent
+    /// home (`amount`: the dollars or tokens concerned). `reason`: 1 paused,
+    /// 2 unknown token, 3 bad fee mode, 4 not the dev, 5 nothing to pay,
+    /// 6 the venue refused the trade.
+    event Refused(
+        uint8 indexed op,
+        uint32 indexed srcChain,
+        bytes32 token,
+        bytes32 actor,
+        uint256 amount,
+        uint8 reason
+    );
+    event VenueSet(address venue);
+    event GatewaySet(uint32 indexed chain, bytes32 gateway);
+    event AutoDropSet(uint32 indexed chain, bool on);
+    event Paused(address by);
+    event Unpaused(address by);
     /// A FAIR GENESIS action: a snipe tax collected and/or a clamped or
     /// bounced spend refunded. `refundedUsd` is only the guard's own clamp
     /// (cap/block-0), not a curve-cap refund.
@@ -151,35 +195,56 @@ contract SpawnPad is IOmniReceiver {
     constructor(IOmniMessenger _messenger, OmniUSD _usd) {
         messenger = _messenger;
         usd = _usd;
-        admin = msg.sender;
     }
 
-    function setVenue(ICurveVenue v) external {
-        require(msg.sender == admin, "PAD: not admin");
+    /* ---------------------------- admin ---------------------------- */
+
+    function setVenue(ICurveVenue v) external onlyAdmin {
         require(address(venue) == address(0), "PAD: venue set");
         venue = v;
-    }
-
-    function setDistributor(FeeDistributor d) external {
-        require(msg.sender == admin, "PAD: not admin");
-        require(address(distributor) == address(0), "PAD: distributor set");
-        distributor = d;
+        emit VenueSet(address(v));
     }
 
     /// `gw` is the gateway's wide id: an EVM gateway left-padded, a Solana
-    /// OApp store pubkey raw.
-    function setGateway(uint32 chain, bytes32 gw) external {
-        require(msg.sender == admin, "PAD: not admin");
+    /// OApp store pubkey raw. One gateway per chain, forever: a gateway can
+    /// mint value into the hub's books, so this is the most dangerous
+    /// setter in the protocol.
+    function setGateway(uint32 chain, bytes32 gw) external onlyAdmin {
+        require(chain != HUB_CHAIN, "PAD: hub label");
         require(gateways[chain] == bytes32(0) && gw != bytes32(0), "PAD: gateway set");
         gateways[chain] = gw;
-        gatewayChain[gw] = chain;
         chainLabels.push(chain);
+        emit GatewaySet(chain, gw);
+    }
+
+    /// Flag a chain whose FEE_DROP costs nothing to send (the hub chain's
+    /// own gateway). Flagging a remote chain makes the hub tank pay for its
+    /// drops — the unfunded fan-out v7 removed.
+    function setAutoDrop(uint32 chain, bool on) external onlyAdmin {
+        autoDrop[chain] = on;
+        emit AutoDropSet(chain, on);
+    }
+
+    /* ----------------------- circuit breaker ----------------------- */
+
+    function pause() external onlyGuardian {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOperator {
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 
     /* ---------------------------- views ---------------------------- */
 
     function tokensLength() external view returns (uint256) {
         return allTokens.length;
+    }
+
+    function chainsLength() external view returns (uint256) {
+        return chainLabels.length;
     }
 
     function spotPrice(address token) public view returns (uint256) {
@@ -252,21 +317,32 @@ contract SpawnPad is IOmniReceiver {
     /// wide end-to-end — the hub stores, authenticates and pays them by
     /// message, never by local transfer, so a Solana identity flows through
     /// untouched. The only values downcast on the hub are TOKEN ids, because
-    /// every token is an EVM contract deployed HERE; a wide token id is
-    /// corruption and reverts.
-    function _addr(bytes32 b) internal pure returns (address) {
-        require(uint256(b) >> 160 == 0, "PAD: bad recipient");
-        return address(uint160(uint256(b)));
-    }
-
+    /// every token is an EVM contract deployed HERE.
     function _b32(address a) internal pure returns (bytes32) {
         return bytes32(uint256(uint160(a)));
     }
 
+    /// A token id the hub can act on: it downcasts (top 12 bytes zero) AND
+    /// names a token this pad spawned. Anything else is refused, never
+    /// reverted on — see the contract header.
+    function _known(bytes32 tokenB) internal view returns (bool ok, address token) {
+        if (uint256(tokenB) >> 160 != 0) return (false, address(0));
+        token = address(uint160(uint256(tokenB)));
+        ok = metas[token].spawnedAt != 0;
+    }
+
+    /// Sends dollars home that never touched the hub's books: the spoke
+    /// took them from the user, the hub refused the message.
+    function _sendHome(uint32 srcChain, bytes32 to, uint256 amount) internal {
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_PAYOUT, abi.encode(to, amount)), 0);
+    }
+
     /// FEES (v7): the pad never attaches value and never prepays a reply —
-    /// every `messenger.send` below passes `returnLegs = 0`. Its messages ARE
-    /// the replies: the user who caused them prepaid them into the hub
-    /// adapter's tank, and the pad rides that tank as a sponsored sender.
+    /// every `messenger.send` passes `returnLegs = 0`. Its messages ARE the
+    /// replies: the user who caused them prepaid them into the hub adapter's
+    /// tank, and the pad rides that tank as a sponsored sender. Since the
+    /// holder-fee fan-out became a user-paid pull, that is true of EVERY
+    /// remote message the pad sends.
     function onOmniMessage(uint32 srcChain, bytes32 srcSender, bytes calldata payload) external {
         require(msg.sender == address(messenger), "PAD: not messenger");
         require(gateways[srcChain] == srcSender, "PAD: not a gateway");
@@ -281,24 +357,32 @@ contract SpawnPad is IOmniReceiver {
                 uint8 feeMode
             ) = abi.decode(data, (bytes32, string, string, string, uint256, uint8));
             _spawn(srcChain, creator, name, symbol, metaURI, devBuyUsd, feeMode);
-        } else if (op == OP_CLAIM) {
-            (bytes32 token, bytes32 claimer) = abi.decode(data, (bytes32, bytes32));
-            // token: hub-local EVM contract, downcast; claimer: actor, wide
-            _claim(srcChain, _addr(token), claimer);
         } else if (op == OP_BUY) {
-            (bytes32 token, bytes32 buyer, uint256 usdIn) = abi.decode(
-                data,
-                (bytes32, bytes32, uint256)
-            );
-            // token: hub-local, downcast; buyer: actor, wide
-            _buy(srcChain, _addr(token), buyer, usdIn, false);
+            (bytes32 tokenB, bytes32 buyer, uint256 usdIn) = abi.decode(data, (bytes32, bytes32, uint256));
+            (bool ok, address token) = _known(tokenB);
+            if (ok) {
+                _buy(srcChain, token, buyer, usdIn, false);
+            } else {
+                // the buyer's dollars are in flight: they go straight home
+                emit Refused(op, srcChain, tokenB, buyer, usdIn, R_UNKNOWN_TOKEN);
+                _sendHome(srcChain, buyer, usdIn);
+            }
         } else if (op == OP_SELL) {
-            (bytes32 token, bytes32 seller, uint256 tokensIn) = abi.decode(
-                data,
-                (bytes32, bytes32, uint256)
-            );
-            // token: hub-local, downcast; seller: actor, wide
-            _sell(srcChain, _addr(token), seller, tokensIn);
+            (bytes32 tokenB, bytes32 seller, uint256 tokensIn) = abi.decode(data, (bytes32, bytes32, uint256));
+            (bool ok, address token) = _known(tokenB);
+            // an unknown id names nothing a spoke could have burned
+            if (ok) _sell(srcChain, token, seller, tokensIn);
+            else emit Refused(op, srcChain, tokenB, seller, tokensIn, R_UNKNOWN_TOKEN);
+        } else if (op == OP_CLAIM) {
+            (bytes32 tokenB, bytes32 claimer) = abi.decode(data, (bytes32, bytes32));
+            (bool ok, address token) = _known(tokenB);
+            if (ok) _claim(srcChain, token, claimer);
+            else emit Refused(op, srcChain, tokenB, claimer, 0, R_UNKNOWN_TOKEN);
+        } else if (op == OP_PULL_FEES) {
+            bytes32 tokenB = abi.decode(data, (bytes32));
+            (bool ok, address token) = _known(tokenB);
+            if (ok) _pull(srcChain, token);
+            else emit Refused(op, srcChain, tokenB, bytes32(0), 0, R_UNKNOWN_TOKEN);
         } else {
             revert("PAD: bad op");
         }
@@ -315,16 +399,15 @@ contract SpawnPad is IOmniReceiver {
         uint256 devBuyUsd,
         uint8 feeMode
     ) internal {
-        require(feeMode <= FEE_BURN, "PAD: bad fee mode");
-        SpawnToken token = new SpawnToken(
-            name,
-            symbol,
-            address(this),
-            true,
-            TOTAL_SUPPLY,
-            address(this),
-            address(distributor)
-        );
+        if (paused || feeMode > FEE_BURN) {
+            // no token is created; a dev buy that came along goes home
+            emit Refused(OP_SPAWN, srcChain, bytes32(0), creator, devBuyUsd, paused ? R_PAUSED : R_BAD_FEE_MODE);
+            if (devBuyUsd > 0) _sendHome(srcChain, creator, devBuyUsd);
+            return;
+        }
+        // The hub instance never leaves the pad's custody, so it reports to
+        // no FeeDistributor: holders live on the user-facing chains.
+        SpawnToken token = new SpawnToken(name, symbol, address(this), true, TOTAL_SUPPLY, address(this), address(0));
         allTokens.push(address(token));
         metas[address(token)] = Meta(name, symbol, metaURI, creator, uint64(block.timestamp), srcChain);
         spawnBlock[address(token)] = block.number;
@@ -352,8 +435,8 @@ contract SpawnPad is IOmniReceiver {
 
     /// Decides how much of a buy may touch the curve and at what snipe tax.
     /// Pure clamp semantics: 0 spendable = full bounce, NEVER a revert — the
-    /// spoke already burned the buyer's oUSD, so refusal must ride home as a
-    /// refund, not strand value in a reverted message.
+    /// spoke already took the buyer's dollars, so refusal must ride home as
+    /// a refund, not strand value in a reverted message.
     function _genesisGate(address token, bytes32 buyer, uint256 usdIn, bool genesisBuy)
         internal
         returns (uint256 spendable, uint256 snipeBps)
@@ -376,34 +459,47 @@ contract SpawnPad is IOmniReceiver {
     }
 
     function _buy(uint32 srcChain, address token, bytes32 buyer, uint256 usdIn, bool genesisBuy) internal {
-        // The spoke burned the buyer's OmniUSD; the value re-materializes here.
-        usd.bridgeMint(address(this), usdIn);
-
-        (uint256 spendable, uint256 snipeBps) = _genesisGate(token, buyer, usdIn, genesisBuy);
+        uint256 spendable;
+        uint256 snipeBps;
+        if (paused) {
+            emit Refused(OP_BUY, srcChain, _b32(token), buyer, usdIn, R_PAUSED);
+        } else {
+            (spendable, snipeBps) = _genesisGate(token, buyer, usdIn, genesisBuy);
+        }
+        // what the genesis guard itself turned away (not a pause, not the venue)
+        uint256 guarded = paused ? 0 : usdIn - spendable;
         uint256 feeRate = FEE_BPS + snipeBps;
 
-        // Fee off the top; price discovery is the venue's job.
+        // Fee off the top; price discovery is the venue's job. A venue that
+        // will not take the trade (any venue, for any reason) bounces it.
         uint256 out;
         uint256 spend;
         uint256 fee;
         if (spendable > 0) {
             uint256 feeIn = (spendable * feeRate) / 10_000;
-            bool ascendedNow;
-            (out, spend, ascendedNow) = venue.execBuy(token, spendable - feeIn);
-            // If the curve capped the buy, the fee shrinks with it.
-            fee = spend < spendable - feeIn ? (spend * feeRate) / 10_000 : feeIn;
-            if (ascendedNow) {
-                emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
+            try venue.execBuy(token, spendable - feeIn) returns (uint256 o, uint256 s, bool ascendedNow) {
+                out = o;
+                spend = s;
+                // If the curve capped the buy, the fee shrinks with it.
+                fee = s < spendable - feeIn ? (s * feeRate) / 10_000 : feeIn;
+                if (ascendedNow) emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
+            } catch {
+                emit Refused(OP_BUY, srcChain, _b32(token), buyer, usdIn, R_VENUE);
+                // nothing was bought: the gate's cap accounting (which only
+                // runs inside the window, i.e. when there is a snipe tax) is undone
+                if (snipeBps > 0) genesisSpent[token][buyer] -= spendable;
             }
         }
         uint256 refund = usdIn - spend - fee;
 
+        // The spoke took the buyer's dollars; the part that stays on the hub
+        // (curve + fee) re-materializes in the books, the rest rides home.
+        if (spend + fee > 0) usd.bridgeMint(address(this), spend + fee);
         // Ship the creature to the buyer's chain (burn hub-side, mint spoke-side).
         if (out > 0) {
             SpawnToken(token).bridgeBurn(address(this), out);
             supplyByChain[token][srcChain] += out;
         }
-        if (refund > 0) usd.bridgeBurn(address(this), refund);
         messenger.send(
             srcChain,
             gateways[srcChain],
@@ -412,8 +508,8 @@ contract SpawnPad is IOmniReceiver {
             0
         );
 
-        if (snipeBps > 0 || usdIn > spendable) {
-            emit GenesisGuard(token, buyer, snipeBps, (fee * snipeBps) / feeRate, usdIn - spendable);
+        if (snipeBps > 0 || guarded > 0) {
+            emit GenesisGuard(token, buyer, snipeBps, (fee * snipeBps) / feeRate, guarded);
         }
         if (spend + fee > 0) {
             emit Trade(token, srcChain, buyer, true, spend + fee, out, venue.spotPrice(token), uint64(block.timestamp));
@@ -422,11 +518,27 @@ contract SpawnPad is IOmniReceiver {
     }
 
     function _sell(uint32 srcChain, address token, bytes32 seller, uint256 tokensIn) internal {
-        // The spoke burned the seller's replicas; they re-materialize in inventory.
+        uint256 usdOut;
+        try venue.execSell(token, tokensIn) returns (uint256 u) {
+            usdOut = u;
+        } catch {
+            // the venue will not price it (dust): the spoke burned the bag,
+            // so it goes back the way a delivery does
+            emit Refused(OP_SELL, srcChain, _b32(token), seller, tokensIn, R_VENUE);
+            messenger.send(
+                srcChain,
+                gateways[srcChain],
+                abi.encode(OP_DELIVER, abi.encode(_b32(token), seller, tokensIn, uint256(0))),
+                0
+            );
+            return;
+        }
+        // The spoke burned the seller's replicas; they re-materialize in
+        // inventory. The subtraction cannot underflow while the hub's ledger
+        // matches the spokes (S2): a gateway can only burn what was delivered.
         SpawnToken(token).bridgeMint(address(this), tokensIn);
         supplyByChain[token][srcChain] -= tokensIn;
 
-        uint256 usdOut = venue.execSell(token, tokensIn);
         uint256 fee = (usdOut * FEE_BPS) / 10_000;
         uint256 net = usdOut - fee;
 
@@ -458,69 +570,104 @@ contract SpawnPad is IOmniReceiver {
             if (f.burnPot >= BURN_TRIGGER) {
                 // The buyback is a REAL buy on the same curve — it moves the
                 // price — and the tokens it gets are burned on the spot, so
-                // global supply shrinks for every chain at once.
+                // global supply shrinks for every chain at once. If the
+                // venue refuses, the pot simply waits for the next fee.
                 uint256 pot = f.burnPot;
-                f.burnPot = 0;
-                (uint256 out, uint256 spent, bool asc) = venue.execBuy(token, pot);
-                if (spent < pot) f.burnPot = pot - spent;
-                f.burnedUsd += spent;
-                f.burnedTokens += out;
-                SpawnToken(token).bridgeBurn(address(this), out);
-                if (asc) emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
-                emit BuybackBurn(token, spent, out);
-                emit Trade(token, HUB_CHAIN, _b32(address(this)), true, spent, out, venue.spotPrice(token), uint64(block.timestamp));
+                try venue.execBuy(token, pot) returns (uint256 out, uint256 spent, bool asc) {
+                    f.burnPot = pot - spent;
+                    f.burnedUsd += spent;
+                    f.burnedTokens += out;
+                    SpawnToken(token).bridgeBurn(address(this), out);
+                    if (asc) emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
+                    emit BuybackBurn(token, spent, out);
+                    emit Trade(token, HUB_CHAIN, _b32(address(this)), true, spent, out, venue.spotPrice(token), uint64(block.timestamp));
+                } catch {}
             }
         }
-        if (
-            (f.mode == FEE_HOLDERS || f.mode == FEE_SPLIT) &&
-            f.holders - f.holdersPaid >= DIST_TRIGGER
-        ) {
+        if ((f.mode == FEE_HOLDERS || f.mode == FEE_SPLIT) && f.holders - f.holdersPaid >= DIST_TRIGGER) {
             _distributeHolders(token, f);
         }
         emit FeeAccrued(token, f.mode, fee);
     }
 
-    /// Splits the accrued holders pot pro-rata to where the supply lives and
-    /// drops each chain's slice into that chain's FeeDistributor. Holders
-    /// then claim with a pure local tx on their own chain — the dividend
-    /// stream follows balances automatically from there.
+    /// Splits the accrued holders pot pro-rata to where the supply lives.
+    /// ACCRUE, THEN PULL (v7): a chain's slice is only an entry in
+    /// `pendingDrop` — no message leaves, so no trade can make the hub tank
+    /// pay for a fan-out. Someone on that chain pulls it when they want it
+    /// (OP_PULL_FEES, prepaid like any trade); it then lands in that chain's
+    /// FeeDistributor and holders claim locally. Only `autoDrop` chains —
+    /// where the drop is a free same-transaction call — are shipped here.
     function _distributeHolders(address token, FeeState storage f) internal {
         uint256 pot = f.holders - f.holdersPaid;
-        uint256 circ = supplyByChain[token][HUB_CHAIN];
+        uint256 circ;
         for (uint256 i = 0; i < chainLabels.length; i++) {
             circ += supplyByChain[token][chainLabels[i]];
         }
         if (circ == 0) return; // nobody holds yet — the pot keeps growing
 
         uint256 paid;
-        uint256 hubShare = (pot * supplyByChain[token][HUB_CHAIN]) / circ;
-        if (hubShare > 0) {
-            usd.transfer(address(distributor), hubShare);
-            distributor.drop(token, hubShare);
-            paid += hubShare;
-        }
         for (uint256 i = 0; i < chainLabels.length; i++) {
             uint32 ch = chainLabels[i];
             uint256 share = (pot * supplyByChain[token][ch]) / circ;
             if (share == 0) continue;
-            // The slice burns here and re-materializes in the spoke's
-            // distributor — the same burn/mint pattern as every payout.
-            usd.bridgeBurn(address(this), share);
-            // token id rides as bytes32 (wire convention)
-            messenger.send(ch, gateways[ch], abi.encode(OP_FEE_DROP, abi.encode(_b32(token), share)), 0);
             paid += share;
+            if (autoDrop[ch]) {
+                uint256 amount = share + pendingDrop[token][ch];
+                // token id rides as bytes32 (wire convention). A drop that
+                // cannot be shipped must not undo the trade that caused it:
+                // it falls back to waiting for a pull.
+                try messenger.send(ch, gateways[ch], abi.encode(OP_FEE_DROP, abi.encode(_b32(token), amount)), 0) {
+                    // the slice left the hub's books and re-materialized in
+                    // that chain's distributor — burn/mint, like every payout
+                    pendingDrop[token][ch] = 0;
+                    usd.bridgeBurn(address(this), amount);
+                    continue;
+                } catch {}
+            }
+            pendingDrop[token][ch] += share;
         }
+        if (paid == 0) return; // a pot of dust splits into nothing
         f.holdersPaid += paid; // rounding dust stays in the pot
         emit HoldersDistributed(token, paid);
     }
 
-    /// The dev claims their accrued share, paid out in oUSD on the chain
-    /// they claim from — like every other payout.
+    /// Someone on `srcChain` asked for that chain's waiting holder fees and
+    /// prepaid the reply. Anything not yet split is split first, so the
+    /// puller gets everything due. Nothing to send → no reply, no revert.
+    function _pull(uint32 srcChain, address token) internal {
+        FeeState storage f = feesOf[token];
+        if ((f.mode == FEE_HOLDERS || f.mode == FEE_SPLIT) && f.holders > f.holdersPaid) {
+            _distributeHolders(token, f);
+        }
+        uint256 amount = pendingDrop[token][srcChain];
+        if (amount == 0) {
+            // (an autoDrop chain was just served by the split above, if there was anything)
+            if (!autoDrop[srcChain]) emit Refused(OP_PULL_FEES, srcChain, _b32(token), bytes32(0), 0, R_NOTHING);
+            return;
+        }
+        pendingDrop[token][srcChain] = 0;
+        usd.bridgeBurn(address(this), amount);
+        messenger.send(srcChain, gateways[srcChain], abi.encode(OP_FEE_DROP, abi.encode(_b32(token), amount)), 0);
+        emit FeesPulled(token, srcChain, amount);
+    }
+
+    /// The dev claims their accrued share, paid out on the chain they claim
+    /// from — like every other payout. A claim by someone else, or with
+    /// nothing accrued, is refused: it carries no value to send home.
     function _claim(uint32 srcChain, address token, bytes32 claimer) internal {
-        require(metas[token].creator == claimer, "PAD: not the dev");
         FeeState storage f = feesOf[token];
         uint256 amount = f.dev - f.devClaimed;
-        require(amount > 0, "PAD: nothing to claim");
+        if (metas[token].creator != claimer || amount == 0) {
+            emit Refused(
+                OP_CLAIM,
+                srcChain,
+                _b32(token),
+                claimer,
+                0,
+                metas[token].creator != claimer ? R_NOT_DEV : R_NOTHING
+            );
+            return;
+        }
         f.devClaimed += amount;
         usd.bridgeBurn(address(this), amount);
         // claimer already wide — passthrough, no re-cast

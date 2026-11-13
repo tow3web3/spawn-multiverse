@@ -12,6 +12,15 @@ import {ICurveVenue} from "./ICurveVenue.sol";
 /// this contract only decides prices and amounts. That is what makes the
 /// venue swappable for a Raydium LaunchLab / Meteora DBC adapter without
 /// touching settlement or the gateways (see ICurveVenue).
+///
+/// ROUNDING IS ALWAYS AGAINST THE TRADER. Every trade computes the new
+/// reserve on the other side with a CEILING division, so `vBase × vTokens`
+/// never decreases. With `vTokens` never above its starting value (a sell
+/// can only return what a buy took out), that keeps `vBase ≥ V_BASE_0`: the
+/// curve can never owe more dollars than were paid in. Rounding the other
+/// way — as this contract did before v7 — let a 1-wei sell take a whole wei
+/// of oUSD and left the pad a wei short of its own fee pots, which is a
+/// revert on the message path the day someone tries to burn the last wei.
 contract InternalCurveVenue is ICurveVenue {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000e18;
     uint256 public constant CURVE_SUPPLY = 800_000_000e18;
@@ -31,6 +40,10 @@ contract InternalCurveVenue is ICurveVenue {
         pad = _pad;
     }
 
+    function _ceilDiv(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a == 0 ? 0 : (a - 1) / b + 1;
+    }
+
     function openMarket(address token) external onlyPad {
         require(_curves[token].vTokens == 0, "VENUE: market open");
         _curves[token] = Curve(V_BASE_0, V_TOKENS_0, 0, false);
@@ -46,7 +59,7 @@ contract InternalCurveVenue is ICurveVenue {
         require(usdIn > 0, "VENUE: zero buy");
 
         uint256 k = c.vBase * c.vTokens;
-        out = c.vTokens - k / (c.vBase + usdIn);
+        out = c.vTokens - _ceilDiv(k, c.vBase + usdIn);
         spend = usdIn;
 
         if (!c.ascended) {
@@ -82,7 +95,7 @@ contract InternalCurveVenue is ICurveVenue {
         require(tokensIn > 0, "VENUE: zero sell");
 
         uint256 k = c.vBase * c.vTokens;
-        usdOut = c.vBase - k / (c.vTokens + tokensIn);
+        usdOut = c.vBase - _ceilDiv(k, c.vTokens + tokensIn);
         require(usdOut > 0, "VENUE: dust");
         c.vBase -= usdOut;
         c.vTokens += tokensIn;

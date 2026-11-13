@@ -9,7 +9,10 @@
  * to land OP_SPAWN on the hub and for the replica to sync back, then:
  *   - `buyTokenUsdc` for $260 inside the FAIR GENESIS window — the $250 cap
  *     clamps it, and the $10 REFUND leg must come home as USDC;
- *   - sells half the bag — the PAYOUT leg must come home as USDC.
+ *   - sells half the bag — the PAYOUT leg must come home as USDC;
+ *   - pulls this chain's share of the holder fees home (`pullFees`, v7: the
+ *     hub books it and waits to be asked), claims it from the local pool and
+ *     unwraps it to USDC.
  * Expect minutes, not seconds.
  *
  * On the HUB chain the same sequence runs through the loopback: every step
@@ -152,6 +155,26 @@ async function main() {
     throw new Error('payout fell back to an oUSD claim — the vault should be liquid')
   }
 
+  // holder fees (v7): accrued on the hub, pulled to this chain by whoever
+  // wants them, claimed locally. The pull also settles what was not split
+  // yet, so it works whether or not the $2 trigger was crossed; on the hub
+  // chain it is a free local call.
+  const dist = await ethers.getContractAt('FeeDistributor', local ? me.localDist : me.dist)
+  const pullFee = await fee(gw.quotePull())
+  console.log(`pulling this chain's holder fees home — messaging fee ${ethers.formatEther(pullFee)} ETH…`)
+  await (await gw.pullFees(token, { value: pullFee })).wait()
+  const owed = await waitFor('holder fees in the local pool', async () => {
+    const w = await dist.withdrawable(rep, dev.address)
+    return w > 0n ? w : undefined
+  })
+  await (await dist.claim(rep)).wait()
+  const usdcPre = await usdc.balanceOf(dev.address)
+  await (await usd.unwrap(await usd.balanceOf(dev.address))).wait()
+  console.log(
+    `✓ holder fees: $${ethers.formatEther(owed)} claimed locally, ` +
+      `$${ethers.formatUnits((await usdc.balanceOf(dev.address)) - usdcPre, 6)} unwrapped to USDC`,
+  )
+
   console.log('hub spot price:', ethers.formatEther(await pad.spotPrice(token)))
   const hubTankAfter = await hubProvider.getBalance(hub.adapter)
   console.log(
@@ -160,8 +183,8 @@ async function main() {
   )
   console.log(
     local
-      ? '🎉 HUB-LOCAL SPAWN + USDC BUY + USDC PAYOUT — EVERY STEP IN ONE TRANSACTION, NO LAYERZERO MESSAGE'
-      : '🎉 CROSS-CHAIN SPAWN + USDC BUY + USDC PAYOUT OVER LIVE LAYERZERO — DONE',
+      ? '🎉 HUB-LOCAL SPAWN + USDC BUY + USDC PAYOUT + HOLDER FEES — EVERY STEP IN ONE TRANSACTION, NO LAYERZERO MESSAGE'
+      : '🎉 CROSS-CHAIN SPAWN + USDC BUY + USDC PAYOUT + HOLDER-FEE PULL OVER LIVE LAYERZERO — DONE',
   )
 }
 

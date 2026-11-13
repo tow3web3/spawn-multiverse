@@ -30,8 +30,8 @@ describe('Holder fee distribution (protocol v3)', () => {
     })
 
     it('splits drops pro-rata and follows balances across transfers', async () => {
-      await (await tok.bridgeMint(a.address, E(100))).wait()
-      await (await tok.bridgeMint(b.address, E(50))).wait()
+      await (await tok.bridgeMint(a.address, E(100_000))).wait()
+      await (await tok.bridgeMint(b.address, E(50_000))).wait()
 
       await (await dist.drop(tok.target, E(30))).wait()
       expect(await dist.withdrawable(tok.target, a.address)).to.be.closeTo(E(20), DUST)
@@ -39,7 +39,7 @@ describe('Holder fee distribution (protocol v3)', () => {
 
       // a sells/moves half their bag mid-stream: earned dividends stay put,
       // the NEXT drop follows the new balances
-      await (await tok.connect(a).transfer(b.address, E(50))).wait()
+      await (await tok.connect(a).transfer(b.address, E(50_000))).wait()
       expect(await dist.withdrawable(tok.target, a.address)).to.be.closeTo(E(20), DUST)
 
       await (await dist.drop(tok.target, E(30))).wait()
@@ -56,17 +56,22 @@ describe('Holder fee distribution (protocol v3)', () => {
 
     it('excluded protocol accounts earn nothing', async () => {
       await (await dist.exclude(c.address)).wait()
-      await (await tok.bridgeMint(a.address, E(100))).wait()
-      await (await tok.bridgeMint(c.address, E(900))).wait() // inventory, not a bag
+      await (await tok.bridgeMint(a.address, E(100_000))).wait()
+      await (await tok.bridgeMint(c.address, E(900_000))).wait() // inventory, not a bag
 
       await (await dist.drop(tok.target, E(10))).wait()
       expect(await dist.withdrawable(tok.target, a.address)).to.be.closeTo(E(10), DUST)
       expect(await dist.withdrawable(tok.target, c.address)).to.equal(0n)
     })
 
-    it('a drop with no holders waits for the first holder', async () => {
+    it('a drop with no holders waits for the first real holders (MIN_SHARES)', async () => {
       await (await dist.drop(tok.target, E(10))).wait()
       expect(await dist.pendingOf(tok.target)).to.equal(E(10))
+
+      // dust is not a holder base: below 1,000 tokens of shares the drop keeps waiting
+      await (await tok.bridgeMint(a.address, E(999))).wait()
+      expect(await dist.pendingOf(tok.target)).to.equal(E(10))
+      expect(await dist.withdrawable(tok.target, a.address)).to.equal(0n)
 
       await (await tok.bridgeMint(a.address, E(1))).wait()
       expect(await dist.pendingOf(tok.target)).to.equal(0n)
@@ -157,11 +162,11 @@ describe('Holder fee distribution (protocol v3)', () => {
   /* -------------------- over async LayerZero transport -------------------- */
 
   describe('over async LayerZero V2 transport', () => {
-    it('fee drops reach every chain; holders on two chains claim their pro-rata share locally', async () => {
+    it('the pot splits to where the supply lives: home ships at once, a remote chain pulls; both claim locally', async () => {
       const [, user1, user2] = await ethers.getSigners()
       const world = await deployWorldAsync()
       const A = world.chains[2] // base — the hub's own chain: its drop is a loopback
-      const B = world.chains[5] // optimism — its drop crosses as a packet
+      const B = world.chains[5] // optimism — its slice waits on the hub for a pull
 
       await (await A.gateway.connect(user1).spawnToken('OMNIYIELD', 'OMY', '{}', 0, 0)).wait()
       await world.deliverAll()
@@ -176,16 +181,25 @@ describe('Holder fee distribution (protocol v3)', () => {
       await world.deliverAll()
 
       // second buy tips the pot to $2: the hub splits it pro-rata to where
-      // the supply lives and OP_FEE_DROP packets fan out with the delivery
+      // the supply lives. Base's slice lands in its distributor by loopback;
+      // Optimism's is only BOOKED — no FEE_DROP packet leaves the hub (v7)
       await (await B.gateway.connect(user2).buyToken(token, E(100))).wait()
       await world.deliverAll()
 
       const repA = await ethers.getContractAt('SpawnToken', await A.gateway.replicaOf(token))
       const repB = await ethers.getContractAt('SpawnToken', await B.gateway.replicaOf(token))
       const wA = await A.dist.withdrawable(repA.target, user1.address)
+      const waiting = await world.pad.pendingDrop(token, B.label)
+      expect(wA + waiting).to.be.closeTo(E(2), DUST)
+      expect(wA).to.be.gt(waiting) // user1 bought first, cheaper — holds more supply
+      expect(await B.dist.withdrawable(repB.target, user2.address)).to.equal(0n)
+
+      // anyone on Optimism pulls that chain's slice home, prepaying the reply
+      await (await B.gateway.connect(user2).pullFees(token)).wait()
+      await world.deliverAll()
+      expect(await world.pad.pendingDrop(token, B.label)).to.equal(0n)
       const wB = await B.dist.withdrawable(repB.target, user2.address)
-      expect(wA + wB).to.be.closeTo(E(2), DUST)
-      expect(wA).to.be.gt(wB) // user1 bought first, cheaper — holds more supply
+      expect(wB).to.be.closeTo(waiting, DUST)
 
       // claiming is purely local: no new packets, oUSD lands immediately
       expect(await world.endpoint.pending()).to.equal(0n)
