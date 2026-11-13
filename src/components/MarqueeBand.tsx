@@ -36,15 +36,24 @@ function Band({
 }
 
 export function MarqueeBand() {
-  const { word, count } = useChainSet()
-  const phrase = [
-    'ONE MEME',
-    `${word} CHAIN${count === 1 ? '' : 'S'}`,
-    'ONE GLOBAL SUPPLY',
-    'EVERYWHERE AT ONCE',
-    'BLOCK 0 DOES NOT EXIST',
-    'SPAWN IT',
-  ]
+  const { word, count, single, names } = useChainSet()
+  const phrase = single
+    ? [
+        'ONE MEME',
+        names.toUpperCase(),
+        'ONE GLOBAL SUPPLY',
+        'PRICE-PROTECTED TRADES',
+        'BLOCK 0 DOES NOT EXIST',
+        'SPAWN IT',
+      ]
+    : [
+        'ONE MEME',
+        `${word} CHAIN${count === 1 ? '' : 'S'}`,
+        'ONE GLOBAL SUPPLY',
+        'EVERYWHERE AT ONCE',
+        'BLOCK 0 DOES NOT EXIST',
+        'SPAWN IT',
+      ]
   return (
     <div className="relative my-10 h-24 overflow-visible">
       <div className="absolute inset-x-[-2%] top-6 rotate-[1.2deg]">

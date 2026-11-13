@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useStore, shortAddr } from '../store'
 import { fmtChange, fmtPrice, fmtTokens, fmtUsd } from '../lib/format'
 import { CHAINS } from '../lib/chains'
-import { useChainSet } from '../lib/liveChains'
+import { useChainSet, useDollar } from '../lib/liveChains'
 import { CreatureArt } from './CreatureCard'
 import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 
@@ -17,6 +17,8 @@ export function PortfolioPage({
 }) {
   const { creatures, wallet, connect, onchain } = useStore()
   const chainSet = useChainSet()
+  const dollar = useDollar()
+  const sym = dollar.symbol
   const [busy, setBusy] = useState(false)
   const [unwrapping, setUnwrapping] = useState<string | null>(null)
   const [cashMsg, setCashMsg] = useState<{ ok: boolean; text: string } | null>(null)
@@ -38,11 +40,14 @@ export function PortfolioPage({
       const got = await onchain.unwrap(chainId)
       setCashMsg(
         got > 0
-          ? { ok: true, text: `${fmtUsd(got)} USDC BACK IN YOUR WALLET ON ${chainId.toUpperCase()} ✓` }
-          : { ok: false, text: `${chainId.toUpperCase()}'S VAULT HAS NO USDC TO PAY RIGHT NOW — YOUR CLAIM STAYS VALID.` },
+          ? { ok: true, text: `${fmtUsd(got)} ${sym} BACK IN YOUR WALLET ON ${chainId.toUpperCase()} ✓` }
+          : { ok: false, text: `${chainId.toUpperCase()}'S VAULT HAS NO ${sym} TO PAY RIGHT NOW — YOUR CLAIM STAYS VALID.` },
       )
-    } catch {
-      setCashMsg({ ok: false, text: 'UNWRAP FAILED — NOTHING MOVED. TRY AGAIN.' })
+    } catch (e) {
+      setCashMsg({
+        ok: false,
+        text: `UNWRAP FAILED — NOTHING MOVED. ${e instanceof Error ? e.message.toUpperCase() : 'TRY AGAIN.'}`,
+      })
     } finally {
       setUnwrapping(null)
     }
@@ -85,8 +90,10 @@ export function PortfolioPage({
         YOUR BAGS<span className="text-grape">.</span>
       </h1>
       <p className="mt-2 max-w-lg font-mono text-[11px] font-bold leading-relaxed opacity-55">
-        EVERY TOKEN YOU TRADED THROUGH SPAWN!, ACROSS ALL {chainSet.word} CHAIN
-        {chainSet.count === 1 ? '' : 'S'}, IN ONE PLACE.
+        EVERY TOKEN YOU TRADED THROUGH SPAWN!
+        {chainSet.single ? ` ON ${chainSet.names.toUpperCase()}` : `, ACROSS ALL ${chainSet.word} CHAINS`}, IN
+        ONE PLACE.
+        {onchain?.universe ? ` ${onchain.universe.name} UNIVERSE ONLY — OTHER UNIVERSES HAVE THEIR OWN BAGS.` : ''}
       </p>
 
       {!wallet ? (
@@ -140,14 +147,18 @@ export function PortfolioPage({
                         {c.label}
                         {c.local ? ' ⚡' : ''}
                       </span>
-                      <span className="inline-flex items-center gap-1.5 font-mono text-[12px] font-bold">
-                        <CoinLogo id="usdc" size={16} />
-                        {fmtUsd(c.usdc)} USDC
+                      <span
+                        className="inline-flex items-center gap-1.5 font-mono text-[12px] font-bold"
+                        data-testid={`cash-${c.id}`}
+                      >
+                        <CoinLogo id={dollar.coin} size={16} />
+                        {fmtUsd(c.usdc)} {sym}
                       </span>
                       {c.ousd >= 0.01 && (
                         <span
                           className="font-mono text-[11px] font-bold opacity-60"
-                          title="oUSD: a 1:1 claim on this chain's USDC vault. It comes from holder rewards, or from a payout made while the vault was short."
+                          title={`oUSD: a 1:1 claim on this chain's ${sym} vault. It comes from holder rewards, or from a payout made while the vault was short.`}
+                          data-testid={`ousd-${c.id}`}
                         >
                           + {fmtUsd(c.ousd)} oUSD
                         </span>
@@ -165,12 +176,13 @@ export function PortfolioPage({
                           disabled={unwrapping !== null || !canUnwrap}
                           title={
                             canUnwrap
-                              ? 'Turn your oUSD claim back into USDC'
-                              : "This chain's vault has no USDC right now — the claim stays valid until liquidity returns"
+                              ? `Turn your oUSD claim back into ${sym}`
+                              : `This chain's vault has no ${sym} right now — the claim stays valid until liquidity returns`
                           }
+                          data-testid={`unwrap-${c.id}`}
                           className="ml-auto rounded-lg border-2 border-ink bg-lime px-3 py-1.5 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
                         >
-                          {unwrapping === c.id ? '✳ UNWRAPPING…' : canUnwrap ? 'UNWRAP → USDC' : 'VAULT SHORT'}
+                          {unwrapping === c.id ? '✳ UNWRAPPING…' : canUnwrap ? `UNWRAP → ${sym}` : 'VAULT SHORT'}
                         </button>
                       )}
                     </div>
@@ -183,8 +195,9 @@ export function PortfolioPage({
                 </p>
               )}
               <p className="mt-2 font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-40">
-                A BUY SPENDS THE DOLLARS OF THE CHAIN YOU BUY FROM. SELLS PAY USDC ON THE CHAIN
-                YOU SELL FROM.
+                {chainSet.single
+                  ? `A BUY SPENDS YOUR ${sym}${onchain?.universe?.id === 'bnb' ? ' (BINANCE-PEG)' : ''}; SELLS PAY ${sym} BACK, OR AN oUSD CLAIM WHEN THE VAULT IS SHORT.`
+                  : `A BUY SPENDS THE DOLLARS OF THE CHAIN YOU BUY FROM. SELLS PAY ${sym} ON THE CHAIN YOU SELL FROM.`}
               </p>
             </div>
           )}

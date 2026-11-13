@@ -6,14 +6,17 @@ import { useId } from 'react'
  * own published mark:
  *  - Base: "The Square" (base/brand-kit, 2025 identity, #0000FF)
  *  - Arbitrum, Optimism: the official marks as redrawn 1:1 by web3icons
- *  - Ethereum, BNB, USDC, Solana: the marks as distributed by
- *    cryptocurrency-icons (Solana in its brand gradient)
+ *  - Ethereum, BNB, USDC, USDT, Solana: the marks as distributed by
+ *    cryptocurrency-icons (Solana in its brand gradient; Tether in its
+ *    brand green #50AF95, tether.to/branding)
+ *  - Robinhood: the feather as published by simple-icons (source:
+ *    press.robinhood.com), in the brand's neon #CCFF00 on black
  * Every mark carries its name (role="img" + <title>), fills its box, and is
  * drawn to stay legible from 14px up on both the cream and the dark surface.
  */
 
-export type ChainLogoId = 'solana' | 'ethereum' | 'base' | 'bnb' | 'arbitrum' | 'optimism'
-export type CoinLogoId = 'usdc' | 'eth' | 'bnb' | 'sol'
+export type ChainLogoId = 'solana' | 'ethereum' | 'base' | 'bnb' | 'arbitrum' | 'optimism' | 'robinhood'
+export type CoinLogoId = 'usdc' | 'usdt' | 'eth' | 'bnb' | 'sol'
 
 export const CHAIN_NAME: Record<ChainLogoId, string> = {
   solana: 'Solana',
@@ -22,9 +25,10 @@ export const CHAIN_NAME: Record<ChainLogoId, string> = {
   bnb: 'BNB Chain',
   arbitrum: 'Arbitrum',
   optimism: 'Optimism',
+  robinhood: 'Robinhood Chain',
 }
 
-const COIN_NAME: Record<CoinLogoId, string> = { usdc: 'USDC', eth: 'ETH', bnb: 'BNB', sol: 'SOL' }
+const COIN_NAME: Record<CoinLogoId, string> = { usdc: 'USDC', usdt: 'USDT', eth: 'ETH', bnb: 'BNB', sol: 'SOL' }
 
 interface MarkProps {
   size: number
@@ -177,6 +181,34 @@ function UsdcMark(p: MarkProps) {
   )
 }
 
+/** Tether's ₮ on its green disc. */
+function UsdtMark(p: MarkProps) {
+  return (
+    <Svg {...p} viewBox="0 0 32 32">
+      <circle cx="16" cy="16" r="16" fill="#50AF95" />
+      <path
+        fill="#FFF"
+        d="M17.922 17.383v-.002c-.11.008-.677.042-1.942.042-1.01 0-1.721-.03-1.971-.042v.003c-3.888-.171-6.79-.848-6.79-1.658 0-.809 2.902-1.486 6.79-1.66v2.644c.254.018.982.061 1.988.061 1.207 0 1.812-.05 1.925-.06v-2.643c3.88.173 6.775.85 6.775 1.658 0 .81-2.895 1.485-6.775 1.657m0-3.59v-2.366h5.414V7.819H8.595v3.608h5.414v2.365c-4.4.202-7.709 1.074-7.709 2.118 0 1.044 3.309 1.915 7.709 2.118v7.582h3.913v-7.584c4.393-.202 7.694-1.073 7.694-2.116 0-1.043-3.301-1.914-7.694-2.117"
+      />
+    </Svg>
+  )
+}
+
+/** Robinhood's feather, neon on black (the brand's own pairing). The faint
+ * edge keeps the disc readable on the dark surface. */
+function RobinhoodMark(p: MarkProps) {
+  return (
+    <Svg {...p} viewBox="0 0 32 32">
+      <circle cx="16" cy="16" r="15.4" fill="#000" stroke="#fff" strokeOpacity=".3" strokeWidth="1.2" />
+      <path
+        fill="#CCFF00"
+        transform="translate(6.1 5.2) scale(0.9)"
+        d="M2.84 24h.53c.096 0 .192-.048.224-.128C7.591 13.696 11.94 8.656 14.67 5.638c.112-.128.064-.225-.096-.225h-4.88a.55.55 0 0 0-.45.225L5.746 9.972c-.514.642-.642 1.236-.642 2.086v4.43c-1.14 3.194-1.862 5.361-2.392 7.32-.032.125.016.192.129.192M20.447.646c-.754-.802-4.157-.834-5.73-.224a3 3 0 0 0-.786.465 41 41 0 0 0-3.323 3.178c-.112.113-.064.225.097.225h5.409c.497 0 .786.289.786.786v6.1c0 .16.128.208.225.064l3.258-4.254c.53-.69.69-.898.835-1.861.192-1.413.08-3.58-.77-4.479m-6.982 16.18 2.231-3.676a.7.7 0 0 0 .064-.29V6.73c0-.16-.112-.225-.224-.097-3.355 3.74-5.971 7.672-8.395 12.407-.06.12.016.225.16.177l5.009-1.54c.565-.174.882-.402 1.155-.852"
+      />
+    </Svg>
+  )
+}
+
 const CHAIN_MARK: Record<ChainLogoId, (p: MarkProps) => React.ReactElement> = {
   solana: SolanaMark,
   ethereum: EthereumMark,
@@ -184,10 +216,12 @@ const CHAIN_MARK: Record<ChainLogoId, (p: MarkProps) => React.ReactElement> = {
   bnb: BnbMark,
   arbitrum: ArbitrumMark,
   optimism: OptimismMark,
+  robinhood: RobinhoodMark,
 }
 
 const COIN_MARK: Record<CoinLogoId, (p: MarkProps) => React.ReactElement> = {
   usdc: UsdcMark,
+  usdt: UsdtMark,
   eth: EthereumMark,
   bnb: BnbMark,
   sol: SolanaMark,
@@ -202,15 +236,17 @@ export function ChainLogo({ id, size = 18, className }: { id: string; size?: num
   return <Mark size={size} name={CHAIN_NAME[id]} className={className} />
 }
 
-/** A currency's real logo (USDC, and the gas coins). */
+/** A currency's real logo (the dollars: USDC, USDT; and the gas coins). */
 export function CoinLogo({ id, size = 14, className }: { id: CoinLogoId; size?: number; className?: string }) {
   const Mark = COIN_MARK[id]
   return <Mark size={size} name={COIN_NAME[id]} className={className} />
 }
 
-/** The coin behind a native-currency symbol ("ETH", "tBNB", "SOL"), if we draw it. */
+/** The coin behind a currency symbol ("ETH", "tBNB", "SOL", "USDC", "USDT"), if we draw it. */
 export function coinOf(symbol: string | undefined): CoinLogoId | undefined {
   const s = (symbol ?? '').toUpperCase()
+  if (s === 'USDC') return 'usdc'
+  if (s === 'USDT') return 'usdt'
   if (s === 'ETH') return 'eth'
   if (s === 'BNB' || s === 'TBNB') return 'bnb'
   if (s === 'SOL') return 'sol'
@@ -258,4 +294,5 @@ export const CHAIN_LOGO_LABELS: { id: ChainLogoId; label: string }[] = [
   { id: 'bnb', label: 'BNB' },
   { id: 'arbitrum', label: 'ARBITRUM' },
   { id: 'optimism', label: 'OPTIMISM' },
+  { id: 'robinhood', label: 'ROBINHOOD' },
 ]

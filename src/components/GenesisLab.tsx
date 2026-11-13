@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks, type FeeMode } from '../store'
-import { useChainSet } from '../lib/liveChains'
+import { useChainSet, useDollar } from '../lib/liveChains'
 import { fmtNum, fmtPrice } from '../lib/format'
 import { cleanLinks, LINK_META } from '../lib/links'
 import { processImage, uploadTokenImage } from '../lib/tokenImage'
@@ -21,6 +21,8 @@ export function GenesisLab({
   const chainSet = useChainSet()
   const liveChains = chainSet.live
   const info = onchain?.chainInfo
+  const dollar = useDollar()
+  const universe = onchain?.universe
   const [name, setName] = useState('')
   const [ticker, setTicker] = useState('')
   const [image, setImage] = useState<string | null>(null)
@@ -209,7 +211,7 @@ export function GenesisLab({
             <p className="pb-1 text-right font-mono text-[10px] font-bold tracking-wide opacity-70">
               STEP 01 / 01
               <br />
-              {chainSet.count} CHAINS = 1 LAUNCH
+              {chainSet.single ? `1 CHAIN · ${chainSet.names.toUpperCase()}` : `${chainSet.count} CHAINS = 1 LAUNCH`}
             </p>
           </div>
           <button
@@ -286,8 +288,8 @@ export function GenesisLab({
                   {image ? 'FACE LOCKED IN — CLICK TO SWAP' : 'UPLOAD AN IMAGE (PNG / JPG / WEBP)'}
                 </span>
                 <span className="mt-1 block font-mono text-[10px] leading-relaxed text-white/40">
-                  Click or drop it here. Square works best — this face follows your token onto
-                  all {chainSet.lower} chains.
+                  Click or drop it here. Square works best — this face follows your token
+                  {chainSet.single ? ` onto ${chainSet.names}` : ` onto all ${chainSet.lower} chains`}.
                   {imageMustBeHosted
                     ? ' Every token here wears its real image: it is shrunk in your browser and hosted by SPAWN! when you launch, so every visitor sees it — and it cannot be changed afterwards.'
                     : onchain
@@ -350,13 +352,15 @@ export function GenesisLab({
               supply per chain. No supply games.
             </p>
 
-            <p className={`${label} mt-7`}>05 — ALL CHAINS SPAWN TOGETHER</p>
+            <p className={`${label} mt-7`}>
+              05 — {chainSet.single ? `BORN ON ${chainSet.names.toUpperCase()}` : 'ALL CHAINS SPAWN TOGETHER'}
+            </p>
             <div className="mt-3 flex items-center justify-between rounded-xl border-3 border-white/20 bg-void px-4 py-3">
               <div className="flex flex-wrap gap-1.5">
                 {liveChains.map((ch) => (
                   <ChainChip key={ch.id} id={ch.id} size={30} />
                 ))}
-                {/* the rest of the six-chain design: shown, greyed, not promised */}
+                {/* chains announced for this universe: shown, greyed, not promised */}
                 {chainSet.soon.map((ch) => (
                   <ChainChip key={ch.id} id={ch.id} size={30} dim />
                 ))}
@@ -365,6 +369,17 @@ export function GenesisLab({
                 {liveChains.length} / {liveChains.length + chainSet.soon.length} ACTIVATED ✓
               </span>
             </div>
+            {/* which universe the token is born in — it will exist nowhere else */}
+            {universe && (
+              <p
+                className="mt-2 rounded-lg border-2 border-tang/60 bg-tang/10 px-3 py-2 font-mono text-[10px] leading-relaxed text-tang"
+                data-testid="lab-universe"
+              >
+                ◉ This token is born in the <span className="font-bold">{universe.name} UNIVERSE</span> (
+                {universe.line}). It will exist only there — not in the other universes, which have
+                their own tokens and their own dollar.
+              </p>
+            )}
             {chainSet.soon.length > 0 && (
               <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
                 Live on this deployment: {chainSet.names}. Coming:{' '}
@@ -372,12 +387,20 @@ export function GenesisLab({
                 there until they are switched on.
               </p>
             )}
-            <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
-              💡 You pay the launch on <span className="text-lime">ONE chain only</span> — the
-              one you launch from, with its gas token. SPAWN! deploys natively to
-              {chainSet.count > 2 ? ` the other ${chainSet.count - 1}` : ' the rest'}. No{' '}
-              {chainSet.count} wallets, no {chainSet.count} gas tokens.
-            </p>
+            {chainSet.single ? (
+              <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
+                💡 One chain, one transaction: the launch lands on {chainSet.names} in the
+                block it is mined, with no message to pay for.
+                {universe?.id === 'ethereum' ? ' It pays Ethereum gas.' : ''}
+              </p>
+            ) : (
+              <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
+                💡 You pay the launch on <span className="text-lime">ONE chain only</span> — the
+                one you launch from, with its gas token. SPAWN! deploys natively to
+                {chainSet.count > 2 ? ` the other ${chainSet.count - 1}` : ' the rest'}. No{' '}
+                {chainSet.count} wallets, no {chainSet.count} gas tokens.
+              </p>
+            )}
 
             {/* on-chain: where the launch is signed from, and what it costs */}
             {onchain && from && (
@@ -407,7 +430,9 @@ export function GenesisLab({
                   {fromInstant
                     ? onchain.network === 'local'
                       ? 'Local devnet: the launch lands in one transaction.'
-                      : `${from.label} is the hub chain: your token exists there in one transaction, and reaches the other chains a minute or two later.`
+                      : chainSet.single
+                        ? `${from.label} is the only chain of this universe: your token exists in one transaction.`
+                        : `${from.label} is the hub chain: your token exists there in one transaction, and reaches the other chains a minute or two later.`
                     : `From ${from.label} the launch crosses LayerZero to the hub first: allow 1–3 minutes before it appears.`}{' '}
                   <span className="text-lime">
                     {onchain.sponsored ? (
@@ -461,15 +486,17 @@ export function GenesisLab({
               ))}
             </div>
             <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
-              Locked at launch, forever. Fees from all {chainSet.lower} chains land in one
-              global pot — one market, one pot.
+              Locked at launch, forever.{' '}
+              {chainSet.single
+                ? 'Every fee lands in one pot — one market, one pot.'
+                : `Fees from all ${chainSet.lower} chains land in one global pot — one market, one pot.`}
             </p>
 
             <p className={`${label} mt-7`}>07 — SNIPE YOUR OWN SPAWN (OPTIONAL)</p>
             <div className="mt-3 flex items-center gap-3 rounded-xl border-3 border-white/20 bg-void px-4 py-3">
               <span className="inline-flex items-center gap-1.5 font-mono text-[13px] font-bold text-white/50">
-                {/* on-chain the dev buy is paid in USDC; the simulation's dollars are not */}
-                {onchain && <CoinLogo id="usdc" size={16} />}
+                {/* on-chain the dev buy is paid in the universe's dollar; the simulation's are not */}
+                {onchain && <CoinLogo id={dollar.coin} size={16} />}
                 DEV BUY $
               </span>
               <input
@@ -492,7 +519,7 @@ export function GenesisLab({
               (routed like your fees) with a $250 cap per wallet. Your dev buy rides inside the
               spawn itself and is the one disclosed exemption.
               {onchain && from
-                ? ` It is paid in USDC from your ${from.label} balance${
+                ? ` It is paid in ${dollar.symbol} from your ${from.label} balance${
                     fromInfo && wallet ? ` ($${Math.max(fromInfo.usdc, fromInfo.ousd).toFixed(2)} available)` : ''
                   }, approved for the exact amount.`
                 : ''}
@@ -501,13 +528,18 @@ export function GenesisLab({
             <button
               onClick={() => void submit()}
               disabled={!ready || busy}
+              data-testid="spawn-button"
               className="mt-7 w-full rounded-xl border-3 border-white/25 bg-void px-6 py-4 font-mono text-[13px] font-bold tracking-wide text-white shadow-[6px_6px_0_0_#c9f24b] transition hover:-translate-y-1 hover:shadow-[9px_9px_0_0_#c9f24b] active:translate-y-0 active:shadow-[6px_6px_0_0_#c9f24b] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
             >
               {hosting
                 ? '✳ HOSTING THE FACE…'
                 : busy
-                  ? '✳ SPAWNING ACROSS THE MULTIVERSE…'
-                  : '✳ SPAWN ACROSS THE MULTIVERSE ↗'}
+                  ? chainSet.single
+                    ? `✳ SPAWNING ON ${chainSet.names.toUpperCase()}…`
+                    : '✳ SPAWNING ACROSS THE MULTIVERSE…'
+                  : chainSet.single
+                    ? `✳ SPAWN ON ${chainSet.names.toUpperCase()} ↗`
+                    : '✳ SPAWN ACROSS THE MULTIVERSE ↗'}
             </button>
             {/* why the button is closed, said next to it */}
             {!ready && !busy && (
@@ -551,7 +583,7 @@ export function GenesisLab({
                 : !onchain
                   ? 'Simulation — demo money only, no transaction is submitted.'
                   : onchain.network === 'mainnet'
-                    ? 'MAINNET — this submits a real transaction and spends real USDC and gas. Unaudited contracts: only what you can lose.'
+                    ? `${universe ? `${universe.name} UNIVERSE` : 'MAINNET'} — this submits a real transaction and spends real ${dollar.symbol}${universe?.id === 'bnb' ? ' (Binance-Peg)' : ''} and ${universe?.id === 'ethereum' ? 'Ethereum L1 gas' : 'gas'}. Unaudited contracts: only what you can lose.`
                     : onchain.network === 'testnet'
                       ? 'Public testnet — real transactions, play money.'
                       : 'Local devnet — real transactions against your own node, play money.'}
@@ -612,7 +644,7 @@ export function GenesisLab({
                 <div className="mt-2 flex items-center justify-between gap-2">
                   <ChainDots size="sm" />
                   <p className="font-mono text-[10px] font-bold tracking-wide opacity-50">
-                    ↗ {chainSet.count} NATIVE DEPLOYMENTS · 1 TOTAL SUPPLY
+                    ↗ {chainSet.count} NATIVE DEPLOYMENT{chainSet.count === 1 ? '' : 'S'} · 1 TOTAL SUPPLY
                   </p>
                 </div>
               </div>
@@ -625,7 +657,9 @@ export function GenesisLab({
               <p>
                 GLOBAL GENESIS:{' '}
                 {onchain
-                  ? 'ONE TRANSACTION, REPLICAS FOLLOW BY MESSAGE'
+                  ? chainSet.single
+                    ? 'ONE TRANSACTION, ONE CHAIN'
+                    : 'ONE TRANSACTION, REPLICAS FOLLOW BY MESSAGE'
                   : 'SIMULATED, NOT ATOMIC'}
               </p>
             </div>

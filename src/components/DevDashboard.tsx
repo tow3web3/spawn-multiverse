@@ -71,8 +71,11 @@ export function DevDashboard({
         DEV ZONE<span className="text-tang">.</span>
       </h1>
       <p className="mt-2 max-w-xl font-mono text-[11px] font-bold leading-relaxed opacity-55">
-        YOUR LAUNCHES, YOUR FEE STREAMS, YOUR CLAIMS. REMEMBER: YOU LAUNCHED FROM ONE CHAIN
-        WITH ONE GAS TOKEN — SPAWN! DEPLOYED TO ALL {chainSet.word}.
+        YOUR LAUNCHES, YOUR FEE STREAMS, YOUR CLAIMS.{' '}
+        {chainSet.single
+          ? `EVERYTHING HERE LIVES ON ${chainSet.names.toUpperCase()}${onchain?.universe ? ` — THE ${onchain.universe.name} UNIVERSE` : ''}.`
+          : `REMEMBER: YOU LAUNCHED FROM ONE CHAIN WITH ONE GAS TOKEN — SPAWN! DEPLOYED TO ALL ${chainSet.word}.`}
+        {onchain?.universe && !chainSet.single ? ` ${onchain.universe.name} UNIVERSE ONLY.` : ''}
       </p>
 
       {!wallet ? (
@@ -189,6 +192,7 @@ export function DevDashboard({
                         <button
                           onClick={() => void doClaim(c.num)}
                           disabled={busyNum !== null || claimable <= 0.005 || !claimFees}
+                          data-testid={`claim-dev-${c.num}`}
                           className="rounded-xl border-3 border-ink bg-lime px-5 py-2.5 font-mono text-[11px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {busyNum === c.num ? '✳ CLAIMING…' : `CLAIM ${fmtUsd(claimable)} ↓`}
@@ -219,9 +223,10 @@ export function DevDashboard({
 
           {mode === 'chain' && (
             <p className="mt-4 text-center font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-45">
-              A CLAIM IS SENT FROM THE FIRST CHAIN YOUR WALLET HAS GAS ON (THE HUB CHAIN FIRST: IT
-              IS INSTANT) AND PAYS OUT THERE IN USDC.
-              {onchain?.sponsored
+              {chainSet.single
+                ? `A CLAIM IS ONE TRANSACTION ON ${chainSet.names.toUpperCase()} AND PAYS OUT THERE IN ${onchain?.dollar.symbol ?? 'USDC'}.`
+                : `A CLAIM IS SENT FROM THE FIRST CHAIN YOUR WALLET HAS GAS ON (THE HUB CHAIN FIRST: IT IS INSTANT) AND PAYS OUT THERE IN ${onchain?.dollar.symbol ?? 'USDC'}.`}
+              {onchain?.sponsored || chainSet.single
                 ? ''
                 : ' FROM ANOTHER CHAIN IT CROSSES LAYERZERO — A FEW MINUTES AND A NETWORK FEE.'}
             </p>

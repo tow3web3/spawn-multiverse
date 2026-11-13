@@ -11,7 +11,7 @@ import {
   type FeeMode,
 } from '../store'
 import { CHAINS } from '../lib/chains'
-import { useChainSet } from '../lib/liveChains'
+import { useChainSet, useDollar } from '../lib/liveChains'
 import { LINK_META, linkHref } from '../lib/links'
 import {
   creatureNum,
@@ -30,6 +30,8 @@ import { PriceChart } from './PriceChart'
 
 const QUICK_USD = [10, 50, 100]
 const QUICK_PCT = [25, 50, 75, 100]
+/** Price tolerances offered for a protected trade, in bps. */
+const QUICK_BPS = [50, 100, 200, 500]
 
 export const FEE_LABEL: Record<FeeMode, string> = {
   holders: '💚 100% TO HOLDERS',
@@ -52,6 +54,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   const chainSet = useChainSet()
   const liveChains = chainSet.live
   const info = onchain?.chainInfo
+  const dollar = useDollar()
+  const universe = onchain?.universe
   useEffect(() => {
     if (!liveChains.length || liveChains.some((c) => c.id === chain)) return
     // start from the hub chain's own gateway when there is one: it is instant
@@ -60,8 +64,9 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   }, [onchain?.chains?.join(), chain])
   const [usdStr, setUsdStr] = useState('50')
   const [pct, setPct] = useState(50)
-  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string; retry?: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
+  const [customBps, setCustomBps] = useState('')
   const [claimBusy, setClaimBusy] = useState(false)
   const [claimedMsg, setClaimedMsg] = useState<string | null>(null)
   /** Which holder-fee side action is running: `pull:<chain>` / `park:<chain>`. */
@@ -70,6 +75,10 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
   useEffect(() => {
     window.scrollTo(0, 0)
+    // another token: the last trade's verdict does not belong to it
+    setMsg(null)
+    setSideMsg(null)
+    setClaimedMsg(null)
   }, [num])
 
   // One ticking clock, for the FAIR GENESIS countdown & live tax readout.
@@ -93,6 +102,22 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [getQuote, num, side, amount, c?.price],
   )
+  // On-chain: what the hub will do with it, by its own arithmetic — fee,
+  // FAIR GENESIS tax and cap included — and the minimum a protected trade
+  // insists on. Re-done whenever the market, the chain or the tolerance moves.
+  const slippageBps = onchain?.slippage?.bps ?? 200
+  const exp = useMemo(
+    () => (onchain?.expect ? onchain.expect(num, side, amount, chain) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [onchain?.expect, num, side, amount, chain, c?.price, slippageBps, wallet?.balance],
+  )
+  /** This token cannot be traded on the selected chain yet (v7.1: its SYNC
+   * is still crossing, or failed and waits for the operator). */
+  const unavailableHere = onchain?.unavailable?.[num]?.[chain]
+  /** FAIR GENESIS: this wallet's window cap is used up — a buy would put
+   * nothing to work, so it is closed and explained instead of signed. */
+  const capUsedUp =
+    side === 'buy' && !!wallet && !!exp && amount > 0 && (exp.spend ?? 1) <= 0 && (exp.clamped ?? 0) > 0
 
   if (!c || !market) {
     return (
@@ -166,7 +191,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
             : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}`
         setMsg({ ok: true, text: r.note ? `${head} · ${r.note}` : head })
       } else {
-        setMsg({ ok: false, text: r.reason.toUpperCase() })
+        // the protection doing its job: nothing moved, offer to go again
+        setMsg({ ok: false, text: r.reason.toUpperCase(), retry: r.code === 'min-out' })
       }
     } catch {
       setMsg({ ok: false, text: 'TRANSACTION FAILED — IS THE CHAIN RUNNING?' })
@@ -269,6 +295,21 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               {fgActive && (
                 <span className="rounded-full border-2 border-ink bg-lime px-2.5 py-1 font-mono text-[9px] font-bold shadow-brutal-sm tabular-nums">
                   🛡 FAIR GENESIS {fgCountdown}
+                </span>
+              )}
+              {/* a token lives in ONE universe: say which, where its name is */}
+              {universe && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full border-2 border-ink bg-tang px-2.5 py-1 font-mono text-[9px] font-bold shadow-brutal-sm"
+                  title={`This token exists only in the ${universe.name} universe (${universe.line}). It does not exist in the other universes.`}
+                  data-testid="token-universe"
+                >
+                  <span className="flex items-center -space-x-1">
+                    {liveChains.map((ch) => (
+                      <ChainLogo key={ch.id} id={ch.id} size={11} />
+                    ))}
+                  </span>
+                  ◉ {universe.name} UNIVERSE ONLY
                 </span>
               )}
             </div>
@@ -391,7 +432,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                           {claimedMsg ?? fmtUsd(claimableNow)}
                         </p>
                         <p className="font-mono text-[8px] font-bold tracking-wide opacity-45">
-                          PAID IN oUSD — SPEND IT AS-IS OR UNWRAP IT TO USDC IN YOUR PORTFOLIO
+                          PAID IN oUSD — SPEND IT AS-IS OR UNWRAP IT TO {dollar.symbol} IN YOUR PORTFOLIO
                         </p>
                       </div>
                       {claimableNow > 0.005 && (
@@ -406,6 +447,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                               .finally(() => setClaimBusy(false))
                           }}
                           disabled={claimBusy}
+                          data-testid="claim-rewards"
                           className="rounded-xl border-3 border-ink bg-lime px-5 py-2.5 font-mono text-[11px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           {claimBusy ? '✳ CLAIMING…' : 'CLAIM ↓'}
@@ -590,7 +632,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 className="text-right font-mono text-[10px] font-bold opacity-55"
                 title={
                   ci
-                    ? `${fmtUsd(ci.usdc)} USDC + ${fmtUsd(ci.ousd)} oUSD on ${chain.toUpperCase()} · ${fmtUsd(wallet?.balance ?? 0)} across all chains`
+                    ? `${fmtUsd(ci.usdc)} ${dollar.symbol} + ${fmtUsd(ci.ousd)} oUSD on ${chain.toUpperCase()}${chainSet.single ? '' : ` · ${fmtUsd(wallet?.balance ?? 0)} across all chains`}`
                     : undefined
                 }
               >
@@ -602,38 +644,61 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               </span>
             </div>
 
-            <p className={`${label} mt-3`}>FROM WHICH CHAIN?</p>
+            <p className={`${label} mt-3`}>{chainSet.single ? 'ON' : 'FROM WHICH CHAIN?'}</p>
             <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {liveChains.map((ch) => (
-                <button
-                  key={ch.id}
-                  onClick={() => setChain(ch.id)}
-                  title={info?.[ch.id]?.local ? `${ch.label} — instant, no cross-chain wait` : ch.label}
-                  aria-pressed={chain === ch.id}
-                  className={`group inline-flex items-center gap-1.5 rounded-lg border-2 py-1 pl-1.5 pr-2.5 font-mono text-[10px] font-bold transition ${
-                    chain === ch.id
-                      ? 'border-ink shadow-brutal-sm -translate-y-0.5'
-                      : 'border-ink/30 bg-white hover:border-ink'
-                  }`}
-                  style={chain === ch.id ? { background: ch.color } : undefined}
-                >
-                  {/* the logo never fades: it is what identifies the chain */}
-                  <ChainLogo id={ch.id} size={18} />
-                  <span className={chain === ch.id ? '' : 'opacity-50 group-hover:opacity-100'}>
-                    {ch.label}
-                    {info?.[ch.id]?.local ? ' ⚡' : ''}
-                  </span>
-                </button>
-              ))}
+              {liveChains.map((ch) => {
+                const na = onchain?.unavailable?.[num]?.[ch.id]
+                return (
+                  <button
+                    key={ch.id}
+                    onClick={() => setChain(ch.id)}
+                    title={
+                      na
+                        ? na === 'failed'
+                          ? `${ch.label} — not available yet: the token's creation message did not reach this chain`
+                          : `${ch.label} — not available yet: the token is still arriving here`
+                        : info?.[ch.id]?.local
+                          ? `${ch.label} — instant, no cross-chain wait`
+                          : ch.label
+                    }
+                    aria-pressed={chain === ch.id}
+                    data-chain={ch.id}
+                    data-unavailable={na ?? undefined}
+                    className={`group inline-flex items-center gap-1.5 rounded-lg border-2 py-1 pl-1.5 pr-2.5 font-mono text-[10px] font-bold transition ${
+                      chain === ch.id
+                        ? 'border-ink shadow-brutal-sm -translate-y-0.5'
+                        : 'border-ink/30 bg-white hover:border-ink'
+                    } ${na ? 'border-dashed' : ''}`}
+                    style={chain === ch.id ? { background: ch.color } : undefined}
+                  >
+                    {/* the logo never fades: it is what identifies the chain */}
+                    <span className={na ? 'grayscale' : ''}>
+                      <ChainLogo id={ch.id} size={18} />
+                    </span>
+                    <span className={chain === ch.id ? '' : 'opacity-50 group-hover:opacity-100'}>
+                      {ch.label}
+                      {na ? ' · NOT YET' : info?.[ch.id]?.local ? ' ⚡' : ''}
+                    </span>
+                  </button>
+                )
+              })}
             </div>
             <p className="mt-1.5 font-mono text-[9px] font-bold opacity-45">
-              SAME PRICE EVERYWHERE ✓
-              {onchain && onchain.network !== 'local'
+              {chainSet.single ? 'ONE CHAIN, ONE TRANSACTION ⚡' : 'SAME PRICE EVERYWHERE ✓'}
+              {onchain && onchain.network !== 'local' && !chainSet.single
                 ? instant
                   ? ` · ${chain.toUpperCase()} SETTLES IN ONE TRANSACTION ⚡`
                   : ` · ${chain.toUpperCase()} CROSSES LAYERZERO: 1–3 MIN`
                 : ''}
+              {ci?.protected ? ' · PRICE-PROTECTED 🛡' : ''}
             </p>
+            {unavailableHere && (
+              <p className="mt-1.5 font-mono text-[9px] font-bold tracking-wide text-down" data-testid="unavailable-here">
+                {unavailableHere === 'failed'
+                  ? `${c.ticker} IS NOT AVAILABLE ON ${chain.toUpperCase()} YET — ITS CREATION MESSAGE DID NOT REACH THAT CHAIN. THE OPERATOR HAS TO SEND IT AGAIN; PICK ANOTHER CHAIN MEANWHILE.`
+                  : `${c.ticker} HAS NOT REACHED ${chain.toUpperCase()} YET — ITS CREATION MESSAGE IS STILL CROSSING. GIVE IT A MINUTE, OR PICK ANOTHER CHAIN.`}
+              </p>
+            )}
 
             {side === 'buy' ? (
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -699,17 +764,102 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               </div>
             )}
 
-            <p className="mt-2.5 font-mono text-[10px] font-bold tracking-wide opacity-70">
-              {q && amount > 0
+            {/* what the trade does: on-chain the hub's own arithmetic (fee and
+                FAIR GENESIS included); in the simulation the engine's quote */}
+            <p className="mt-2.5 font-mono text-[10px] font-bold tracking-wide opacity-70" data-testid="quote-line">
+              {exp && amount > 0
                 ? side === 'buy'
-                  ? `≈ ${fmtTokens(q.tokens)} $${c.ticker} · IMPACT ${(q.impact * 100).toFixed(2)}%${q.usd < usd - 0.01 ? ` · ONLY ${fmtUsd(q.usd)} FITS THE CURVE` : ''}`
-                  : `≈ ${fmtUsd(q.usd)} BACK · IMPACT ${(q.impact * 100).toFixed(2)}%`
-                : '—'}
+                  ? `≈ ${fmtTokens(exp.expected)} $${c.ticker}${q ? ` · IMPACT ${(q.impact * 100).toFixed(2)}%` : ''}${
+                      exp.feeRate && exp.feeRate > FEE_RATE + 0.0001 ? ` · FEE ${(exp.feeRate * 100).toFixed(1)}%` : ''
+                    }${(exp.clamped ?? 0) > 0.005 ? ` · ONLY ${fmtUsd(exp.spend ?? 0)} GOES IN (FAIR GENESIS CAP)` : ''}`
+                  : `≈ ${fmtUsd(exp.expected)} BACK${q ? ` · IMPACT ${(q.impact * 100).toFixed(2)}%` : ''}`
+                : q && amount > 0
+                  ? side === 'buy'
+                    ? `≈ ${fmtTokens(q.tokens)} $${c.ticker} · IMPACT ${(q.impact * 100).toFixed(2)}%${q.usd < usd - 0.01 ? ` · ONLY ${fmtUsd(q.usd)} FITS THE CURVE` : ''}`
+                    : `≈ ${fmtUsd(q.usd)} BACK · IMPACT ${(q.impact * 100).toFixed(2)}%`
+                  : '—'}
             </p>
+            {/* v7.1 price protection: the minimum, and the tolerance behind it */}
+            {onchain && ci && amount > 0 && (
+              <div className="mt-1.5 rounded-lg border-2 border-ink/20 bg-cream/60 px-2.5 py-1.5" data-testid="protection">
+                {capUsedUp ? (
+                  <p className="font-mono text-[9px] font-bold tracking-wide text-down">
+                    🛡 FAIR GENESIS: THIS WALLET HAS USED ITS ${fgCap} CAP FOR THE OPENING WINDOW — NOTHING WOULD BE
+                    BOUGHT. BUY AGAIN IN {fgCountdown}, WHEN THE WINDOW CLOSES.
+                  </p>
+                ) : ci.protected && exp ? (
+                  <>
+                    <p className="font-mono text-[9px] font-bold tracking-wide">
+                      🛡 YOU RECEIVE AT LEAST{' '}
+                      <span data-testid="min-out">
+                        {side === 'buy' ? `${fmtTokens(exp.min)} $${c.ticker}` : fmtUsd(exp.min)}
+                      </span>{' '}
+                      — OR THE TRADE CANCELS ITSELF AND NOTHING IS SPENT{onchain.network === 'mainnet' ? ' BUT GAS' : ''}.
+                    </p>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-[9px] font-bold opacity-55">TOLERANCE</span>
+                      {QUICK_BPS.map((b) => (
+                        <button
+                          key={b}
+                          type="button"
+                          onClick={() => {
+                            setCustomBps('')
+                            onchain.slippage?.set(b)
+                          }}
+                          aria-pressed={slippageBps === b}
+                          data-bps={b}
+                          className={`rounded-md border-2 border-ink px-2 py-0.5 font-mono text-[9px] font-bold transition ${
+                            slippageBps === b ? 'bg-ink text-lime' : 'bg-white hover:bg-lime'
+                          }`}
+                        >
+                          {b / 100}%
+                        </button>
+                      ))}
+                      <span className="inline-flex items-center gap-0.5 rounded-md border-2 border-ink bg-white px-1.5 py-0.5 font-mono text-[9px] font-bold">
+                        <input
+                          value={customBps}
+                          onChange={(e) => {
+                            const v = e.target.value.replace(/[^0-9.]/g, '')
+                            setCustomBps(v)
+                            const pct = Number.parseFloat(v)
+                            if (pct >= 0.1 && pct <= 50) onchain.slippage?.set(Math.round(pct * 100))
+                          }}
+                          placeholder={String(slippageBps / 100)}
+                          inputMode="decimal"
+                          aria-label="Custom tolerance in percent"
+                          className="w-8 bg-transparent text-right outline-none placeholder:opacity-40"
+                        />
+                        %
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <p className="font-mono text-[9px] font-bold tracking-wide text-down">
+                    {instant
+                      ? // a one-transaction trade on a gateway older than v7.1 (today's testnet)
+                        '⚠ THIS DEPLOYMENT HAS NO PRICE PROTECTION YET (PRE-7.1 GATEWAY): THE TRADE FILLS AT THE PRICE THE CURVE HAS WHEN IT EXECUTES.'
+                      : `⚠ NO PRICE PROTECTION ON CROSS-CHAIN TRADES YET: FROM ${chain.toUpperCase()} THE TRADE FILLS AT THE PRICE THE CURVE HAS WHEN IT LANDS ON THE HUB, MINUTES FROM NOW.${
+                          liveChains.some((ch) => info?.[ch.id]?.protected)
+                            ? ` TRADE FROM ${liveChains
+                                .filter((ch) => info?.[ch.id]?.protected)
+                                .map((ch) => ch.label)
+                                .join(' / ')} FOR A PROTECTED FILL.`
+                            : ''
+                        }`}
+                  </p>
+                )}
+              </div>
+            )}
             {fgActive && side === 'buy' && (
               <p className="mt-1 font-mono text-[9px] font-bold tracking-wide text-down">
                 🛡 FAIR GENESIS TAX {((FEE_RATE + fgTax) * 100).toFixed(1)}% APPLIES
-                {usd > fgRoom ? ` · CAPPED AT ${fmtUsd(fgRoom)} FOR YOUR WALLET` : ''}
+                {usd > fgRoom
+                  ? fgRoom > 0
+                    ? ` · YOUR WALLET HAS ${fmtUsd(fgRoom)} OF ITS $${fgCap} WINDOW CAP LEFT — THE BUY IS SIZED DOWN TO THAT`
+                    : capUsedUp
+                      ? '' // said in full just above
+                      : ` · YOUR WALLET HAS USED ITS $${fgCap} WINDOW CAP — BUY AGAIN WHEN THE WINDOW CLOSES`
+                  : ''}
               </p>
             )}
 
@@ -738,7 +888,9 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   </>
                 )}
                 <span className="opacity-60">
-                  {side === 'buy' && onchain.network !== 'local' ? ' · USDC IS APPROVED FOR THIS EXACT AMOUNT' : ''}
+                  {side === 'buy' && onchain.network !== 'local'
+                    ? ` · ${dollar.symbol} IS APPROVED FOR THIS EXACT AMOUNT`
+                    : ''}
                 </span>
               </p>
             )}
@@ -753,8 +905,14 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               onClick={() => void doTrade()}
               disabled={
                 busy ||
-                (wallet !== null && (amount <= 0 || (side === 'sell' && bagHere <= 0) || buyBlocked))
+                (wallet !== null &&
+                  (amount <= 0 ||
+                    (side === 'sell' && bagHere <= 0) ||
+                    buyBlocked ||
+                    !!unavailableHere ||
+                    capUsedUp))
               }
+              data-testid="trade-button"
               className={`mt-3 w-full rounded-xl border-3 border-ink px-6 py-3 font-mono text-[13px] font-bold tracking-wide shadow-brutal transition hover:-translate-y-0.5 hover:shadow-brutal-lg active:translate-y-0 active:shadow-brutal disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-brutal ${
                 side === 'buy' ? 'bg-lime' : 'bg-candy'
               }`}
@@ -775,8 +933,20 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 className={`mt-2 text-center font-mono text-[10px] font-bold tracking-wide ${
                   msg.ok ? 'text-up' : 'text-down'
                 }`}
+                data-testid="trade-msg"
               >
                 {msg.text}
+                {msg.retry && (
+                  <button
+                    type="button"
+                    onClick={() => void doTrade()}
+                    disabled={busy}
+                    data-testid="retry-trade"
+                    className="ml-2 rounded-md border-2 border-ink bg-white px-2 py-0.5 text-ink transition hover:bg-lime disabled:opacity-40"
+                  >
+                    TRY AGAIN ↻
+                  </button>
+                )}
               </p>
             )}
           </div>
@@ -854,27 +1024,45 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
           {/* chain sync grid */}
           <div className={card}>
             <p className={label}>
-              ONE GLOBAL PRICE · {liveChains.length === 6 ? 'SIX' : liveChains.length} NATIVE DEPLOYMENTS
+              ONE GLOBAL PRICE · {liveChains.length === 6 ? 'SIX' : liveChains.length} NATIVE DEPLOYMENT
+              {liveChains.length === 1 ? '' : 'S'}
+              {universe ? ` · ${universe.name} UNIVERSE` : ''}
             </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-2">
-              {liveChains.map((ch) => (
-                <div
-                  key={ch.id}
-                  className="flex items-center gap-2 rounded-lg border-2 border-ink/20 bg-cream/60 px-2 py-1.5"
-                >
-                  <ChainLogo id={ch.id} size={20} />
-                  <span className="font-mono text-[10px] font-bold">{fmtPrice(c.price)}</span>
-                  <span className="ml-auto font-mono text-[8px] font-bold text-up">✓</span>
-                </div>
-              ))}
+              {liveChains.map((ch) => {
+                const na = onchain?.unavailable?.[num]?.[ch.id]
+                return (
+                  <div
+                    key={ch.id}
+                    className={`flex items-center gap-2 rounded-lg border-2 bg-cream/60 px-2 py-1.5 ${
+                      na ? 'border-dashed border-ink/30 opacity-70' : 'border-ink/20'
+                    }`}
+                    title={na ? 'Not available on this chain yet' : undefined}
+                  >
+                    <span className={na ? 'grayscale' : ''}>
+                      <ChainLogo id={ch.id} size={20} />
+                    </span>
+                    <span className="font-mono text-[10px] font-bold">{na ? '—' : fmtPrice(c.price)}</span>
+                    <span className={`ml-auto font-mono text-[8px] font-bold ${na ? 'text-down' : 'text-up'}`}>
+                      {na ? 'NOT YET' : '✓'}
+                    </span>
+                  </div>
+                )
+              })}
             </div>
+            {universe && (
+              <p className="mt-2 font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-45">
+                THIS TOKEN EXISTS ONLY IN THE {universe.name} UNIVERSE ({universe.line.toUpperCase()}). IT
+                DOES NOT EXIST IN THE OTHER UNIVERSES.
+              </p>
+            )}
           </div>
 
           <p className="text-center font-mono text-[9px] font-bold tracking-wide opacity-40">
             {mode === 'sim'
               ? 'DEMO MARKET — REAL CURVE MATH, FICTIONAL MONEY. NO TRANSACTION IS SUBMITTED.'
               : onchain?.network === 'mainnet'
-                ? 'MAINNET — REAL USDC, UNAUDITED CONTRACTS, CAPPED VAULTS. ONLY WHAT YOU CAN LOSE.'
+                ? `${universe ? `${universe.name} UNIVERSE` : 'MAINNET'} — REAL ${dollar.symbol}${universe?.id === 'bnb' ? ' (BINANCE-PEG)' : ''}, UNAUDITED CONTRACTS, CAPPED VAULTS${universe?.id === 'ethereum' ? ', L1 GAS ON EVERY ACTION' : ''}. ONLY WHAT YOU CAN LOSE.`
                 : onchain?.network === 'testnet'
                   ? 'PUBLIC TESTNET — REAL CONTRACTS AND REAL TRANSACTIONS, PLAY MONEY.'
                   : 'LOCAL DEVNET — REAL CONTRACTS ON YOUR OWN NODE, PLAY MONEY.'}

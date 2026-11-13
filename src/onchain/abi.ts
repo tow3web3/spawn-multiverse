@@ -21,6 +21,10 @@ export const padAbi = parseAbi([
   'event GenesisGuard(address indexed token, bytes32 indexed actor, uint256 taxBps, uint256 taxUsd, uint256 refundedUsd)',
   // v7: the hub never reverts on a message — it REFUSES, and says why.
   'event Refused(uint8 indexed op, uint32 indexed srcChain, bytes32 token, bytes32 actor, uint256 amount, uint8 reason)',
+  // v7.1: a chain whose SYNC could not be sent no longer undoes the launch —
+  // the token simply has no replica there until the operator resyncs it.
+  'event SyncFailed(address indexed token, uint32 indexed chain)',
+  'event Resynced(address indexed token, uint32 indexed chain)',
 ])
 
 /** `Refused.reason` — must match SpawnPad's R_* constants. */
@@ -43,6 +47,12 @@ export const gatewayAbi = parseAbi([
   'function buyToken(address hubToken, uint256 usdIn) payable',
   'function buyTokenUsdc(address hubToken, uint256 usdcIn) payable',
   'function sellToken(address hubToken, uint256 tokens) payable',
+  // v7.1, hub-chain gateway only: the whole trade reverts ("GW: min out")
+  // unless the caller received at least the minimum in this transaction.
+  // On a remote gateway they always revert — never call them there.
+  'function buyTokenUsdcMin(address hubToken, uint256 usdcIn, uint256 minTokensOut) payable',
+  'function buyTokenMin(address hubToken, uint256 usdIn, uint256 minTokensOut) payable',
+  'function sellTokenMin(address hubToken, uint256 tokens, uint256 minDollarsOut) payable',
   'function claimFees(address hubToken) payable',
   'function pullFees(address hubToken) payable',
   'function claimPending(address hubToken) returns (uint256 tokens)',
@@ -66,10 +76,14 @@ export const distributorAbi = parseAbi([
 /** Launch-time fee routing — indices must match SpawnPad's constants. */
 export const FEE_MODE_INDEX = { holders: 0, split: 1, dev: 2, burn: 3 } as const
 
-/** OmniUSD (v7): this chain's USDC vault AND the 18-decimal claim on it. */
+/** The vault (OmniUSD over USDC, OmniUSDLocal over a local dollar): holds
+ * this chain's dollar token AND is the 18-decimal claim on it. Same surface
+ * on both for everything the site calls. */
 export const usdAbi = parseAbi([
   'function balanceOf(address) view returns (uint256)',
-  'function wrap(uint256 usdc6) returns (uint256)',
+  // oUSD wei per smallest unit of the dollar token: 1e12 for 6 decimals, 1 for 18
+  'function SCALE() view returns (uint256)',
+  'function wrap(uint256 units) returns (uint256)',
   'function unwrap(uint256 amount18) returns (uint256)',
   'function liquidity() view returns (uint256)',
   'function depositCap() view returns (uint256)',
@@ -77,9 +91,12 @@ export const usdAbi = parseAbi([
   'event PaidOut(address indexed to, uint256 usdcOut, uint256 minted)',
 ])
 
-/** USDC — Circle's on mainnet, a MockUSDC with an open `mint` on testnets. */
+/** The dollar token — Circle's USDC or BSC USDT on mainnet, a mock with an
+ * open `mint` on testnets. The name `usdc` is historical: it is whatever
+ * dollar the universe settles in. */
 export const usdcAbi = parseAbi([
   'function balanceOf(address) view returns (uint256)',
+  'function decimals() view returns (uint8)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
   'function mint(address to, uint256 amount)',
@@ -96,7 +113,8 @@ export interface ManifestChain {
   gateway: `0x${string}`
   /** This chain's OmniUSD vault (18-decimal claims on its USDC). */
   usd: `0x${string}`
-  /** v7: the USDC users pay with (6 decimals). */
+  /** The dollar TOKEN users pay with (USDC, 6 decimals; BSC USDT, 18…).
+   * The field name is historical. */
   usdc?: `0x${string}`
   /** Holder-dividend pool; probed from the gateway when absent. */
   dist?: `0x${string}`
@@ -106,14 +124,19 @@ export interface ManifestChain {
   /** v7: this gateway lives on the hub chain — trades settle in ONE
    * transaction, no LayerZero message, no messaging fee. */
   local?: boolean
-  /** Guarded-launch cap on this chain's vault, in whole USDC (informative;
-   * the vault's own `depositCap()` is the truth). */
+  /** Guarded-launch cap on this chain's vault, in the dollar's smallest
+   * units (informative; the vault's own `depositCap()` is the truth). */
   depositCap?: number | string
 }
 
 export interface Manifest {
   /** 'mainnet' flips the site into guarded real-money mode. */
   network?: 'mainnet' | 'testnet' | 'local'
+  /** Mainnet: which independent universe this deployment is (default core). */
+  universe?: 'core' | 'bnb' | 'ethereum'
+  /** The settlement dollar. Informative: the token's own `decimals()` and
+   * the vault's `SCALE()` are the truth, and a mismatch refuses to boot. */
+  dollar?: { symbol: string; decimals: number }
   /** Hub chain id + RPC (the pad lives here). */
   chainId: number
   rpc: string

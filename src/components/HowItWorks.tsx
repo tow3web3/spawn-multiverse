@@ -1,33 +1,39 @@
 import { useState } from 'react'
 import { useStore } from '../store'
 import { fmtPrice } from '../lib/format'
-import { useChainSet, type ChainSet } from '../lib/liveChains'
+import { useChainSet, useDollar, type ChainSet } from '../lib/liveChains'
 import { Asterisk } from './bits'
 import { ChainLogo } from './ChainLogos'
 
 /** The four pillars. The copy counts and names the chains this mode really
  * runs — the simulation runs all six, a deployment runs what its manifest
- * lists. */
+ * lists, a single-chain universe runs one. */
 const steps = (cs: ChainSet) => [
   {
     num: '01',
     title: 'SPAWN ONCE',
     bg: '#c9f24b',
-    body: `Upload an image, name your token, hit launch. One native deployment goes live on all ${cs.lower} chains ${
-      cs.soon.length ? 'from a single transaction' : 'in a single coordinated genesis'
-    } — no bridging, no wrapped versions, no knock-off contracts.`,
+    body: cs.single
+      ? `Upload an image, name your token, hit launch. It goes live on ${cs.names} in one transaction — no bridging, no wrapped versions, no knock-off contracts.`
+      : `Upload an image, name your token, hit launch. One native deployment goes live on all ${cs.lower} chains ${
+          cs.soon.length ? 'from a single transaction' : 'in a single coordinated genesis'
+        } — no bridging, no wrapped versions, no knock-off contracts.`,
   },
   {
     num: '02',
     title: 'ONE GLOBAL SUPPLY',
     bg: '#f7a8ce',
-    body: 'Your total supply is allocated across every native deployment. Not one full supply per chain — one supply for the whole multiverse, so the market cap means the same thing everywhere.',
+    body: cs.single
+      ? 'Every token has the same total supply — 1B, fixed, no hidden premine — so the market cap means the same thing for every creature.'
+      : 'Your total supply is allocated across every native deployment. Not one full supply per chain — one supply for the whole multiverse, so the market cap means the same thing everywhere.',
   },
   {
     num: '03',
-    title: 'ONE PRICE EVERYWHERE',
+    title: cs.single ? 'ONE CURVE, PRICE-PROTECTED' : 'ONE PRICE EVERYWHERE',
     bg: '#9ccbf5',
-    body: `Every trade from every chain hits one global genesis curve, so your token costs the same on ${cs.names}. Fill the curve and the token ascends to the omnipool.`,
+    body: cs.single
+      ? `Every trade hits one genesis curve on ${cs.names}, and reverts unless you receive at least the minimum shown before you sign. Fill the curve and the token ascends to the pool.`
+      : `Every trade from every chain hits one global genesis curve, so your token costs the same on ${cs.names}. Fill the curve and the token ascends to the omnipool.`,
   },
   {
     num: '04',
@@ -37,7 +43,14 @@ const steps = (cs: ChainSet) => [
   },
 ]
 
-const more = (cs: ChainSet, onchain: boolean, hubChain: string | undefined) => [
+interface Universe {
+  id: 'core' | 'bnb' | 'ethereum'
+  name: string
+  line: string
+  single: boolean
+}
+
+const more = (cs: ChainSet, onchain: boolean, hubChain: string | undefined, sym: string, u?: Universe) => [
   {
     title: 'WHY SNIPERS LOSE HERE',
     body: 'Three walls. The spawn block bounces every buy — refunded in full, block 0 does not exist. For 10 minutes a snipe tax decays 30%→1% and is routed like the token’s fees — to its holders, its dev, or the burn — so early snipes fund everyone else. And a $250 per-wallet cap keeps the opening human-sized. Sniping from another chain is structurally impossible anyway: a cross-chain buy takes minutes to arrive. The one disclosed exemption is the creator’s public dev buy at launch.',
@@ -52,7 +65,9 @@ const more = (cs: ChainSet, onchain: boolean, hubChain: string | undefined) => [
   },
   {
     title: 'YOUR BAG IS CHAIN-NATIVE',
-    body: `Buy from Base and you hold real tokens ON Base — not an IOU. Sell them from the chain where they live. Across all ${cs.lower} chains the total supply always adds up to exactly 1,000,000,000. Always.`,
+    body: cs.single
+      ? `You hold real tokens on ${cs.names} — not an IOU, not a wrapped copy. The total supply is exactly 1,000,000,000. Always.`
+      : `Buy from Base and you hold real tokens ON Base — not an IOU. Sell them from the chain where they live. Across all ${cs.lower} chains the total supply always adds up to exactly 1,000,000,000. Always.`,
   },
   {
     title: 'FIXED RULES FOR EVERYONE',
@@ -62,15 +77,46 @@ const more = (cs: ChainSet, onchain: boolean, hubChain: string | undefined) => [
   ...(onchain
     ? [
         {
-          title: 'YOUR DOLLARS ARE USDC',
-          body: 'You trade in USDC, and every chain keeps its own vault: a buy puts USDC in, a sell or a refund pays USDC out on the chain you sold from. If that chain’s vault is ever short you get oUSD instead — a 1:1 claim on the vault that you redeem once liquidity is rebalanced. Holder rewards are paid in oUSD too; spend it as it is or unwrap it.',
+          title: `YOUR DOLLARS ARE ${sym}`,
+          body: `You trade in ${sym}${
+            u?.id === 'bnb'
+              ? ' — BSC USDT, a Binance-Peg token whose backing is custodied by Binance —'
+              : ''
+          }, and ${cs.single ? 'the chain keeps a vault' : 'every chain keeps its own vault'}: a buy puts ${sym} in, a sell or a refund pays ${sym} out${
+            cs.single ? '' : ' on the chain you sold from'
+          }. If ${cs.single ? 'the' : 'that chain’s'} vault is ever short you get oUSD instead — a 1:1 claim on the vault that you redeem once liquidity is rebalanced. Holder rewards are paid in oUSD too; spend it as it is or unwrap it.`,
         },
         {
-          title: 'WHAT CROSSING CHAINS COSTS',
-          body: hubChain
-            ? `The market lives on ${hubChain}. Trade from ${hubChain} and it is one transaction: no bridge, no wait, no message fee. Trade from another chain and your order crosses LayerZero and comes back — a minute or three, and a network fee that pays the round trip, shown before you sign. Holder fees work the same way: at home they arrive by themselves; elsewhere they wait on the hub until someone pays to pull them.`
-            : 'Every order is a message to the one market and a message back. Whoever sends it pays for the round trip: a network fee shown before you sign.',
+          title: 'PRICE PROTECTION',
+          body: cs.single
+            ? 'Every trade here settles in one transaction, so it can insist on a minimum: you see "you receive at least …" before you sign, with a tolerance you set (2% by default). If the price moves past it between your quote and your block, the whole trade reverts and nothing is spent but gas.'
+            : `A trade from ${hubChain ?? 'the hub chain'} settles in one transaction, so it can insist on a minimum: you see "you receive at least …" before you sign, with a tolerance you set (2% by default). If the price moves past it, the whole trade reverts and nothing is spent but gas. A trade from another chain lands minutes later and fills at whatever price the curve has then — cross-chain trades have no price protection yet, and the page says so before you sign.`,
         },
+        ...(cs.single
+          ? [
+              {
+                title: 'ONE CHAIN, ONE TRANSACTION',
+                body: `This universe is ${cs.names} alone: there is nothing to cross, no message to wait for and no message fee. Every action is a plain transaction on ${cs.names}${
+                  u?.id === 'ethereum' ? ' — and pays Ethereum L1 gas, which can cost dollars and is never refunded' : ''
+                }.`,
+              },
+            ]
+          : [
+              {
+                title: 'WHAT CROSSING CHAINS COSTS',
+                body: hubChain
+                  ? `The market lives on ${hubChain}. Trade from ${hubChain} and it is one transaction: no bridge, no wait, no message fee. Trade from another chain and your order crosses LayerZero and comes back — a minute or three, and a network fee that pays the round trip, shown before you sign. Holder fees work the same way: at home they arrive by themselves; elsewhere they wait on the hub until someone pays to pull them.`
+                  : 'Every order is a message to the one market and a message back. Whoever sends it pays for the round trip: a network fee shown before you sign.',
+              },
+            ]),
+        ...(u
+          ? [
+              {
+                title: 'A TOKEN LIVES IN ONE UNIVERSE',
+                body: `SPAWN! on mainnet is several independent universes — the omnichain universe (Base + Optimism + Arbitrum, USDC), BNB (BNB Chain, Binance-Peg USDT) and Ethereum (USDC, L1 gas) — each with its own hub, its own tokens, its own dollar and its own caps. You are in the ${u.name} universe. A token launched here exists only here; the switch at the top of the page moves you between universes, and nothing moves with you.`,
+              },
+            ]
+          : []),
       ]
     : []),
 ]
@@ -78,13 +124,18 @@ const more = (cs: ChainSet, onchain: boolean, hubChain: string | undefined) => [
 export function HowItWorks() {
   const { creatures, onchain } = useStore()
   const cs = useChainSet()
+  const dollar = useDollar()
   const [open, setOpen] = useState(false)
   // the proof strip quotes a real creature — never a made-up number on-chain
   const ref =
     creatures.find((c) => c.ticker === 'GLOOP') ?? [...creatures].sort((a, b) => b.mcap - a.mcap)[0]
   const price = ref ? fmtPrice(ref.price) : onchain ? null : '$0.0000412'
   const hubChain = cs.live.find((c) => onchain?.chainInfo?.[c.id]?.local)
-  const hubName = hubChain ? hubChain.label.charAt(0) + hubChain.label.slice(1).toLowerCase() : undefined
+  const hubName = hubChain
+    ? hubChain.id === 'bnb'
+      ? 'BNB Chain'
+      : hubChain.label.charAt(0) + hubChain.label.slice(1).toLowerCase()
+    : undefined
 
   return (
     <section id="how" className="scroll-mt-24 border-y-3 border-ink bg-ink py-16 text-white">
@@ -97,7 +148,8 @@ export function HowItWorks() {
             HOW IT WORKS<span className="text-lime">.</span>
           </h2>
           <p className="pb-2 font-mono text-[11px] font-bold tracking-wide text-white/50">
-            ONE GENESIS. {cs.word} CHAIN{cs.count === 1 ? '' : 'S'}. ZERO FRAGMENTATION.
+            ONE GENESIS. {cs.word} CHAIN{cs.count === 1 ? '' : 'S'}. {cs.single ? 'ZERO BRIDGES.' : 'ZERO FRAGMENTATION.'}
+            {onchain?.universe ? ` ${onchain.universe.name} UNIVERSE.` : ''}
           </p>
         </div>
 
@@ -128,7 +180,7 @@ export function HowItWorks() {
         </div>
         {open && (
           <div className="mt-6 grid gap-4 md:grid-cols-2">
-            {more(cs, !!onchain, hubName).map((m) => (
+            {more(cs, !!onchain, hubName, dollar.symbol, onchain?.universe).map((m) => (
               <div key={m.title} className="rounded-2xl border-2 border-white/15 bg-void p-5">
                 <h4 className="font-display text-lg tracking-wide text-lime">{m.title}</h4>
                 <p className="mt-2 text-[14px] font-medium leading-relaxed text-white/80">

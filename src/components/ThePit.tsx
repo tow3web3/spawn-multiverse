@@ -103,13 +103,17 @@ export function ThePit({
           <p className="text-[15px] font-semibold leading-snug">
             Freshly spawned. Ferociously unhinged.
             <br />
-            Every token starts its life across all {chainSet.lower} chains.
+            {chainSet.single
+              ? `Every token here lives on ${chainSet.names}${onchain?.universe ? ` — the ${onchain.universe.name} universe` : ''}.`
+              : `Every token starts its life across all ${chainSet.lower} chains.`}
           </p>
           <p className="mt-1 font-mono text-[10px] font-bold tracking-wide opacity-50">
             {!onchain
               ? 'ALL PRICES & TRADES ARE DEMO DATA.'
               : onchain.network === 'mainnet'
-                ? 'REAL TOKENS, REAL USDC. ANYONE CAN LAUNCH ANYTHING — NOT ADVICE.'
+                ? `REAL TOKENS, REAL ${onchain.dollar.symbol}${onchain.universe?.id === 'bnb' ? ' (BINANCE-PEG)' : ''}. ANYONE CAN LAUNCH ANYTHING — NOT ADVICE.${
+                    onchain.universe ? ` TOKENS HERE EXIST ONLY IN THE ${onchain.universe.name} UNIVERSE.` : ''
+                  }`
                 : 'REAL CONTRACTS, PLAY MONEY.'}
           </p>
         </div>
