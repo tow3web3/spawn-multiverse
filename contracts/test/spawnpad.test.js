@@ -1,7 +1,7 @@
 const { expect } = require('chai')
 const { ethers } = require('hardhat')
 const { time } = require('@nomicfoundation/hardhat-network-helpers')
-const { deployWorld } = require('../scripts/lib-deploy')
+const { deployWorld, fundUsd, worth, backing, U } = require('../scripts/lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
 // FAIR GENESIS (v6): most suites test steady-state economics, so they hop
@@ -48,7 +48,7 @@ describe('SPAWN! omnichain protocol', () => {
     const sol = world.chains[0]
     const base = world.chains[2]
 
-    await (await sol.usd.faucet(user, E(1_000))).wait()
+    await fundUsd(sol, user, 1_000)
     const p0 = await world.pad.spotPrice(token)
     await (await sol.gateway.connect(user).buyToken(token, E(100))).wait()
     const p1 = await world.pad.spotPrice(token)
@@ -62,7 +62,7 @@ describe('SPAWN! omnichain protocol', () => {
     expect(await sol.usd.balanceOf(user)).to.equal(E(900))
 
     // the same $100 from ANOTHER chain hits the SAME curve: higher price, fewer tokens
-    await (await base.usd.faucet(user2, E(1_000))).wait()
+    await fundUsd(base, user2, 1_000)
     await (await base.gateway.connect(user2).buyToken(token, E(100))).wait()
     expect(await world.pad.spotPrice(token)).to.be.gt(p1)
     const rep2 = await ethers.getContractAt('SpawnToken', await base.gateway.replicaOf(token))
@@ -71,7 +71,7 @@ describe('SPAWN! omnichain protocol', () => {
 
   it('global token supply is conserved across all chains', async () => {
     const token = await spawnVia(world.chains[0])
-    await (await world.chains[1].usd.faucet(user, E(5_000))).wait()
+    await fundUsd(world.chains[1], user, 5_000)
     await (await world.chains[1].gateway.connect(user).buyToken(token, E(2_500))).wait()
 
     let total = await (await ethers.getContractAt('SpawnToken', token)).totalSupply()
@@ -82,22 +82,23 @@ describe('SPAWN! omnichain protocol', () => {
     expect(total).to.equal(E(1_000_000_000))
   })
 
-  it('sells back on any chain and receives OmniUSD there', async () => {
+  it('sells back on any chain and receives dollars there', async () => {
     const token = await spawnVia(world.chains[0])
     const c = world.chains[4] // arbitrum
-    await (await c.usd.faucet(user, E(500))).wait()
+    await fundUsd(c, user, 500)
     await (await c.gateway.connect(user).buyToken(token, E(200))).wait()
 
     const rep = await ethers.getContractAt('SpawnToken', await c.gateway.replicaOf(token))
     const bal = await rep.balanceOf(user)
-    const usdBefore = await c.usd.balanceOf(user)
+    const usdBefore = await worth(c, user)
 
     await (await c.gateway.connect(user).sellToken(token, bal / 2n)).wait()
     expect(await rep.balanceOf(user)).to.equal(bal - bal / 2n)
 
     // selling the FIRST half of the bag happens on the upper half of the
     // curve, so it returns about half the spend (minus the 1% fee each way)
-    const got = (await c.usd.balanceOf(user)) - usdBefore
+    // v7: the payout settles in USDC (this chain's vault is liquid)
+    const got = (await worth(c, user)) - usdBefore
     expect(got).to.be.gt(E(96))
     expect(got).to.be.lt(E(103))
   })
@@ -105,7 +106,7 @@ describe('SPAWN! omnichain protocol', () => {
   it('ascends when the curve fills: refund, omnipool, trading continues', async () => {
     const token = await spawnVia(world.chains[0])
     const c = world.chains[0]
-    await (await c.usd.faucet(user, E(20_000))).wait()
+    await fundUsd(c, user, 20_000)
 
     await expect(c.gateway.connect(user).buyToken(token, E(20_000))).to.emit(
       world.pad,
@@ -119,7 +120,7 @@ describe('SPAWN! omnichain protocol', () => {
     expect(curve.vBase).to.be.lt(E(18_000))
 
     // the excess above what the curve could absorb came back as a refund
-    const refund = await c.usd.balanceOf(user)
+    const refund = await worth(c, user)
     expect(refund).to.be.gt(E(2_100))
     expect(refund).to.be.lt(E(2_400))
 
@@ -129,7 +130,7 @@ describe('SPAWN! omnichain protocol', () => {
 
     // trading continues on the omnipool, from any chain
     const d = world.chains[5]
-    await (await d.usd.faucet(user2, E(1_000))).wait()
+    await fundUsd(d, user2, 1_000)
     const pBefore = await world.pad.spotPrice(token)
     await (await d.gateway.connect(user2).buyToken(token, E(500))).wait()
     expect(await world.pad.spotPrice(token)).to.be.gt(pBefore)
@@ -137,7 +138,7 @@ describe('SPAWN! omnichain protocol', () => {
 
   it('dev buy at spawn gives the creator the first bag', async () => {
     const c = world.chains[2]
-    await (await c.usd.faucet(user, E(100))).wait()
+    await fundUsd(c, user, 100)
     await (await c.gateway.connect(user).spawnToken('SUNNY BLOB', 'SUNNY', '{}', E(25), 0)).wait()
 
     const token = await world.pad.allTokens(0)
@@ -146,21 +147,28 @@ describe('SPAWN! omnichain protocol', () => {
     expect(await c.usd.balanceOf(user)).to.equal(E(75))
   })
 
-  it('OmniUSD value is conserved end to end (burn-and-mint, nothing leaks)', async () => {
+  it('dollar value is conserved end to end (burn-and-mint, nothing leaks)', async () => {
     const token = await spawnVia(world.chains[0])
     const a = world.chains[0]
     const b = world.chains[3]
-    await (await a.usd.faucet(user, E(1_000))).wait()
-    await (await b.usd.faucet(user2, E(1_000))).wait()
+    await fundUsd(a, user, 1_000)
+    await fundUsd(b, user2, 1_000)
 
     await (await a.gateway.connect(user).buyToken(token, E(400))).wait()
     await (await b.gateway.connect(user2).buyToken(token, E(300))).wait()
     const rep = await ethers.getContractAt('SpawnToken', await a.gateway.replicaOf(token))
     await (await a.gateway.connect(user).sellToken(token, (await rep.balanceOf(user)) / 2n)).wait()
 
-    let total = await world.hubUsd.totalSupply()
-    for (const ch of world.chains) total += await ch.usd.totalSupply()
-    expect(total).to.equal(E(2_000)) // exactly what the faucet printed
+    // v7: every oUSD anywhere (hub ledger included) is backed 1:1 by USDC in
+    // a vault, and not one mock dollar left the system or appeared in it
+    const { usdc, supply } = await backing(world)
+    expect(supply).to.equal(usdc)
+    let dollars = 0n
+    for (const ch of world.chains) {
+      dollars += await ch.usdc.balanceOf(ch.usd.target)
+      dollars += (await ch.usdc.balanceOf(user)) + (await ch.usdc.balanceOf(user2))
+    }
+    expect(dollars).to.equal(U(2_000)) // exactly what was minted
   })
 
   it('price discovery is a venue module only the pad can drive', async () => {
@@ -181,7 +189,7 @@ describe('SPAWN! omnichain protocol', () => {
     await (await c.gateway.connect(user).spawnToken('FEE GOBLIN', 'FGOB', '{}', 0, 1)).wait() // 50/50
     await pastGenesis()
     const token = await world.pad.allTokens(0)
-    await (await c.usd.faucet(user, E(1_000))).wait()
+    await fundUsd(c, user, 1_000)
     await (await c.gateway.connect(user).buyToken(token, E(100))).wait()
 
     let f = await world.pad.feesOf(token)
@@ -204,14 +212,17 @@ describe('SPAWN! omnichain protocol', () => {
     await pastGenesis()
     const token = await world.pad.allTokens(0)
     const away = world.chains[3]
-    await (await away.usd.faucet(user2, E(500))).wait()
+    await fundUsd(away, user2, 500)
     await (await away.gateway.connect(user2).buyToken(token, E(400))).wait()
 
     // the dev claims from a chain they never touched — payout lands there
     const claimChain = world.chains[5]
-    const before = await claimChain.usd.balanceOf(user.address)
+    const before = await worth(claimChain, user)
     await (await claimChain.gateway.connect(user).claimFees(token)).wait()
-    expect((await claimChain.usd.balanceOf(user.address)) - before).to.equal(E(4)) // 1% of $400
+    expect((await worth(claimChain, user)) - before).to.equal(E(4)) // 1% of $400
+    // v7: nobody ever deposited on the claim chain, so its vault is empty —
+    // the payout arrived as an oUSD claim instead of reverting
+    expect(await claimChain.usd.balanceOf(user.address)).to.equal(E(4))
 
     await expect(claimChain.gateway.connect(user).claimFees(token)).to.be.revertedWith(
       'PAD: nothing to claim',
@@ -226,7 +237,7 @@ describe('SPAWN! omnichain protocol', () => {
     await (await c.gateway.connect(user).spawnToken('PYRO', 'PYRO', '{}', 0, 3)).wait()
     await pastGenesis()
     const token = await world.pad.allTokens(0)
-    await (await c.usd.faucet(user, E(2_000))).wait()
+    await fundUsd(c, user, 2_000)
     await (await c.gateway.connect(user).buyToken(token, E(500))).wait() // $5 fee -> trigger
 
     const f = await world.pad.feesOf(token)
@@ -323,7 +334,7 @@ describe('SPAWN! omnichain protocol', () => {
 
     // an ordinary EVM user trades; fees accrue to the wide dev
     const base = world.chains[2]
-    await (await base.usd.faucet(user, E(1_000))).wait()
+    await fundUsd(base, user, 1_000)
     await (await base.gateway.connect(user).buyToken(token, E(500))).wait()
     const fees = await world.pad.feesOf(token)
     expect(fees.dev).to.equal(E(5))

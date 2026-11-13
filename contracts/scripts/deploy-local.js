@@ -9,7 +9,7 @@
 const fs = require('fs')
 const path = require('path')
 const { ethers } = require('hardhat')
-const { deployWorld, CHAINS } = require('./lib-deploy')
+const { deployWorld, CHAINS, fundUsdc, U } = require('./lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
 const rand = (lo, hi) => lo + Math.random() * (hi - lo)
@@ -25,9 +25,10 @@ async function main() {
   console.log('  pad (hub) :', world.pad.target)
   for (const c of world.chains) console.log(`  ${c.id.padEnd(9)}: gateway ${c.gateway.target}`)
 
-  // Fund the trading crowd on every chain.
+  // Fund the trading crowd on every chain: mock USDC, vault approved (v7 —
+  // the local world runs the real USDC-backed settlement over a MockUSDC).
   for (const c of world.chains) {
-    for (const t of traders) await (await c.usd.faucet(t.address, E(50_000))).wait()
+    for (const t of traders) await fundUsdc(c, t, 50_000)
   }
 
   const replicaCache = new Map() // `${chainId}:${token}` -> contract
@@ -43,7 +44,12 @@ async function main() {
   async function buy(token, usd) {
     const chain = pick(world.chains)
     const trader = pick(traders)
-    await (await chain.gateway.connect(trader).buyToken(token, E(usd.toFixed(2)))).wait()
+    const usdc = U(usd.toFixed(2))
+    // play money: top a trader up when they run dry
+    if ((await chain.usdc.balanceOf(trader.address)) < usdc) {
+      await (await chain.usdc.mint(trader.address, U(100_000))).wait()
+    }
+    await (await chain.gateway.connect(trader).buyTokenUsdc(token, usdc)).wait()
   }
 
   async function sellSome(token) {
@@ -110,6 +116,7 @@ async function main() {
       id: c.id,
       gateway: c.gateway.target,
       usd: c.usd.target,
+      usdc: c.usdc.target,
       chainId: 31337,
       rpc: 'http://127.0.0.1:8545',
     })),

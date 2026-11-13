@@ -9,6 +9,7 @@ const path = require('path')
 const { ethers } = require('hardhat')
 
 const E = (n) => ethers.parseEther(String(n))
+const U = (n) => ethers.parseUnits(String(n), 6)
 const rand = (lo, hi) => lo + Math.random() * (hi - lo)
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -26,11 +27,24 @@ async function main() {
       ...c,
       gateway: await ethers.getContractAt('SpawnGateway', c.gateway),
       usd: await ethers.getContractAt('OmniUSD', c.usd),
+      usdc: await ethers.getContractAt('MockUSDC', c.usdc),
     })
   }
 
+  // v7: bots trade (mock) USDC through the vault, like any real user
   for (const c of chains) {
-    for (const b of bots) await (await c.usd.faucet(b.address, E(50_000))).wait()
+    for (const b of bots) {
+      await (await c.usdc.mint(b.address, U(50_000))).wait()
+      await (await c.usdc.connect(b).approve(c.usd.target, ethers.MaxUint256)).wait()
+    }
+  }
+
+  async function buy(chain, bot, token, dollars) {
+    const usdc = U(dollars.toFixed(2))
+    if ((await chain.usdc.balanceOf(bot.address)) < usdc) {
+      await (await chain.usdc.mint(bot.address, U(50_000))).wait()
+    }
+    await (await chain.gateway.connect(bot).buyTokenUsdc(token, usdc)).wait()
   }
 
   const replicaCache = new Map()
@@ -62,14 +76,11 @@ async function main() {
             await (await chain.gateway.connect(bot).sellToken(token, slice)).wait()
             console.log(`SELL ${chain.id}`)
           } else {
-            await (await chain.gateway.connect(bot).buyToken(token, E(rand(5, 150).toFixed(2)))).wait()
+            await buy(chain, bot, token, rand(5, 150))
             console.log(`BUY  ${chain.id}`)
           }
         } else {
-          const usdBal = await chain.usd.balanceOf(bot.address)
-          const usd = E(rand(5, 400).toFixed(2))
-          if (usdBal < usd) await (await chain.usd.faucet(bot.address, E(50_000))).wait()
-          await (await chain.gateway.connect(bot).buyToken(token, usd)).wait()
+          await buy(chain, bot, token, rand(5, 400))
           console.log(`BUY  ${chain.id}`)
         }
       }

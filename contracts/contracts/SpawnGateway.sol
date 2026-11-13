@@ -8,11 +8,17 @@ import {FeeDistributor} from "./FeeDistributor.sol";
 
 /// @title SpawnGateway — one per user-facing chain.
 /// @notice The gateway is the local face of the protocol: users spawn, buy and
-/// sell here, on their own chain, in their own OmniUSD. Under the hood every
+/// sell here, on their own chain, in their own dollars. Under the hood every
 /// action is forwarded to the hub's single global curve, and tokens / payouts
-/// come back as omnichain messages. Users never need approvals: the gateway is
-/// this chain's authorized agent for OmniUSD and the controller of each token
-/// replica, and it only ever moves funds of `msg.sender`.
+/// come back as omnichain messages.
+///
+/// Money enters two ways (v7): straight USDC (`buyTokenUsdc`,
+/// `spawnTokenUsdc` — one USDC approval to this chain's OmniUSD vault) or
+/// oUSD the user already holds (`buyToken`, `spawnToken` — no approval: the
+/// gateway is this chain's authorized oUSD agent). Either way the SAME wire
+/// message leaves. Money comes back through `OmniUSD.payout`: USDC when the
+/// local vault is liquid, an oUSD claim otherwise — never a revert. The
+/// gateway only ever moves funds of `msg.sender`.
 contract SpawnGateway is IOmniReceiver {
     uint32 public constant HUB_CHAIN = 0;
 
@@ -40,6 +46,9 @@ contract SpawnGateway is IOmniReceiver {
     event ReplicaDeployed(address indexed hubToken, address replica, string name, string symbol);
 
     constructor(IOmniMessenger _messenger, OmniUSD _usd, uint32 _chainLabel, address _pad) {
+        // A gateway settles real dollars: wiring it to a ledger-mode oUSD
+        // would make every payout revert on the message path.
+        require(address(_usd.usdc()) != address(0), "GW: ledger usd");
         messenger = _messenger;
         usd = _usd;
         chainLabel = _chainLabel;
@@ -68,6 +77,7 @@ contract SpawnGateway is IOmniReceiver {
         return bytes32(uint256(uint160(a)));
     }
 
+    /// Spawn paying the optional dev buy in oUSD already held.
     function spawnToken(
         string calldata name,
         string calldata symbol,
@@ -76,6 +86,28 @@ contract SpawnGateway is IOmniReceiver {
         uint8 feeMode
     ) external {
         if (devBuyUsd > 0) usd.bridgeBurn(msg.sender, devBuyUsd);
+        _sendSpawn(name, symbol, metaURI, devBuyUsd, feeMode);
+    }
+
+    /// Spawn paying the optional dev buy in USDC (6 decimals).
+    function spawnTokenUsdc(
+        string calldata name,
+        string calldata symbol,
+        string calldata metaURI,
+        uint256 devBuyUsdc,
+        uint8 feeMode
+    ) external {
+        uint256 devBuyUsd = devBuyUsdc > 0 ? usd.depositFor(msg.sender, devBuyUsdc) : 0;
+        _sendSpawn(name, symbol, metaURI, devBuyUsd, feeMode);
+    }
+
+    function _sendSpawn(
+        string calldata name,
+        string calldata symbol,
+        string calldata metaURI,
+        uint256 devBuyUsd,
+        uint8 feeMode
+    ) internal {
         messenger.send(
             HUB_CHAIN,
             _b32(pad),
@@ -90,9 +122,29 @@ contract SpawnGateway is IOmniReceiver {
         messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_CLAIM, abi.encode(_b32(hubToken), _b32(msg.sender))));
     }
 
+    /// Buy with oUSD already held (18 decimals).
     function buyToken(address hubToken, uint256 usdIn) external {
         require(usdIn > 0, "GW: zero");
+        _requireKnown(hubToken);
         usd.bridgeBurn(msg.sender, usdIn);
+        _sendBuy(hubToken, usdIn);
+    }
+
+    /// Buy with USDC (6 decimals), pulled into this chain's vault.
+    function buyTokenUsdc(address hubToken, uint256 usdcIn) external {
+        require(usdcIn > 0, "GW: zero");
+        _requireKnown(hubToken);
+        _sendBuy(hubToken, usd.depositFor(msg.sender, usdcIn));
+    }
+
+    /// A BUY for a token id the hub does not know would revert there forever
+    /// and strand the buyer's money — refuse it here, where a revert is
+    /// atomic. A replica exists on this chain iff the hub spawned the token.
+    function _requireKnown(address hubToken) internal view {
+        require(address(replicaOf[hubToken]) != address(0), "GW: unknown token");
+    }
+
+    function _sendBuy(address hubToken, uint256 usdIn) internal {
         // token id + buyer ride as bytes32 (wire convention)
         messenger.send(HUB_CHAIN, _b32(pad), abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn)));
     }
@@ -135,10 +187,11 @@ contract SpawnGateway is IOmniReceiver {
                 (bytes32, bytes32, uint256, uint256)
             );
             replicaOf[_addr(hubToken)].bridgeMint(_addr(to), tokens);
-            if (refund > 0) usd.bridgeMint(_addr(to), refund);
+            // refunds settle like every payout: USDC if liquid, else oUSD
+            if (refund > 0) usd.payout(_addr(to), refund);
         } else if (op == OP_PAYOUT) {
             (bytes32 to, uint256 usdOut) = abi.decode(data, (bytes32, uint256));
-            usd.bridgeMint(_addr(to), usdOut);
+            usd.payout(_addr(to), usdOut);
         } else if (op == OP_FEE_DROP) {
             (bytes32 hubTokenB, uint256 amount) = abi.decode(data, (bytes32, uint256));
             SpawnToken rep = replicaOf[_addr(hubTokenB)];

@@ -1,7 +1,7 @@
 const { expect } = require('chai')
 const { ethers } = require('hardhat')
 const { time } = require('@nomicfoundation/hardhat-network-helpers')
-const { deployWorldAsync } = require('../scripts/lib-deploy')
+const { deployWorldAsync, fundUsd, worth, backing } = require('../scripts/lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
 
@@ -50,7 +50,7 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
   it('a buy settles in two async legs; curve, bag and supply stay exact', async () => {
     const token = await spawnVia(world.chains[0])
     const base = world.chains[2]
-    await (await base.usd.faucet(user, E(1_000))).wait()
+    await fundUsd(base, user, 1_000)
     await (await base.gateway.connect(user).buyToken(token, E(100))).wait()
 
     // leg 1 in flight: oUSD burned locally, nothing arrived anywhere yet
@@ -76,20 +76,23 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
   it('a sell pays out after delivery and no oUSD value leaks', async () => {
     const token = await spawnVia(world.chains[0])
     const arb = world.chains[4]
-    await (await arb.usd.faucet(user, E(500))).wait()
+    await fundUsd(arb, user, 500)
     await (await arb.gateway.connect(user).buyToken(token, E(200))).wait()
     await world.deliverAll()
 
     const rep = await ethers.getContractAt('SpawnToken', await arb.gateway.replicaOf(token))
     const bag = await rep.balanceOf(user)
-    const before = await arb.usd.balanceOf(user)
+    const before = await worth(arb, user)
+    const usdcBefore = await arb.usdc.balanceOf(user)
     await (await arb.gateway.connect(user).sellToken(token, bag / 2n)).wait()
     await world.deliverAll()
-    expect(await arb.usd.balanceOf(user)).to.be.gt(before)
+    expect(await worth(arb, user)).to.be.gt(before)
+    // v7: the payout settled in real USDC out of this chain's vault
+    expect(await arb.usdc.balanceOf(user)).to.be.gt(usdcBefore)
 
-    let total = await world.hubUsd.totalSupply()
-    for (const c of world.chains) total += await c.usd.totalSupply()
-    expect(total).to.equal(E(500)) // exactly what the faucet printed
+    // nothing in flight: every oUSD on every chain is backed 1:1 by USDC
+    const { usdc, supply } = await backing(world)
+    expect(supply).to.equal(usdc)
   })
 
   it('transport auth: only the endpoint, only configured peers, only the protocol', async () => {
@@ -144,7 +147,7 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
 
     // EVM users trade; the wide dev's pot fills
     const base = world.chains[2]
-    await (await base.usd.faucet(user, E(1_000))).wait()
+    await fundUsd(base, user, 1_000)
     await (await base.gateway.connect(user).buyToken(token, E(500))).wait()
     await world.deliverAll()
     expect((await world.pad.feesOf(token)).dev).to.equal(E(5))

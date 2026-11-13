@@ -9,6 +9,12 @@
  * Resumable: every deployed address lands in deployments/testnet.json
  * immediately; a re-run skips what exists and only does what's missing.
  * Faucet gas is precious — nothing is deployed twice.
+ *
+ * Money (v7): testnets run the MAINNET settlement contract — a USDC-backed
+ * OmniUSD vault per spoke, a ledger-mode OmniUSD on the hub — over a
+ * MockUSDC anyone can mint. No CCTP on testnets (tokenMessenger = 0). A
+ * mainnet deploy passes Circle's real USDC + TokenMessengerV2 instead and
+ * never deploys MockUSDC.
  */
 const fs = require('fs')
 const path = require('path')
@@ -38,6 +44,9 @@ const NETS = {
     chainId: 97, rpc: 'https://bsc-testnet-rpc.publicnode.com',
   },
 }
+
+// Testnet vault deposit cap: wide open — it is play money (1B mock USDC).
+const TESTNET_CAP = 1_000_000_000n * 10n ** 6n
 
 const FILE = path.join(__dirname, '..', 'deployments', 'testnet.json')
 const b32 = (addr) => ethers.zeroPadValue(addr, 32)
@@ -107,7 +116,8 @@ async function main() {
 
   if (cfg.role === 'hub') {
     const adapter = await deployOnce(state, 'adapter', 'LayerZeroOmniMessenger', [ENDPOINT, cfg.eid])
-    const usd = await deployOnce(state, 'usd', 'OmniUSD', [0])
+    // the hub holds no dollars, only the books: ledger-mode oUSD (v7)
+    const usd = await deployOnce(state, 'usd', 'OmniUSD', [0, ethers.ZeroAddress, ethers.ZeroAddress])
     const pad = await deployOnce(state, 'pad', 'SpawnPad', [adapter.target, usd.target])
     const venue = await deployOnce(state, 'venue', 'InternalCurveVenue', [pad.target])
 
@@ -163,7 +173,19 @@ async function main() {
     const hub = all.baseSepolia
     if (!hub?.pad || !hub?.adapter) throw new Error('déploie d’abord le hub (baseSepolia)')
     const adapter = await deployOnce(state, 'adapter', 'LayerZeroOmniMessenger', [ENDPOINT, cfg.eid])
-    const usd = await deployOnce(state, 'usd', 'OmniUSD', [cfg.label])
+    // v7 real-money settlement. A v7 spoke always records `usdc` before
+    // `usd`; a `usd` without `usdc` is a pre-v7 faucet dollar — judged from
+    // the state file, not an RPC probe (lagging nodes lie about fresh code).
+    const legacyUsd = Boolean(state.usd) && !state.usdc
+    if (legacyUsd && !state.gateway) {
+      throw new Error(`${network.name}: pre-v7 oUSD in the state — archive this network's entry before deploying v7`)
+    }
+    const usdc = legacyUsd ? null : await deployOnce(state, 'usdc', 'MockUSDC', [])
+    const usd = await deployOnce(state, 'usd', 'OmniUSD', [
+      cfg.label,
+      usdc ? usdc.target : ethers.ZeroAddress,
+      ethers.ZeroAddress, // no CCTP on testnets
+    ])
     const gateway = await deployOnce(state, 'gateway', 'SpawnGateway', [
       adapter.target,
       usd.target,
@@ -174,6 +196,12 @@ async function main() {
     if ((await usd.agent()) === ethers.ZeroAddress) {
       await (await usd.setAgent(gateway.target)).wait()
       console.log('  usd.setAgent ✓')
+    }
+    if (legacyUsd) {
+      console.log('  (pre-v7 oUSD — faucet money, no vault)')
+    } else if ((await usd.depositCap()) === 0n) {
+      await (await usd.setDepositCap(TESTNET_CAP)).wait()
+      console.log('  usd.setDepositCap ✓ (deposits open)')
     }
     if (!(await adapter.senders(gateway.target))) {
       await (await adapter.register(gateway.target)).wait()
@@ -234,6 +262,8 @@ async function writeFrontendManifest(all) {
     chains.push({
       label: cfg.label, id: cfg.id,
       gateway: all[net].gateway, usd: all[net].usd,
+      // v7: the (mock) USDC users pay with; absent on a pre-v7 deployment
+      usdc: all[net].usdc,
       chainId: cfg.chainId, rpc: cfg.rpc,
     })
   }

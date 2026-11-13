@@ -1,7 +1,7 @@
 const { expect } = require('chai')
 const { ethers } = require('hardhat')
 const { time } = require('@nomicfoundation/hardhat-network-helpers')
-const { deployWorld, deployWorldAsync } = require('../scripts/lib-deploy')
+const { deployWorld, deployWorldAsync, fundUsd, worth, backing } = require('../scripts/lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
 // Hop past the FAIR GENESIS window (v6) — these suites test the fee stream
@@ -17,13 +17,16 @@ describe('Holder fee distribution (protocol v3)', () => {
 
     beforeEach(async () => {
       ;[deployer, a, b, c] = await ethers.getSigners()
-      usd = await ethers.deployContract('OmniUSD', [0])
+      // a ledger-mode oUSD driven by hand: the math under test is the
+      // distributor's, not the vault's
+      usd = await ethers.deployContract('OmniUSD', [0, ethers.ZeroAddress, ethers.ZeroAddress])
+      await (await usd.setAgent(deployer.address)).wait()
       dist = await ethers.deployContract('FeeDistributor', [usd.target])
       await (await dist.setAgent(deployer.address)).wait() // test drives drops by hand
       tok = await ethers.deployContract('SpawnToken', [
         'TEST', 'TEST', deployer.address, true, 0, ethers.ZeroAddress, dist.target,
       ])
-      await (await usd.faucet(dist.target, E(1_000))).wait() // pre-fund claims
+      await (await usd.bridgeMint(dist.target, E(1_000))).wait() // pre-fund claims
     })
 
     it('splits drops pro-rata and follows balances across transfers', async () => {
@@ -91,7 +94,7 @@ describe('Holder fee distribution (protocol v3)', () => {
       await (await c.gateway.connect(user).spawnToken('YIELD CAT', 'YCAT', '{}', 0, 0)).wait()
       await pastGenesis()
       const token = await world.pad.allTokens(0)
-      await (await c.usd.faucet(user, E(1_000))).wait()
+      await fundUsd(c, user, 1_000)
 
       // $300 buy -> $3 fee, all to holders, over the $2 trigger
       await (await c.gateway.connect(user).buyToken(token, E(300))).wait()
@@ -120,7 +123,7 @@ describe('Holder fee distribution (protocol v3)', () => {
       await (await c.gateway.connect(user).spawnToken('HALFSIES', 'HALF', '{}', 0, 1)).wait()
       await pastGenesis()
       const token = await world.pad.allTokens(0)
-      await (await c.usd.faucet(user2, E(1_000))).wait()
+      await fundUsd(c, user2, 1_000)
       await (await c.gateway.connect(user2).buyToken(token, E(600))).wait() // $6 fee: 3/3
 
       const rep = await ethers.getContractAt('SpawnToken', await c.gateway.replicaOf(token))
@@ -128,9 +131,9 @@ describe('Holder fee distribution (protocol v3)', () => {
 
       // the dev's half is untouched and claimable from any chain
       const claimChain = world.chains[5]
-      const before = await claimChain.usd.balanceOf(user.address)
+      const before = await worth(claimChain, user)
       await (await claimChain.gateway.connect(user).claimFees(token)).wait()
-      expect((await claimChain.usd.balanceOf(user.address)) - before).to.equal(E(3))
+      expect((await worth(claimChain, user)) - before).to.equal(E(3))
     })
 
     it('oUSD is still conserved end to end with distributions in the mix', async () => {
@@ -138,15 +141,16 @@ describe('Holder fee distribution (protocol v3)', () => {
       await (await a.gateway.connect(user).spawnToken('LEAKPROOF', 'LEAK', '{}', 0, 0)).wait()
       await pastGenesis()
       const token = await world.pad.allTokens(0)
-      await (await a.usd.faucet(user, E(2_000))).wait()
+      await fundUsd(a, user, 2_000)
       await (await a.gateway.connect(user).buyToken(token, E(900))).wait() // distributes
       const rep = await ethers.getContractAt('SpawnToken', await a.gateway.replicaOf(token))
       await (await a.gateway.connect(user).sellToken(token, (await rep.balanceOf(user)) / 3n)).wait()
       await (await a.dist.connect(user).claim(rep.target)).wait()
 
-      let total = await world.hubUsd.totalSupply()
-      for (const ch of world.chains) total += await ch.usd.totalSupply()
-      expect(total).to.equal(E(2_000)) // exactly what the faucet printed
+      // v7: every oUSD anywhere — pad books, distributor pools, claimed
+      // rewards — is backed 1:1 by USDC sitting in a vault
+      const { usdc, supply } = await backing(world)
+      expect(supply).to.equal(usdc)
     })
   })
 
@@ -164,8 +168,8 @@ describe('Holder fee distribution (protocol v3)', () => {
       await time.increase(601) // past the FAIR GENESIS window
       const token = await world.pad.allTokens(0)
 
-      await (await A.usd.faucet(user1, E(500))).wait()
-      await (await B.usd.faucet(user2, E(500))).wait()
+      await fundUsd(A, user1, 500)
+      await fundUsd(B, user2, 500)
 
       // first buy: $1 fee, under the trigger — nothing distributes yet
       await (await A.gateway.connect(user1).buyToken(token, E(100))).wait()

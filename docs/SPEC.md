@@ -1,4 +1,4 @@
-# SPAWN! protocol specification (v6)
+# SPAWN! protocol specification (v7)
 
 Audience: a security auditor opening this repo cold. Everything below is
 written from the code at the commit that introduced it, with
@@ -22,13 +22,19 @@ actors stay wide end-to-end on the hub, and the transport envelope is
 bytes32-addressed on both seats — this is what lets a Solana pubkey use the
 same wire as EVM addresses.
 
+Protocol version v7 (settlement only — **the wire is unchanged**): oUSD stops
+being faucet money. On every user-facing chain `OmniUSD` is a USDC vault and
+oUSD a 1:1 claim on it; on the hub it is a pure ledger. See §7.
+
 ## 2. Actors and trust model
 
 | Actor | Powers | Where |
 |---|---|---|
 | **admin (deployer EOA)** | one-time wiring: `setVenue`, `setDistributor`, `setGateway` (pad); `setDistributor` (gateway); `setAgent`/`exclude` (distributor); `setAgent` (OmniUSD); `register`/`setRoute`/`setOptions`/`recover` (LZ adapter) | `SpawnPad.sol:132-152`, `SpawnGateway.sol:50`, `FeeDistributor.sol:54-66`, `OmniUSD.sol:22`, `lz/LayerZeroOmniMessenger.sol:58-78` |
-| **token creator ("dev")** | locks the fee mode at launch; claims the dev fee share from any chain | `SpawnGateway.sol:spawnToken`, `SpawnPad.sol:_claim` |
-| **trader / holder** | buy, sell, claim holder dividends — all on their own chain | `SpawnGateway.sol:buyToken/sellToken`, `FeeDistributor.sol:claim` |
+| **admin, on each USDC vault (v7)** | `setDepositCap` (open/close/limit deposits — never withdrawals); `setPeer` (name a chain's peer vault, once per label); `rebalance` (CCTP-burn vault USDC toward a named peer vault). **No function sends USDC to an arbitrary address — but the admin chooses the peers; see §7 "Rebalancing trust model".** | `OmniUSD.sol:setDepositCap/setPeer/rebalance` |
+| **token creator ("dev")** | locks the fee mode at launch; claims the dev fee share from any chain | `SpawnGateway.sol:spawnToken/spawnTokenUsdc`, `SpawnPad.sol:_claim` |
+| **trader / holder** | buy, sell, claim holder dividends — all on their own chain; wrap/unwrap USDC ⇄ oUSD | `SpawnGateway.sol:buyToken/buyTokenUsdc/sellToken`, `FeeDistributor.sol:claim`, `OmniUSD.sol:wrap/unwrap` |
+| **Circle (USDC issuer, CCTP attester)** | can blacklist any account incl. a vault, pause USDC, denylist CCTP callers, switch on a CCTP minimum fee | external — see §7 |
 | **LayerZero endpoint + DVN/executor** | message verification & delivery between adapters | `lz/LayerZeroOmniMessenger.sol` |
 
 **Honesty section.** Today every admin surface is a single EOA (the testnet
@@ -91,14 +97,14 @@ revert (`SpawnPad.sol:_addr` → `"PAD: bad recipient"`,
 
 | Op | Name | Direction | Wire tuple (`data`) | Trigger | Effect on receive |
 |---|---|---|---|---|---|
-| 1 | OP_SPAWN | gateway → pad | `(bytes32 creator [wide ok], string name, string symbol, string metaURI, uint256 devBuyUsd, uint8 feeMode)` | `SpawnGateway.spawnToken` (burns dev-buy oUSD first) | `SpawnPad._spawn`: deploy hub `SpawnToken` (premint 1B to pad), store `Meta` (creator stays wide), `venue.openMarket`, emit `Spawned`, send OP_SYNC_TOKEN to **every** registered chain, then optional dev-buy via `_buy` |
-| 2 | OP_BUY | gateway → pad | `(bytes32 token [downcast], bytes32 buyer [wide ok], uint256 usdIn)` | `SpawnGateway.buyToken` (burns buyer's oUSD) | `SpawnPad._buy`: mint oUSD to pad, 1% fee, `venue.execBuy`, burn hub tokens, `supplyByChain[src] += out`, burn refund, send OP_DELIVER, emit `Trade`, `_accrueFee` |
+| 1 | OP_SPAWN | gateway → pad | `(bytes32 creator [wide ok], string name, string symbol, string metaURI, uint256 devBuyUsd, uint8 feeMode)` | `SpawnGateway.spawnToken` (burns dev-buy oUSD first) or `spawnTokenUsdc` (v7: pulls dev-buy USDC into the vault via `OmniUSD.depositFor`) — same message | `SpawnPad._spawn`: deploy hub `SpawnToken` (premint 1B to pad), store `Meta` (creator stays wide), `venue.openMarket`, emit `Spawned`, send OP_SYNC_TOKEN to **every** registered chain, then optional dev-buy via `_buy` |
+| 2 | OP_BUY | gateway → pad | `(bytes32 token [downcast], bytes32 buyer [wide ok], uint256 usdIn)` | `SpawnGateway.buyToken` (burns buyer's oUSD) or `buyTokenUsdc` (v7: pulls USDC into the vault) — same message; both first require a local replica (`"GW: unknown token"`), so a BUY for a token the hub never spawned cannot leave the chain | `SpawnPad._buy`: mint oUSD to pad, 1% fee, `venue.execBuy`, burn hub tokens, `supplyByChain[src] += out`, burn refund, send OP_DELIVER, emit `Trade`, `_accrueFee` |
 | 3 | OP_SELL | gateway → pad | `(bytes32 token [downcast], bytes32 seller [wide ok], uint256 tokensIn)` | `SpawnGateway.sellToken` (burns seller's replica) | `SpawnPad._sell`: mint tokens back to pad custody, `supplyByChain[src] -= tokensIn`, `venue.execSell`, 1% fee, burn net oUSD, send OP_PAYOUT, emit `Trade`, `_accrueFee` |
 | 4 | OP_CLAIM | gateway → pad | `(bytes32 token [downcast], bytes32 claimer [wide ok])` | `SpawnGateway.claimFees` | `SpawnPad._claim`: `require(metas[token].creator == claimer)` (wide comparison), pay `dev − devClaimed` via OP_PAYOUT to the claim chain, emit `DevClaimed` |
 | 10 | OP_SYNC_TOKEN | pad → gateway | `(bytes32 token [downcast on EVM spokes; raw 32-byte seed on Solana], string name, string symbol)` | inside `_spawn`, one per registered chain | EVM: deploy replica (`SpawnToken` premint 0, controller = gateway), record `replicaOf` (`SpawnGateway.sol:115-131`). Solana: create Replica PDA + SPL mint, decimals 6, authority = store (`lz_receive.rs::handle_sync_token`) |
-| 11 | OP_DELIVER | pad → gateway | `(bytes32 token [downcast/seed], bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 tokens, uint256 refund)` | inside `_buy` | EVM: `replica.bridgeMint(to, tokens)`, mint oUSD refund (`SpawnGateway.sol:132-138`). Solana: mint `tokens / 1e12` to recipient's ATA (+ scaled refund) |
-| 12 | OP_PAYOUT | pad → gateway | `(bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 usdOut)` | `_sell` net proceeds, `_claim` dev share | mint oUSD to `to` on that chain |
-| 13 | OP_FEE_DROP | pad → gateway | `(bytes32 token [downcast/seed], uint256 amount)` | `_distributeHolders` when the holders pot ≥ DIST_TRIGGER | EVM: mint oUSD into the chain's `FeeDistributor`, `drop(replica, amount)` (`SpawnGateway.sol:142-149`). Solana: mint into the store's vault ATA, parked pending the phase-3 distributor |
+| 11 | OP_DELIVER | pad → gateway | `(bytes32 token [downcast/seed], bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 tokens, uint256 refund)` | inside `_buy` | EVM: `replica.bridgeMint(to, tokens)`, refund settled by `OmniUSD.payout(to, refund)` (v7 — USDC if the vault is liquid, else an oUSD claim; `SpawnGateway.sol:onOmniMessage`). Solana: mint `tokens / 1e12` to recipient's ATA (+ scaled refund) |
+| 12 | OP_PAYOUT | pad → gateway | `(bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 usdOut)` | `_sell` net proceeds, `_claim` dev share | EVM: `OmniUSD.payout(to, usdOut)` (v7 — USDC if liquid, else an oUSD claim; never reverts) |
+| 13 | OP_FEE_DROP | pad → gateway | `(bytes32 token [downcast/seed], uint256 amount)` | `_distributeHolders` when the holders pot ≥ DIST_TRIGGER | EVM: mint oUSD into the chain's `FeeDistributor`, `drop(replica, amount)` (`SpawnGateway.sol:onOmniMessage`); holders claim oUSD and unwrap or trade with it. Solana: mint into the store's vault ATA, parked pending the phase-3 distributor |
 
 Unknown ops revert (`"PAD: bad op"` / `"GW: bad op"`); the Solana codec
 rejects unknown ops, dirty envelope padding and bad offsets
@@ -156,12 +162,75 @@ Invariants an auditor should try to break:
 
 ## 7. Value (oUSD) accounting and invariants
 
-`OmniUSD` is the testnet settlement mock: one instance per chain, burn/mint
-driven by that chain's agent (pad on hub, gateway on spokes), **plus an
-open faucet capped at 100k per call (`OmniUSD.sol:29`) — testnet-only, the
-reason no value invariant means anything economically until USDC/CCTP
-replaces it.** The mechanical invariants still matter because mainnet keeps
-the same shapes:
+**v7: real-money settlement.** `OmniUSD` has no faucet. There is one
+instance per chain, in one of two modes fixed at construction
+(`OmniUSD.sol:constructor`):
+
+- **Backed** (`usdc != 0`, every user-facing chain): the contract is that
+  chain's USDC vault; oUSD (18 dec) is a 1:1 claim on USDC (6 dec,
+  `SCALE = 1e12`). The constructor rejects a non-6-decimal backing token.
+- **Ledger** (`usdc == 0`, the hub): a pure accounting unit minted/burned by
+  the pad. The hub holds no dollars — it holds the books for dollars that
+  sit in the spokes' vaults. All USDC functions revert `"oUSD: ledger
+  only"`; a gateway cannot be constructed over a ledger instance
+  (`"GW: ledger usd"`).
+
+How oUSD comes to exist or disappear — the complete list (a test pins the
+set of state-changing functions, `test/settlement.test.js`):
+
+| Path | Who | USDC | oUSD |
+|---|---|---|---|
+| `wrap(usdc6)` | anyone | pulled into the vault (under `depositCap`) | minted 1:1 to the caller |
+| `unwrap(amount18)` | anyone | paid out; reverts `"oUSD: vault short"` if the local vault lacks it | whole-USDC multiple burned, sub-`SCALE` dust stays |
+| `depositFor(from, usdc6)` | agent (gateway) | pulled from `from` (under `depositCap`) | **none** — the value leaves in the outgoing message (≡ wrap + bridgeBurn) |
+| `payout(to, amount18)` | agent (gateway) | `floor(amount18/SCALE)` paid if the vault has it and the transfer succeeds | only the sub-`SCALE` dust minted — or, on fallback, the **whole** amount |
+| `bridgeMint` / `bridgeBurn` | agent | — | value arriving by / leaving in a protocol message (oUSD-denominated buys, fee drops into the distributor, all hub ledger moves) |
+
+Deposits credit the balance **delta** actually received, not the requested
+amount, and every USDC-moving function is `nonReentrant`.
+
+- **V0 (global backing) — the invariant everything else rests on:**
+  `Σ over backed instances of USDC held × 1e12 = Σ over ALL instances (hub
+  ledger included) of oUSD.totalSupply()`, modulo value in flight (a
+  message between its burn and its mint; a CCTP rebalance between its burn
+  and Circle's mint). It is a GLOBAL equality, not a per-chain one.
+- **Payouts never revert (message path).** `payout` runs inside
+  `onOmniMessage`; a revert would strand the payout. It is all-or-nothing:
+  if the vault holds the USDC **and** the transfer succeeds (low-level call —
+  Circle can blacklist a recipient or pause USDC) the user gets USDC;
+  otherwise the whole amount is minted as oUSD, a claim redeemable with
+  `unwrap` once liquidity returns, or spendable at par through the
+  oUSD-denominated `buyToken`. Reachable revert left upstream: the
+  gateway's `_addr` on a wide recipient (§5, by design), and `to == 0`
+  (unreachable — recipients are always a prior `msg.sender`).
+- **Vault shortage is expected, not exceptional.** Dollars enter where
+  buyers are and leave where sellers are; fees drop where holders are; a
+  dev may claim on any chain. A chain's vault can therefore owe more oUSD
+  than it holds USDC while V0 still holds globally. First-come-first-served
+  on local liquidity; later claimants hold oUSD until a rebalance.
+- **Rebalancing trust model.** `rebalance(dstLabel, usdc6)` (admin-only)
+  burns vault USDC through Circle CCTP V2 `TokenMessengerV2.depositForBurn`
+  with `mintRecipient = peers[dstLabel].vault`, `destinationCaller = 0`
+  (anyone may relay the attestation), `maxFee = 0`,
+  `minFinalityThreshold = 2000` (Standard Transfer). `setPeer` is
+  once-per-label and can never be re-aimed. **What this does and does not
+  give:** there is no code path that sends vault USDC to an arbitrary
+  address in one step — but the admin *names* the peers, and nothing stops
+  a hostile admin from naming a fresh label whose "peer vault" is their own
+  address and rebalancing into it. Until peers are sealed or time-locked
+  (hardening chantier), **the admin key can drain every vault** — treat it
+  exactly like an upgrade key. The admin can also move all local liquidity
+  to a legitimate peer (a liveness, not a theft, power).
+- **Deposit cap.** `depositCap` bounds the vault's USDC *balance* at deposit
+  time (default 0 = closed). It never blocks exits. It is not a bound on
+  oUSD claims minted by payout fallbacks, and a direct USDC donation or an
+  inbound rebalance can fill it (deposits then wait for the admin).
+- **Circle dependencies.** A blacklisted *vault* freezes that chain's USDC
+  (exits fall back to oUSD claims, deposits revert); a CCTP denylist entry
+  or a non-zero CCTP `minFee` makes `rebalance` revert (safe failure — a
+  non-zero fee would otherwise break V0 by the fee amount).
+
+The pre-v7 invariants are unchanged in shape:
 
 - **V1 (pad solvency):** hub oUSD balance of the pad
   `= Σ_tokens [curve real reserves (vBase − V_BASE_0 pre-ascension; vBase
@@ -307,7 +376,9 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 
 | Item | Status |
 |---|---|
-| OmniUSD open faucet & agent burn/mint instead of real USDC/CCTP | OUT OF SCOPE (testnet-only money; mainnet swaps in USDC + CCTP, same burn/mint shape) |
+| ~~OmniUSD open faucet instead of real USDC~~ | **RESOLVED in v7** — `OmniUSD` is a USDC-backed vault with no faucet (§7). Testnets and the local world run the *same* contract over a `MockUSDC` (open mint, 6 decimals, admin blacklist) and no CCTP; mainnet passes Circle's USDC + `TokenMessengerV2`. `MockUSDC`/`MockTokenMessenger` must never be deployed to a mainnet. AUDIT SCOPE: `OmniUSD.sol`, the gateway USDC paths |
+| Vault peers chosen by the admin, not sealed or time-locked | AUDIT SCOPE — a hostile admin can name a fake peer and rebalance into it (§7); fix planned in the hardening chantier |
+| CCTP attestation relay for rebalances is manual (no keeper), payouts are all-or-nothing | OUT OF SCOPE (ops) — but note the user-facing effect: oUSD claims on a short chain wait for the admin |
 | Admin = single EOA, no multisig/timelock | AUDIT SCOPE as a threat model (hostile admin), fix planned pre-mainnet |
 | No pause switch, no per-token or global rate limits on messages | AUDIT SCOPE (absence is the finding; mainnet adds them) |
 | Unordered delivery + LZ retry as the only ordering backstop | AUDIT SCOPE (see F-2) |

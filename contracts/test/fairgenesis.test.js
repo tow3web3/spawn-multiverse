@@ -1,7 +1,7 @@
 const { expect } = require('chai')
 const { ethers, network } = require('hardhat')
 const { time } = require('@nomicfoundation/hardhat-network-helpers')
-const { deployWorld } = require('../scripts/lib-deploy')
+const { deployWorld, fundUsd, worth } = require('../scripts/lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
 const DUST = E(0.000001)
@@ -29,7 +29,7 @@ describe('FAIR GENESIS (protocol v6)', () => {
 
   it('a buy in the spawn block bounces whole — refund, zero tokens, no revert', async () => {
     const c = world.chains[2]
-    await (await c.usd.faucet(user2, E(100))).wait()
+    await fundUsd(c, user2, 100)
     // The pad deploys the token with CREATE at nonce 1 — precompute it so the
     // snipe tx can target the token before the spawn has even executed.
     const predicted = ethers.getCreateAddress({ from: world.pad.target, nonce: 1 })
@@ -48,10 +48,11 @@ describe('FAIR GENESIS (protocol v6)', () => {
       Number(await world.pad.spawnBlock(token)),
     ) // truly the same block
 
-    // the sniper got nothing, paid nothing: oUSD bounced home in the DELIVER
+    // the sniper got nothing, paid nothing: the $50 bounced home in the
+    // DELIVER (v7: as USDC, straight out of the vault)
     const rep = await ethers.getContractAt('SpawnToken', await c.gateway.replicaOf(token))
     expect(await rep.balanceOf(user2)).to.equal(0n)
-    expect(await c.usd.balanceOf(user2)).to.equal(E(100))
+    expect(await worth(c, user2)).to.equal(E(100))
     await expect(txSnipe).to.emit(world.pad, 'GenesisGuard')
     expect((await world.pad.feesOf(token)).total).to.equal(0n)
   })
@@ -59,7 +60,7 @@ describe('FAIR GENESIS (protocol v6)', () => {
   it('the snipe tax decays linearly: ~27% early, 15.5% mid-window, exactly 1% after', async () => {
     const c = world.chains[2]
     const { token, spawnedAt } = await spawn(c)
-    await (await c.usd.faucet(user, E(1_000))).wait()
+    await fundUsd(c, user, 1_000)
 
     // t = +60s: snipeBps = 2900 * 540/600 = 2610 -> total fee 27.10%
     await time.setNextBlockTimestamp(spawnedAt + 60)
@@ -85,7 +86,7 @@ describe('FAIR GENESIS (protocol v6)', () => {
   it('the tax rides the fee mode: holders get paid by the sniper', async () => {
     const c = world.chains[1]
     const { token, spawnedAt } = await spawn(c, 0) // FEE_HOLDERS
-    await (await c.usd.faucet(user2, E(500))).wait()
+    await fundUsd(c, user2, 500)
 
     await time.setNextBlockTimestamp(spawnedAt + 60) // 27.1% total fee
     await (await c.gateway.connect(user2).buyToken(token, E(100))).wait()
@@ -103,7 +104,7 @@ describe('FAIR GENESIS (protocol v6)', () => {
   it('the tax rides FEE_BURN mode into the burn pot', async () => {
     const c = world.chains[4]
     const { token, spawnedAt } = await spawn(c, 3) // FEE_BURN
-    await (await c.usd.faucet(user2, E(500))).wait()
+    await fundUsd(c, user2, 500)
 
     await time.setNextBlockTimestamp(spawnedAt + 60)
     await (await c.gateway.connect(user2).buyToken(token, E(100))).wait()
@@ -118,13 +119,13 @@ describe('FAIR GENESIS (protocol v6)', () => {
   it('caps each wallet at $250 in the window: clamp, refund, then full bounce', async () => {
     const c = world.chains[2]
     const { token, spawnedAt } = await spawn(c)
-    await (await c.usd.faucet(user2, E(1_000))).wait()
+    await fundUsd(c, user2, 1_000)
 
     // $300 intent -> only $250 reaches the market, $50 rides home
     await time.setNextBlockTimestamp(spawnedAt + 300)
     const tx = await c.gateway.connect(user2).buyToken(token, E(300))
     await tx.wait()
-    expect(await c.usd.balanceOf(user2)).to.equal(E(750)) // 1000 - 250
+    expect(await worth(c, user2)).to.equal(E(750)) // 1000 - 250
     expect(await world.pad.genesisSpent(token, ethers.zeroPadValue(user2.address, 32))).to.equal(
       E(250),
     )
@@ -138,7 +139,7 @@ describe('FAIR GENESIS (protocol v6)', () => {
     const bag = await rep.balanceOf(user2)
     await (await c.gateway.connect(user2).buyToken(token, E(10))).wait()
     expect(await rep.balanceOf(user2)).to.equal(bag)
-    expect(await c.usd.balanceOf(user2)).to.equal(E(750))
+    expect(await worth(c, user2)).to.equal(E(750))
 
     // the window closes: the cap lifts
     await time.setNextBlockTimestamp(spawnedAt + 601)
@@ -148,7 +149,7 @@ describe('FAIR GENESIS (protocol v6)', () => {
 
   it('the dev buy at spawn is the one disclosed exemption: no tax, no cap, no block-0', async () => {
     const c = world.chains[2]
-    await (await c.usd.faucet(user, E(600))).wait()
+    await fundUsd(c, user, 600)
     await (await c.gateway.connect(user).spawnToken('DEVBAG', 'DEV', '{}', E(500), 0)).wait()
     const token = await world.pad.allTokens(0)
 
@@ -170,7 +171,7 @@ describe('FAIR GENESIS (protocol v6)', () => {
     expect(g.spentUsd).to.equal(0n)
     expect(g.capUsd).to.equal(E(250))
 
-    await (await c.usd.faucet(user2, E(100))).wait()
+    await fundUsd(c, user2, 100)
     await time.setNextBlockTimestamp(spawnedAt + 300)
     await (await c.gateway.connect(user2).buyToken(token, E(100))).wait()
     g = await world.pad.fairGenesisOf(token, actor)
