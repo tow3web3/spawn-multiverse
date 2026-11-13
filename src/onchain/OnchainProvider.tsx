@@ -45,6 +45,8 @@ import {
   type PublicClient,
 } from 'viem'
 import { narrowActor } from '../lib/format'
+import { hostedImagePath } from '../lib/tokenImage'
+import { MAX_META_BYTES, buildMetaURI, utf8Len } from '../lib/tokenMeta'
 import { generatePrivateKey, privateKeyToAccount, type PrivateKeyAccount } from 'viem/accounts'
 import {
   StoreCtx,
@@ -104,10 +106,10 @@ const LOG_CHUNK_PUBLIC = 199n
 // blocks) — keeps page loads fast on capped public RPCs.
 const BACKFILL_BLOCKS = 60_000n
 const LS_RISK = 'spawn.risk.accepted.v1'
-/** Gateway string caps (bytes) — a longer string reverts "GW: string too long". */
+/** Gateway string caps (bytes) — a longer string reverts "GW: string too long".
+ * (The metaURI cap, 1024, lives with its builder in lib/tokenMeta.) */
 const MAX_NAME_BYTES = 64
 const MAX_SYMBOL_BYTES = 16
-const MAX_META_BYTES = 1024
 
 /** Real names for wallet prompts: a wallet asked to add "spawn-base" over an
  * unknown RPC looks like a phish. */
@@ -129,7 +131,6 @@ const ef = (v: bigint) => Number(formatEther(v))
 const e6 = (v: bigint) => Number(formatUnits(v, 6))
 const toU6 = (n: number) => parseUnits(n.toFixed(6), 6)
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const utf8Len = (s: string) => new TextEncoder().encode(s).length
 const up = (chainId: string) => chainId.toUpperCase()
 
 interface TokenEntry {
@@ -600,9 +601,12 @@ export function OnchainProvider({
       let entry = entriesRef.current.get(num)
       if (!entry) {
         const parsed = parseMetaURI(metaURI)
-        // Images live off-chain (IPFS in production; this browser's storage
-        // on dev/test deployments) — metaURI stays tiny.
-        let image = parsed.image
+        // The image is hosted by the site (`/img/<sha256>`), and the metaURI
+        // carries only that path. Chain data is hostile until proven
+        // otherwise: anything that is not exactly such a path on THIS origin
+        // is dropped, never loaded. A launch made where hosting was not
+        // available falls back to the creator's own browser copy.
+        let image = hostedImagePath(parsed.image)
         if (!image) {
           try {
             image = localStorage.getItem(`spawn.img.${token.toLowerCase()}`) ?? undefined
@@ -1493,10 +1497,14 @@ export function OnchainProvider({
   const spawnArgs = (input: SpawnInput) => {
     const name = input.name.toUpperCase()
     const ticker = input.ticker.toUpperCase()
-    // metaURI stays small on purpose: in production the image goes to IPFS
-    // and the URI points at it; on dev/test deployments the image lives in
-    // this browser, keyed by the token address.
-    const metaURI = JSON.stringify({ links: input.links, feeMode: input.feeMode ?? 'holders' })
+    // metaURI stays small on purpose: the image is hosted by the site and
+    // the URI carries only its path (69 bytes). Without a hosted image the
+    // face lives in the creator's browser only, keyed by the token address.
+    const metaURI = buildMetaURI({
+      links: input.links,
+      feeMode: input.feeMode,
+      image: hostedImagePath(input.imageUrl),
+    })
     return { name, ticker, metaURI }
   }
 
@@ -1632,11 +1640,19 @@ export function OnchainProvider({
         }
       }
       if (token) {
+        // the creator's own copy of the face: what this browser shows when
+        // the launch carries no hosted image
         try {
           localStorage.setItem(`spawn.img.${token.toLowerCase()}`, input.image)
         } catch {
           /* no storage */
         }
+        // A background poll may have listed the token while the launch was
+        // still crossing — an entry is built once, so hand it the face now.
+        const early = [...entriesRef.current.values()].find(
+          (en) => en.token.toLowerCase() === token.toLowerCase(),
+        )
+        if (early && !early.meta.image && input.image) early.meta.image = input.image
       }
       await poll()
       const entry = token

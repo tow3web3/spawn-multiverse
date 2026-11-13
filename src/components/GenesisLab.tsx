@@ -1,35 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks, type FeeMode } from '../store'
 import { useChainSet } from '../lib/liveChains'
 import { fmtNum, fmtPrice } from '../lib/format'
 import { cleanLinks, LINK_META } from '../lib/links'
+import { processImage, uploadTokenImage } from '../lib/tokenImage'
+import { IMAGE_PATH_SAMPLE, MAX_META_BYTES, buildMetaURI, utf8Len } from '../lib/tokenMeta'
 import { Sparkle } from './bits'
 
 const PREVIEW_BG = '#9ccbf5'
-
-/** Center-crop to a square, downscale, and return a compact data URL. */
-async function processImage(file: File): Promise<string> {
-  const url = URL.createObjectURL(file)
-  try {
-    const img = new Image()
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve()
-      img.onerror = () => reject(new Error('unreadable image'))
-      img.src = url
-    })
-    const size = 256
-    const canvas = document.createElement('canvas')
-    canvas.width = size
-    canvas.height = size
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('no canvas')
-    const s = Math.min(img.width, img.height)
-    ctx.drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, size, size)
-    return canvas.toDataURL('image/webp', 0.85)
-  } finally {
-    URL.revokeObjectURL(url)
-  }
-}
 
 export function GenesisLab({
   onClose,
@@ -45,7 +23,14 @@ export function GenesisLab({
   const [name, setName] = useState('')
   const [ticker, setTicker] = useState('')
   const [image, setImage] = useState<string | null>(null)
+  /** The same face as the bytes that get hosted at launch (on-chain modes). */
+  const [imageBlob, setImageBlob] = useState<Blob | null>(null)
   const [imageError, setImageError] = useState(false)
+  /** Why hosting the face failed — the launch then waits for a decision. */
+  const [hostErr, setHostErr] = useState<string | null>(null)
+  const [hosting, setHosting] = useState(false)
+  /** One upload per picked image, even if the wallet step is retried. */
+  const hosted = useRef<{ blob: Blob; path: string } | null>(null)
   const [links, setLinks] = useState<CreatureLinks>({})
   const [feeMode, setFeeMode] = useState<FeeMode>('holders')
   const [devBuyStr, setDevBuyStr] = useState('')
@@ -88,6 +73,8 @@ export function GenesisLab({
           name: name.trim() || 'TURBO PICKLE',
           ticker: ticker.trim() || 'PICKL',
           image: '',
+          // the fee follows the payload size: quote with the image path in it
+          imageUrl: image ? IMAGE_PATH_SAMPLE : undefined,
           links: cleanLinks(links),
           feeMode,
           devBuyUsd: devBuyNum,
@@ -102,27 +89,62 @@ export function GenesisLab({
       window.clearTimeout(t)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onchain?.status, onchain?.sponsored, from?.id, name, ticker, linksKey, feeMode, devBuyNum > 0])
+  }, [onchain?.status, onchain?.sponsored, from?.id, name, ticker, linksKey, feeMode, devBuyNum > 0, image !== null])
 
   const previewName = (name.trim() || 'TURBO PICKLE').toUpperCase()
   const previewTicker = (ticker.trim() || 'PICKL').toUpperCase()
-  const ready = name.trim().length > 0 && ticker.trim().length > 0 && image !== null
+  // On-chain the links, the fee mode and the image path share one 1024-byte
+  // metaURI: check it here, before anything is hosted or signed.
+  const metaBytes = utf8Len(
+    buildMetaURI({ links: cleanLinks(links), feeMode, image: image ? IMAGE_PATH_SAMPLE : undefined }),
+  )
+  const metaTooLong = !!onchain && metaBytes > MAX_META_BYTES
+  const ready = name.trim().length > 0 && ticker.trim().length > 0 && image !== null && !metaTooLong
 
   const onFile = async (file: File | undefined | null) => {
     if (!file) return
     try {
-      setImage(await processImage(file))
+      const p = await processImage(file)
+      setImage(p.dataUrl)
+      setImageBlob(p.blob)
       setImageError(false)
+      setHostErr(null)
     } catch {
       setImageError(true)
     }
   }
 
-  const submit = async () => {
+  /** `withoutHosting`: the creator chose to launch with the placeholder
+   * face after hosting failed. */
+  const submit = async (withoutHosting = false) => {
     if (!ready || !image || busy) return
     setBusy(true)
     setSpawnErr(null)
+    setHostErr(null)
     try {
+      // Host the face first: a launch cannot be edited, so the image path
+      // has to be in the metaURI the wallet is about to sign.
+      let imageUrl: string | undefined
+      if (onchain && imageBlob && !withoutHosting) {
+        if (hosted.current?.blob === imageBlob) {
+          imageUrl = hosted.current.path
+        } else {
+          setHosting(true)
+          try {
+            imageUrl = await uploadTokenImage(imageBlob)
+            hosted.current = { blob: imageBlob, path: imageUrl }
+          } catch (e) {
+            // a local devnet usually runs without the image function: the
+            // face simply stays in this browser, as it always did there
+            if (onchain.network !== 'local') {
+              setHostErr(e instanceof Error && e.message ? e.message : 'image hosting is unavailable')
+              return
+            }
+          } finally {
+            setHosting(false)
+          }
+        }
+      }
       // The dev buy rides INSIDE the spawn — the one FAIR GENESIS exemption.
       let devBuyUsd = 0
       if (devBuyNum > 0) {
@@ -135,6 +157,7 @@ export function GenesisLab({
         name: name.trim(),
         ticker: ticker.trim(),
         image,
+        imageUrl,
         links: cleanLinks(links),
         feeMode,
         devBuyUsd,
@@ -256,6 +279,9 @@ export function GenesisLab({
                 <span className="mt-1 block font-mono text-[10px] leading-relaxed text-white/40">
                   Click or drop it here. Square works best — this face follows your token onto
                   all {chainSet.lower} chains.
+                  {onchain
+                    ? ' It is shrunk in your browser and hosted by SPAWN! when you launch, so every visitor sees it.'
+                    : ''}
                 </span>
                 {imageError && (
                   <span className="mt-1 block font-mono text-[10px] font-bold text-down">
@@ -292,6 +318,12 @@ export function GenesisLab({
                 </div>
               ))}
             </div>
+            {metaTooLong && (
+              <p className="mt-2 font-mono text-[10px] font-bold tracking-wide text-down">
+                THOSE LINKS ARE TOO LONG TO FIT ON-CHAIN ({metaBytes} / {MAX_META_BYTES} BYTES) —
+                SHORTEN THEM TO LAUNCH.
+              </p>
+            )}
 
             <p className={`${label} mt-7`}>04 — ONE GLOBAL SUPPLY (PREDEFINED)</p>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border-3 border-white/20 bg-void px-4 py-3">
@@ -449,8 +481,39 @@ export function GenesisLab({
               disabled={!ready || busy}
               className="mt-7 w-full rounded-xl border-3 border-white/25 bg-void px-6 py-4 font-mono text-[13px] font-bold tracking-wide text-white shadow-[6px_6px_0_0_#c9f24b] transition hover:-translate-y-1 hover:shadow-[9px_9px_0_0_#c9f24b] active:translate-y-0 active:shadow-[6px_6px_0_0_#c9f24b] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
             >
-              {busy ? '✳ SPAWNING ACROSS THE MULTIVERSE…' : '✳ SPAWN ACROSS THE MULTIVERSE ↗'}
+              {hosting
+                ? '✳ HOSTING THE FACE…'
+                : busy
+                  ? '✳ SPAWNING ACROSS THE MULTIVERSE…'
+                  : '✳ SPAWN ACROSS THE MULTIVERSE ↗'}
             </button>
+            {hostErr && (
+              <div className="mt-3 rounded-xl border-3 border-tang bg-tang/10 p-3">
+                <p className="font-mono text-[10px] font-bold leading-relaxed tracking-wide text-tang">
+                  COULDN'T HOST YOUR IMAGE — {hostErr.toUpperCase()}. NOTHING HAS BEEN SIGNED. A
+                  LAUNCH CAN'T BE EDITED: IF YOU GO ON WITHOUT IT, YOUR TOKEN SHOWS A PLACEHOLDER
+                  FACE TO EVERYONE BUT THIS BROWSER, FOR GOOD.
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void submit()}
+                    disabled={busy}
+                    className="rounded-lg border-2 border-lime bg-lime px-3 py-1.5 font-mono text-[10px] font-bold text-ink disabled:opacity-40"
+                  >
+                    TRY HOSTING AGAIN
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void submit(true)}
+                    disabled={busy}
+                    className="rounded-lg border-2 border-white/30 px-3 py-1.5 font-mono text-[10px] font-bold text-white/70 hover:border-white/60 disabled:opacity-40"
+                  >
+                    LAUNCH WITH THE PLACEHOLDER
+                  </button>
+                </div>
+              </div>
+            )}
             {spawnErr && (
               <p className="mt-3 font-mono text-[10px] font-bold tracking-wide text-down">
                 {spawnErr}

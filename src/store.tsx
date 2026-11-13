@@ -63,7 +63,10 @@ export interface CreatureMeta {
   ticker: string
   /** Seed creatures use a built-in SVG face… */
   face?: FaceId
-  /** …user-created creatures upload their own image (data URL). */
+  /** …user-created creatures have their own image: on-chain the hosted
+   * path `/img/<sha256>`; in the SIM, or as the creator's own copy of an
+   * un-hosted launch, a local data URL. Rendered only through
+   * `safeImageSrc` — nothing else is ever loaded. */
   image?: string
   links?: CreatureLinks
   color: string
@@ -380,7 +383,12 @@ export function shortAddr(a: string): string {
 export interface SpawnInput {
   name: string
   ticker: string
+  /** The face as a local data URL — the preview, the SIM, and the creator's
+   * own copy when no hosted image exists. */
   image: string
+  /** On-chain only: the hosted path of that face (`/img/<sha256>`), which
+   * is what the metaURI carries so every visitor sees it. */
+  imageUrl?: string
   links?: CreatureLinks
   /** Fee routing, picked once at launch. Defaults to 'holders'. */
   feeMode?: FeeMode

@@ -10,9 +10,11 @@
     "chain": "npm --prefix contracts run node",
     "chain:deploy": "npm --prefix contracts run deploy:local",
     "chain:bots": "npm --prefix contracts run bots",
-    "chain:test": "npm --prefix contracts test"
+    "chain:test": "npm --prefix contracts test",
+    "test:functions": "node --test \"netlify/lib/*.test.mjs\""
   },
   "dependencies": {
+    "@netlify/blobs": "^11.1.9",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "viem": "^2.57.13"

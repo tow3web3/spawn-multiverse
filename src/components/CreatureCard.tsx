@@ -1,4 +1,6 @@
+import { useMemo, useState } from 'react'
 import { GENESIS_WINDOW_MS, type Creature } from '../store'
+import { safeImageSrc } from '../lib/tokenImage'
 import {
   creatureNum,
   fmtChange,
@@ -7,7 +9,7 @@ import {
   fmtPrice,
   timeAgo,
 } from '../lib/format'
-import { Face } from './Faces'
+import { Face, type FaceId } from './Faces'
 import { Asterisk, ChainDots, Sparkle } from './bits'
 import { useChainSet } from '../lib/liveChains'
 
@@ -34,19 +36,36 @@ function StatusBadge({ c }: { c: Creature }) {
   )
 }
 
+/** A token's face, everywhere it shows. An image is only ever loaded from
+ * the site's own `/img/<sha256>` (or a local raster the creator's browser
+ * made) — never from a URL someone wrote on-chain. The placeholder face
+ * stands in while a hosted image loads, and for good if it fails. */
 export function CreatureArt({ c, size }: { c: Creature; size: number }) {
-  if (c.image) {
-    return (
+  const src = useMemo(() => safeImageSrc(c.image), [c.image])
+  if (!src) return <Face id={c.face ?? 'frog'} size={size} className="relative" />
+  return <ImageArt key={src} src={src} face={c.face ?? 'frog'} size={size} />
+}
+
+function ImageArt({ src, face, size }: { src: string; face: FaceId; size: number }) {
+  // a local data URL is already here; a hosted one has to arrive first
+  const [phase, setPhase] = useState<'loading' | 'ok' | 'bad'>(src.startsWith('data:') ? 'ok' : 'loading')
+  if (phase === 'bad') return <Face id={face} size={size} className="relative" />
+  return (
+    <span className="relative inline-block shrink-0 align-top" style={{ width: size, height: size }}>
+      {phase === 'loading' && <Face id={face} size={size} className="absolute inset-0" />}
       <img
-        src={c.image}
+        src={src}
         alt=""
-        style={{ width: size, height: size }}
+        onLoad={() => setPhase('ok')}
+        onError={() => setPhase('bad')}
+        decoding="async"
+        referrerPolicy="no-referrer"
+        style={{ width: size, height: size, opacity: phase === 'ok' ? 1 : 0 }}
         className="relative rounded-full border-3 border-ink bg-white object-cover"
         draggable={false}
       />
-    )
-  }
-  return <Face id={c.face ?? 'frog'} size={size} className="relative" />
+    </span>
+  )
 }
 
 export function CreatureCard({

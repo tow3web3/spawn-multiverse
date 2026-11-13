@@ -5,3 +5,10 @@
 
 [functions]
   directory = "netlify/functions"
+
+# Token images: netlify/functions/token-image.mjs serves /img and /img/<sha256>
+# itself (its `config.path`), so no redirect is declared here. Its switches
+# are site environment variables:
+#   IMAGES_DISABLED=1        refuse new uploads (existing images stay up)
+#   IMAGES_ADMIN_KEY=<secret> enable take-downs: DELETE /img/<key> with header x-admin-key
+#   IMAGES_MAX_PER_HOUR=<n>  site-wide upload cap per hour (default 300)
