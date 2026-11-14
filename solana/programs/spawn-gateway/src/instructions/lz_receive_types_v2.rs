@@ -11,6 +11,15 @@ use oapp::{
 /// The Executor calls this off-chain to learn which accounts lz_receive
 /// needs — Solana's answer to the EVM's dynamic storage access. The list
 /// must mirror each handler's layout in lz_receive.rs exactly.
+///
+/// EVERY LIST IS A PURE FUNCTION OF THE MESSAGE. Nothing here reads whether
+/// an account exists, so no state of the recipient — a wallet or not, with
+/// or without a token account, ever seen here or not — can change the
+/// list or make it unresolvable; `lz_receive` decides what to do with what
+/// it finds. The only key a sender on another chain can choose (the `to`
+/// of a moved claim) is listed READ-ONLY; the writable accounts derived
+/// from it are program addresses (the user account, the associated USDC
+/// account), which nobody can aim at an existing account of another kind.
 #[derive(Accounts)]
 #[instruction(params: LzReceiveParams)]
 pub struct LzReceiveTypesV2<'info> {
@@ -46,15 +55,16 @@ impl LzReceiveTypesV2<'_> {
 
         let meta = |key: Pubkey, writable: bool| AccountMetaRef { pubkey: key.into(), is_writable: writable };
         let pda = |seeds: &[&[u8]]| Pubkey::find_program_address(seeds, program_id).0;
-        // the wire carries the op inside the inter-transport envelope (v5)
+        // every message: the tank and the system program — what creating an
+        // account for a message that has nobody to charge takes
+        accounts.extend([meta(pda(&[GAS_TANK_SEED]), true), meta(system_program::ID, false)]);
+        // the wire carries the op inside the inter-transport envelope
         let env = msg_codec::Envelope::decode(&params.message)?;
         match SpawnMsg::decode(&env.payload)? {
             SpawnMsg::SyncToken { hub_token, .. } => {
                 accounts.extend([
                     meta(pda(&[REPLICA_SEED, &hub_token.0]), true),
                     meta(pda(&[MINT_SEED, &hub_token.0]), true),
-                    meta(pda(&[GAS_TANK_SEED]), true),
-                    meta(system_program::ID, false),
                     meta(token::ID, false),
                 ]);
             }

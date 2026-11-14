@@ -21,8 +21,17 @@
  *   --send-confirmations [32] --receive-confirmations [10]
  *   --operator <key> --guardian <key>
  *   --gas-to-hub [4600000] --return-unit-wei [350000000000000] --trade-legs [1] --spawn-legs (required)
+ *   --open-legs [1]                                   legs an open prepays (v7.2)
+ *   --move-legs bnb:6,base:1,ethereum:40,…            the price of a claim moved toward each chain, in
+ *                                                     reply legs (name or label); a chain not listed stays closed
+ *   --cctp-peer base:0x…,arbitrum:0x…                 peer vaults (the OmniUSD of each chain) for rebalancing —
+ *                                                     each is set ONCE and can never be re-aimed
  *   --deposit-cap-usdc [0] --no-pause --tank-sol [0.3]
+ *   --no-pin-libraries     leave the gateway on LayerZero's default libraries (default: pin both)
+ *   --no-freeze-table      keep the lookup table extensible — and closable — by the admin key (default: freeze)
  *   --new-admin <key> [--new-admin-keypair <file>]  --table <key>  --only <step-ids,…>
+ *
+ * A store is born PAUSED; without --no-pause the wiring leaves it so (unpause after the hub's batch).
  */
 import * as fs from 'fs'
 import {
@@ -35,6 +44,8 @@ import {
   TransactionInstruction,
 } from '@solana/web3.js'
 import {
+  CCTP_DOMAIN,
+  CHAIN_LABEL,
   CLUSTERS,
   Cluster,
   MAINNET_DVNS,
@@ -56,7 +67,7 @@ function args(argv: string[]) {
     const a = argv[i]
     if (!a.startsWith('--')) throw new Error(`unexpected argument ${a}`)
     const k = a.slice(2)
-    if (['dry-run', 'no-pause', 'confirm-mainnet'].includes(k)) out.set(k, 'true')
+    if (['dry-run', 'no-pause', 'confirm-mainnet', 'no-pin-libraries', 'no-freeze-table'].includes(k)) out.set(k, 'true')
     else {
       const v = argv[++i]
       if (v === undefined) throw new Error(`--${k} needs a value`)
@@ -79,6 +90,36 @@ function verifierSet(spec: string | undefined, cluster: Cluster): VerifierSet | 
   const [req, opt, th] = s.split('/')
   const keys = (x: string | undefined) => (x ? x.split(',').filter(Boolean).map((k) => new PublicKey(k)) : [])
   return { required: keys(req), optional: keys(opt), threshold: Number(th ?? 0) }
+}
+
+/** A chain by name ("bnb") or by label ("4"). */
+function label(x: string): number {
+  const named = (CHAIN_LABEL as Record<string, number>)[x.toLowerCase()]
+  if (named !== undefined) return named
+  if (!/^\d+$/.test(x)) throw new Error(`unknown chain "${x}"`)
+  return Number(x)
+}
+
+/** "bnb:6,base:1" → the price list of moves. */
+export function moveLegs(spec: string | undefined) {
+  return (spec ?? '').split(',').filter(Boolean).map((e) => {
+    const [chain, legs] = e.split(':')
+    if (legs === undefined || !/^\d+$/.test(legs)) throw new Error(`--move-legs wants chain:legs, got "${e}"`)
+    return { dstChain: label(chain), legs: Number(legs) }
+  })
+}
+
+/** "base:0x…" → CCTP peers; the domain is Circle's for that chain. */
+export function cctpPeers(spec: string | undefined) {
+  return (spec ?? '').split(',').filter(Boolean).map((e) => {
+    const [chain, vault] = e.split(':')
+    if (!vault) throw new Error(`--cctp-peer wants chain:0x<vault>, got "${e}"`)
+    const l = label(chain)
+    const name = Object.entries(CHAIN_LABEL).find(([, v]) => v === l)?.[0]
+    const domain = name === undefined ? undefined : (CCTP_DOMAIN as Record<string, number>)[name]
+    if (domain === undefined || l === CHAIN_LABEL.solana) throw new Error(`chain "${chain}" has no Circle USDC vault to be a CCTP peer`)
+    return { label: l, domain, vault: toBytes32(vault) }
+  })
 }
 
 async function main() {
@@ -120,6 +161,11 @@ async function main() {
       tradeLegs: Number(a.get('trade-legs') ?? 1),
       spawnLegs: Number(need('spawn-legs')),
     },
+    openLegs: Number(a.get('open-legs') ?? 1),
+    moveLegs: moveLegs(a.get('move-legs')),
+    cctpPeers: cctpPeers(a.get('cctp-peer')),
+    pinLibraries: !a.has('no-pin-libraries'),
+    freezeTable: !a.has('no-freeze-table'),
     depositCap: parseUnits(a.get('deposit-cap-usdc') ?? '0'),
     leavePaused: !a.has('no-pause'),
     tankLamports: parseUnits(a.get('tank-sol') ?? '0.3', 9),
@@ -160,7 +206,9 @@ async function main() {
   if (p.tankLamports) console.log(`tank target: ${Number(p.tankLamports) / LAMPORTS_PER_SOL} SOL`)
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e)
-  process.exit(1)
-})
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : e)
+    process.exit(1)
+  })
+}

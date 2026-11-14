@@ -60,12 +60,48 @@ pub fn load_replica(info: &AccountInfo, hub_token: &[u8; 32]) -> Result<Option<R
 
 /// The user account of `owner`, or None when it does not exist yet.
 pub fn load_user(info: &AccountInfo, owner: &Pubkey) -> Result<Option<UserAccount>> {
-    let (pda, _) = Pubkey::find_program_address(&[USER_SEED, owner.as_ref()], &crate::ID);
+    Ok(locate_user(info, owner)?.0)
+}
+
+/// The same, with the bump of the address — what creating it needs.
+pub fn locate_user(info: &AccountInfo, owner: &Pubkey) -> Result<(Option<UserAccount>, u8)> {
+    let (pda, bump) = Pubkey::find_program_address(&[USER_SEED, owner.as_ref()], &crate::ID);
     require!(*info.key == pda, GatewayError::AccountMismatch);
     if info.owner != &crate::ID || info.data_is_empty() {
-        return Ok(None);
+        return Ok((None, bump));
     }
-    Ok(Some(load(info)?))
+    Ok((Some(load(info)?), bump))
+}
+
+/// The tank's address, checked; returns its bump.
+pub fn check_tank(tank: &AccountInfo) -> Result<u8> {
+    let (pda, bump) = Pubkey::find_program_address(&[GAS_TANK_SEED], &crate::ID);
+    require!(*tank.key == pda, GatewayError::AccountMismatch);
+    Ok(bump)
+}
+
+/// Creates a program account for a hub message that has nobody to charge:
+/// out of the tank when it holds the rent, otherwise out of the
+/// transaction's payer (LayerZero's executor declines that unless the
+/// message brought the lamports; anyone else may accept it). Returns true
+/// when the tank paid.
+pub fn create_from_tank<'info>(
+    payer: &AccountInfo<'info>,
+    tank: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    new_account: &AccountInfo<'info>,
+    new_seeds: &[&[u8]],
+    space: usize,
+    owner: &Pubkey,
+) -> Result<bool> {
+    require!(*system_program.key == anchor_lang::system_program::ID, GatewayError::AccountMismatch);
+    let tank_bump = check_tank(tank)?;
+    let need = Rent::get()?.minimum_balance(space).saturating_sub(new_account.lamports());
+    let from_tank = tank_spendable(tank)? >= need;
+    let tank_seeds: &[&[u8]] = &[GAS_TANK_SEED, &[tank_bump]];
+    let (funder, funder_seeds) = if from_tank { (tank, Some(tank_seeds)) } else { (payer, None) };
+    create_pda_account(funder, funder_seeds, new_account, new_seeds, space, owner, system_program)?;
+    Ok(from_tank)
 }
 
 /// Creates a PDA-addressed account of `space` bytes owned by `owner`,
@@ -136,21 +172,18 @@ pub enum Paid {
     Nothing,
 }
 
-/// Settles `units` USDC for `recipient`: straight from the vault when it
-/// holds them and the recipient's token account can take them, otherwise as
-/// a claim the recipient redeems later (`redeem_claim`). NEVER fails for a
-/// short vault or an unusable token account. `user` is the recipient's user
-/// account when it exists; a claim needs it.
-pub fn pay_usdc<'info>(
-    store: &mut Account<'info, Store>,
+/// Pays `units` USDC out of the vault into `recipient`'s own token account
+/// — if, and only if, that transfer cannot fail: the vault is live, not
+/// frozen and holds the amount, and the destination is the recipient's
+/// associated USDC account, initialised, theirs, and not frozen. Returns
+/// false, having moved nothing, in every other case. Solana has no
+/// try/catch: this check IS the catch.
+pub fn try_pay_usdc<'info>(
+    store: &Account<'info, Store>,
     accounts: &PayoutAccounts<'_, 'info>,
     recipient: &Pubkey,
-    user: Option<&mut UserAccount>,
     units: u64,
-) -> Result<Paid> {
-    if units == 0 {
-        return Ok(Paid::Nothing);
-    }
+) -> Result<bool> {
     require!(*accounts.usdc_mint.key == store.usdc_mint, GatewayError::AccountMismatch);
     require!(*accounts.vault.key == store.vault, GatewayError::AccountMismatch);
     require!(*accounts.token_program.key == token::ID, GatewayError::AccountMismatch);
@@ -161,26 +194,52 @@ pub fn pay_usdc<'info>(
         && *accounts.recipient_usdc.key
             == anchor_spl::associated_token::get_associated_token_address(recipient, &store.usdc_mint)
         && token_account_ok(accounts.recipient_usdc, &store.usdc_mint, recipient);
-    if direct {
-        token::transfer(
-            CpiContext::new_with_signer(
-                accounts.token_program.clone(),
-                token::Transfer {
-                    from: accounts.vault.clone(),
-                    to: accounts.recipient_usdc.clone(),
-                    authority: store.to_account_info(),
-                },
-                &[&[STORE_SEED, &[store.bump]]],
-            ),
-            units,
-        )?;
-        return Ok(Paid::Usdc(units));
+    if !direct {
+        return Ok(false);
     }
-    // a claim needs somewhere to live; the recipient's own first action
-    // here created it (and anyone can, with `open_user_account`)
-    let user = user.ok_or(GatewayError::NoUserAccount)?;
+    token::transfer(
+        CpiContext::new_with_signer(
+            accounts.token_program.clone(),
+            token::Transfer {
+                from: accounts.vault.clone(),
+                to: accounts.recipient_usdc.clone(),
+                authority: store.to_account_info(),
+            },
+            &[&[STORE_SEED, &[store.bump]]],
+        ),
+        units,
+    )?;
+    Ok(true)
+}
+
+/// Books `units` as a claim of `user` (redeemed later with `redeem_claim`,
+/// or moved to another chain with `move_claim`).
+pub fn book_claim(store: &mut Store, user: &mut UserAccount, units: u64) -> Result<()> {
     user.usd_claim = user.usd_claim.checked_add(units).ok_or(GatewayError::AmountOverflow)?;
     store.claims_total = store.claims_total.checked_add(units).ok_or(GatewayError::AmountOverflow)?;
+    Ok(())
+}
+
+/// Settles `units` USDC for a user whose account is at hand (a LOCAL
+/// instruction: the caller signed and funded it): straight from the vault
+/// when that cannot fail, otherwise as a claim. NEVER fails for a short
+/// vault or an unusable token account. The hub's messages settle through
+/// `lz_receive.rs::Recipient`, which also covers a recipient who has no
+/// account here at all.
+pub fn pay_usdc<'info>(
+    store: &mut Account<'info, Store>,
+    accounts: &PayoutAccounts<'_, 'info>,
+    recipient: &Pubkey,
+    user: &mut UserAccount,
+    units: u64,
+) -> Result<Paid> {
+    if units == 0 {
+        return Ok(Paid::Nothing);
+    }
+    if try_pay_usdc(store, accounts, recipient, units)? {
+        return Ok(Paid::Usdc(units));
+    }
+    book_claim(store, user, units)?;
     Ok(Paid::Claim(units))
 }
 

@@ -1,9 +1,10 @@
 /**
- * The SPAWN! wire, client side: the 18 ↔ 6 decimal bridge, bytes32 ids,
- * and a byte-exact port of programs/spawn-gateway/src/msg_codec.rs (ops,
- * the v5 envelope, the executor option bytes). The program builds every
- * message itself; the client needs the codec to show a user what will be
- * sent, to check a packet, and to read a hub message.
+ * The SPAWN! wire (protocol v7.2), client side: the 18 ↔ 6 decimal bridge,
+ * bytes32 ids, and a byte-exact port of programs/spawn-gateway/src/
+ * msg_codec.rs (ops 1–7 and 10–13, the four-field envelope, the executor
+ * option bytes). The program builds every message itself; the client needs
+ * the codec to show a user what will be sent, to check a packet, and to
+ * read a hub message.
  */
 import { PublicKey } from '@solana/web3.js'
 import { EVM_TO_SPL } from './constants'
@@ -78,6 +79,8 @@ export const OP = {
   SELL: 3,
   CLAIM: 4,
   PULL_FEES: 5,
+  OPEN: 6,
+  MOVE: 7,
   SYNC_TOKEN: 10,
   DELIVER: 11,
   PAYOUT: 12,
@@ -87,10 +90,16 @@ export const OP = {
 type B32 = Uint8Array
 export type SpawnMsg =
   | { op: 'SPAWN'; creator: B32; name: string; symbol: string; metaUri: string; devBuyUsd: bigint; feeMode: number }
-  | { op: 'BUY'; hubToken: B32; buyer: B32; usdIn: bigint }
-  | { op: 'SELL'; hubToken: B32; seller: B32; tokensIn: bigint }
+  /** v7.2: `minTokensOut` (18-decimal token units; 0 = none) rides the wire. */
+  | { op: 'BUY'; hubToken: B32; buyer: B32; usdIn: bigint; minTokensOut: bigint }
+  /** v7.2: `minUsdOut` (net dollars, 18 decimals; 0 = none) rides the wire. */
+  | { op: 'SELL'; hubToken: B32; seller: B32; tokensIn: bigint; minUsdOut: bigint }
   | { op: 'CLAIM'; hubToken: B32; claimer: B32 }
   | { op: 'PULL_FEES'; hubToken: B32 }
+  /** v7.2: ask the hub for this chain's replica of a token. */
+  | { op: 'OPEN'; hubToken: B32 }
+  /** v7.2: a claim burned here, paid out to (`dstChain`, `to`). */
+  | { op: 'MOVE'; from: B32; to: B32; amount: bigint; dstChain: number }
   | { op: 'SYNC_TOKEN'; hubToken: B32; name: string; symbol: string }
   | { op: 'DELIVER'; hubToken: B32; to: B32; tokens: bigint; refund: bigint }
   | { op: 'PAYOUT'; to: B32; usdOut: bigint }
@@ -138,13 +147,17 @@ function innerSlots(m: SpawnMsg): Slot[] {
         uint(BigInt(m.feeMode)),
       ]
     case 'BUY':
-      return [word(m.hubToken), word(m.buyer), uint(m.usdIn)]
+      return [word(m.hubToken), word(m.buyer), uint(m.usdIn), uint(m.minTokensOut)]
     case 'SELL':
-      return [word(m.hubToken), word(m.seller), uint(m.tokensIn)]
+      return [word(m.hubToken), word(m.seller), uint(m.tokensIn), uint(m.minUsdOut)]
     case 'CLAIM':
       return [word(m.hubToken), word(m.claimer)]
     case 'PULL_FEES':
+    case 'OPEN':
       return [word(m.hubToken)]
+    case 'MOVE':
+      if (!Number.isInteger(m.dstChain) || m.dstChain < 0 || m.dstChain > 0xffffffff) throw new Error('dstChain is a uint32')
+      return [word(m.from), word(m.to), uint(m.amount), uint(BigInt(m.dstChain))]
     case 'SYNC_TOKEN':
       return [word(m.hubToken), dyn(encodeUtf8(m.name)), dyn(encodeUtf8(m.symbol))]
     case 'DELIVER':
@@ -161,15 +174,20 @@ export function encodeMsg(m: SpawnMsg): Uint8Array {
   return abiEncode([uint(BigInt(OP[m.op])), dyn(abiEncode(innerSlots(m)))])
 }
 
-/** The v5 envelope: abi.encode(bytes32 srcSender, bytes32 dstAddr, bytes payload). */
-export function encodeEnvelope(srcSender: Uint8Array, dstAddr: Uint8Array, payload: Uint8Array): Uint8Array {
-  return abiEncode([word(srcSender), word(dstAddr), dyn(payload)])
+/** The envelope (v7.2): abi.encode(bytes32 srcSender, bytes32 dstAddr,
+ * bytes payload, uint256 value). `value` is the destination-native amount
+ * the executor was asked to deliver with the message — toward the hub, the
+ * reply budget the user prepaid (the hub adapter refuses a delivery that
+ * brings less); from the hub, 0. */
+export function encodeEnvelope(srcSender: Uint8Array, dstAddr: Uint8Array, payload: Uint8Array, value: bigint): Uint8Array {
+  return abiEncode([word(srcSender), word(dstAddr), dyn(payload), uint(value)])
 }
 
 /** The exact message a send from this store carries (`send_to_hub.rs`
- * `envelope`): this store as protocol sender, the hub pad as target. */
-export function outboundMessage(store: PublicKey, hubPad: Uint8Array, m: SpawnMsg): Uint8Array {
-  return encodeEnvelope(store.toBytes(), hubPad, encodeMsg(m))
+ * `envelope`): this store as protocol sender, the hub pad as target, and
+ * the reply budget (`return_unit × legs`, hub-native wei). */
+export function outboundMessage(store: PublicKey, hubPad: Uint8Array, m: SpawnMsg, value: bigint): Uint8Array {
+  return encodeEnvelope(store.toBytes(), hubPad, encodeMsg(m), value)
 }
 
 /** The executor option bytes of one send (`msg_codec::lz_receive_options`). */
@@ -195,6 +213,14 @@ class AbiReader {
     const w = this.word(slot)
     if (w.slice(0, 31).some((x) => x !== 0)) throw new Error('dirty u8 word')
     return w[31]
+  }
+  u32(slot: number): number {
+    const w = this.word(slot)
+    if (w.slice(0, 28).some((x) => x !== 0)) throw new Error('dirty u32 word')
+    return Number(readUintBE(w, 28, 4))
+  }
+  offset(slot: number): number {
+    return Number(this.uint(slot))
   }
   bytes(slot: number): Uint8Array {
     const off = Number(this.uint(slot))
@@ -224,13 +250,17 @@ export function decodeMsg(payload: Uint8Array): SpawnMsg {
         feeMode: r.u8(5),
       }
     case OP.BUY:
-      return { op: 'BUY', hubToken: r.word(0), buyer: r.word(1), usdIn: r.uint(2) }
+      return { op: 'BUY', hubToken: r.word(0), buyer: r.word(1), usdIn: r.uint(2), minTokensOut: r.uint(3) }
     case OP.SELL:
-      return { op: 'SELL', hubToken: r.word(0), seller: r.word(1), tokensIn: r.uint(2) }
+      return { op: 'SELL', hubToken: r.word(0), seller: r.word(1), tokensIn: r.uint(2), minUsdOut: r.uint(3) }
     case OP.CLAIM:
       return { op: 'CLAIM', hubToken: r.word(0), claimer: r.word(1) }
     case OP.PULL_FEES:
       return { op: 'PULL_FEES', hubToken: r.word(0) }
+    case OP.OPEN:
+      return { op: 'OPEN', hubToken: r.word(0) }
+    case OP.MOVE:
+      return { op: 'MOVE', from: r.word(0), to: r.word(1), amount: r.uint(2), dstChain: r.u32(3) }
     case OP.SYNC_TOKEN:
       return { op: 'SYNC_TOKEN', hubToken: r.word(0), name: r.string(1), symbol: r.string(2) }
     case OP.DELIVER:
@@ -244,7 +274,9 @@ export function decodeMsg(payload: Uint8Array): SpawnMsg {
   }
 }
 
-export function decodeEnvelope(message: Uint8Array): { srcSender: Uint8Array; dstAddr: Uint8Array; payload: Uint8Array } {
+export function decodeEnvelope(message: Uint8Array): { srcSender: Uint8Array; dstAddr: Uint8Array; payload: Uint8Array; value: bigint } {
   const r = new AbiReader(message)
-  return { srcSender: r.word(0), dstAddr: r.word(1), payload: r.bytes(2) }
+  // the canonical offset only: a pre-v7.2 envelope has three head words
+  if (r.offset(2) !== 4 * 32) throw new Error('not a v7.2 envelope (payload offset is not 0x80)')
+  return { srcSender: r.word(0), dstAddr: r.word(1), payload: r.bytes(2), value: r.uint(3) }
 }

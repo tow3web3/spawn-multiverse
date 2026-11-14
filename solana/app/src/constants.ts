@@ -17,6 +17,29 @@ export const SYSTEM_PROGRAM = new PublicKey('11111111111111111111111111111111')
 export const ALT_PROGRAM = new PublicKey('AddressLookupTab1e1111111111111111111111111')
 export const COMPUTE_BUDGET_PROGRAM = new PublicKey('ComputeBudget111111111111111111111111111111')
 
+/* Circle CCTP V2 on Solana — the same program ids on mainnet-beta and
+ * devnet (developers.circle.com/cctp/solana-programs). */
+export const CCTP_MESSAGE_TRANSMITTER_V2 = new PublicKey('CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC')
+export const CCTP_TOKEN_MESSENGER_MINTER_V2 = new PublicKey('CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe')
+
+/** SPAWN! chain labels (contracts/scripts/lib-deploy.js CHAINS). 0 is the
+ * hub's own books — never a gateway, never a destination. */
+export const CHAIN_LABEL = { hub: 0, solana: 1, ethereum: 2, base: 3, bnb: 4, arbitrum: 5, optimism: 6 } as const
+/** This gateway's label. */
+export const SOLANA_LABEL = CHAIN_LABEL.solana
+/** The labels whose gateway is an EVM contract: a recipient there is a
+ * 20-byte address (the hub sends a wider one home — `SpawnPad._move`). */
+export const EVM_LABELS: readonly number[] = [
+  CHAIN_LABEL.ethereum,
+  CHAIN_LABEL.base,
+  CHAIN_LABEL.bnb,
+  CHAIN_LABEL.arbitrum,
+  CHAIN_LABEL.optimism,
+]
+/** Circle CCTP domains of the chains whose vault holds Circle USDC (BNB's
+ * vault holds USDT: no CCTP, no peer). Solana itself is domain 5. */
+export const CCTP_DOMAIN = { ethereum: 0, optimism: 2, arbitrum: 3, solana: 5, base: 6 } as const
+
 /** LayerZero endpoint ids. */
 export const EID = {
   SOLANA_MAINNET: 30168,
@@ -76,6 +99,8 @@ export const SEED = {
   USER: s('User'),
   ESCROW: s('Escrow'),
   POSITION: s('Pos'),
+  MOVE_ROUTE: s('Move'),
+  CCTP_PEER: s('CctpPeer'),
   LZ_RECEIVE_TYPES: s('LzReceiveTypes'),
 } as const
 
@@ -89,6 +114,8 @@ export const MAX_SYMBOL_BYTES = 16
 export const MAX_META_BYTES = 1024
 export const MAX_TRADE_LEGS = 4
 export const MAX_SPAWN_LEGS = 32
+export const MAX_OPEN_LEGS = 8
+export const MAX_MOVE_LEGS = 4096
 export const MAX_RETURN_UNIT = 50_000_000_000_000_000n
 export const MIN_STAKED = 1_000n * 1_000_000n
 export const ACC_PRECISION = 1_000_000_000_000_000_000n
@@ -119,6 +146,11 @@ export const IX = {
   set_fee_config: d('ddde34ce72c6405b'),
   set_deposit_cap: d('1e2bdb5afe0455ec'),
   recover_tank: d('552bb31a13623c25'),
+  set_receive_table: d('6efd52cb345bf4a2'),
+  set_open_legs: d('81f608ec45d87d00'),
+  set_move_legs: d('8cd9c04eb6403905'),
+  set_cctp_peer: d('672ff3c845ffc038'),
+  rebalance: d('6c9e4d09d234583e'),
   lz_receive: d('08b3786d2176bd50'),
   lz_receive_types_v2: d('6d9dc88e8adf9fa4'),
   lz_receive_types_info: d('2b94d55d657f25aa'),
@@ -127,6 +159,8 @@ export const IX = {
   sell_token: d('6d3d28bbe6b087ae'),
   claim_fees: d('52fbe99c0c34b8ca'),
   pull_fees: d('a57c45e31ac9afd6'),
+  open_token: d('0bc6fe28cfac5976'),
+  move_claim: d('104b763e5a686acf'),
   quote_send: d('cf0031d6a0d34cd3'),
   open_user_account: d('53aab61d8eeb3a2b'),
   redeem_claim: d('886b8504b06b99ef'),
@@ -143,10 +177,15 @@ export const ACCOUNT_DISC = {
   UserAccount: d('d3218810ba6ef27f'),
   Position: d('aabc8fe47a40f7d0'),
   LzReceiveTypesAccounts: d('f857a77505fb157e'),
+  MoveRoute: d('7f2e9acbedc0a2bc'),
+  CctpPeer: d('ea6d740140f057e8'),
 } as const
 
 export const EVENT_DISC = {
   SentToHub: d('089c6e33cb7b78ad'),
+  ClaimMoved: d('4e1a5e2ccc7fc862'),
+  PaidOut: d('0689d1e1fc35f9fc'),
+  UserAccountOpened: d('df83649768e11ae3'),
 } as const
 
 /** LayerZero programs' Anchor sighashes (sha256("global:<name>")[..8]). */
@@ -156,5 +195,12 @@ export const LZ_IX = {
   init_nonce: d('ccab10d6b6bf1bc4'),
   init_config: d('17eb73e8a86001e7'),
   set_config: d('6c9e9aafd4623442'),
+  set_send_library: d('fb764e9e86958105'),
+  set_receive_library: d('dfacb469a5a193e4'),
   execute: d('82ddf29a0dc1bd1d'),
+} as const
+
+/** Circle's TokenMessengerMinterV2 `deposit_for_burn` sighash. */
+export const CCTP_IX = {
+  deposit_for_burn: d('d73c3d2e723780b0'),
 } as const

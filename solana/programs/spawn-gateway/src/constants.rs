@@ -34,9 +34,19 @@ pub const POSITION_SEED: &[u8] = b"Pos";
 /// the LayerZero fee of every send. Anyone funds it with a plain transfer.
 #[constant]
 pub const GAS_TANK_SEED: &[u8] = b"GasTank";
+/// What a claim moved to one destination chain prepays (v7.2):
+/// seeds = [MOVE_ROUTE_SEED, dst_chain_be(4)] — `SpawnGateway.moveLegs[dst]`.
+#[constant]
+pub const MOVE_ROUTE_SEED: &[u8] = b"Move";
+/// The vault of another chain this vault may be levelled with over CCTP:
+/// seeds = [CCTP_PEER_SEED, label_be(4)] — `OmniUSD.peers[label]`.
+#[constant]
+pub const CCTP_PEER_SEED: &[u8] = b"CctpPeer";
 
 /// SPAWN! chain label of the Solana leg (lib-deploy CHAINS: 1 = solana).
 pub const CHAIN_LABEL: u32 = 1;
+/// The hub's own label: the pad's books, never a destination for a claim.
+pub const HUB_LABEL: u32 = 0;
 
 /// Decimal bridge: the hub counts tokens and dollars in 1e18 fixed-point;
 /// SPL replicas and USDC use 6 decimals. Hub amounts divide by 1e12 on the
@@ -56,6 +66,24 @@ pub const MAX_META_BYTES: usize = 1024;
 pub const MAX_TRADE_LEGS: u8 = 4;
 pub const MAX_SPAWN_LEGS: u8 = 32;
 pub const MAX_RETURN_UNIT: u128 = 50_000_000_000_000_000; // 0.05 ETH, in wei
+/// v7.2 (SpawnGateway.sol MAX_OPEN_LEGS / MAX_MOVE_LEGS): the SYNC an open
+/// asks for, and the PAYOUT a move sends to ANOTHER chain — an L1 seen from
+/// here costs many of this chain's reply units, hence the wide bound.
+pub const MAX_OPEN_LEGS: u8 = 8;
+pub const MAX_MOVE_LEGS: u16 = 4096;
+
+/// Circle CCTP V2 on Solana — the same program ids on mainnet-beta and
+/// devnet (developers.circle.com/cctp/solana-programs). Solana is domain 5.
+pub const CCTP_MESSAGE_TRANSMITTER_V2: Pubkey = pubkey!("CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC");
+pub const CCTP_TOKEN_MESSENGER_MINTER_V2: Pubkey = pubkey!("CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe");
+/// `OmniUSD.rebalance`'s constants: a Standard Transfer (finality 2000),
+/// no fee accepted (a fee would break the backing by its amount), anyone
+/// may relay the attestation on the other side.
+/// Anchor sighash of TokenMessengerMinterV2 `deposit_for_burn`
+/// (sha256("global:deposit_for_burn")[..8]).
+pub const CCTP_DEPOSIT_FOR_BURN: [u8; 8] = [0xd7, 0x3c, 0x3d, 0x2e, 0x72, 0x37, 0x80, 0xb0];
+pub const CCTP_MIN_FINALITY: u32 = 2000;
+pub const CCTP_MAX_FEE: u64 = 0;
 
 /// Holder-fee stream: a drop only folds into the stream once at least this
 /// many replica units are staked (1,000 tokens — FeeDistributor.MIN_SHARES);

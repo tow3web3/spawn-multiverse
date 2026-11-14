@@ -16,6 +16,7 @@ import { AccountData, GatewayRpc } from './rpc'
 
 const DISC = {
   SendLibraryConfig: hexToBytes('3dee1f48fb7542b0'),
+  ReceiveLibraryConfig: hexToBytes('8ee2fb8a01ce5bc1'),
   SendConfig: hexToBytes('5bdd878983c7ae19'),
   ReceiveConfig: hexToBytes('a29f99bc3841f53a'),
   UlnSettings: hexToBytes('e2c764fd2673a79a'),
@@ -36,6 +37,13 @@ const DEFAULT_KEY = PublicKey.default
 
 export function decodeSendLibraryConfig(data: Uint8Array): { messageLib: PublicKey } {
   const r = check(data, DISC.SendLibraryConfig, 'SendLibraryConfig')
+  return { messageLib: key(r) }
+}
+
+/** ReceiveLibraryConfig: message_lib, timeout: Option<{message_lib, expiry}>, bump.
+ * The default key (all zeros) means "whatever the endpoint's default is". */
+export function decodeReceiveLibraryConfig(data: Uint8Array): { messageLib: PublicKey } {
+  const r = check(data, DISC.ReceiveLibraryConfig, 'ReceiveLibraryConfig')
   return { messageLib: key(r) }
 }
 
@@ -349,6 +357,42 @@ export function initNonceIx(delegate: PublicKey, oapp: PublicKey, eid: number, r
       rw(lzPda.nonce(oapp, eid, remote)),
       rw(lzPda.pendingNonce(oapp, eid, remote)),
       ro(SYSTEM_PROGRAM),
+    ],
+  })
+}
+
+/** Pins the OApp's SEND library for `eid` to `msglib` (a message-library
+ * account, e.g. ULN 302's settings PDA) instead of following the
+ * endpoint's default. Delegate only. */
+export function setSendLibraryIx(delegate: PublicKey, oapp: PublicKey, eid: number, msglib: PublicKey): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: LZ_ENDPOINT,
+    data: toBuffer(concat(LZ_IX.set_send_library, oapp.toBytes(), eidLE(eid), msglib.toBytes())),
+    keys: [
+      { pubkey: delegate, isSigner: true, isWritable: false },
+      ro(lzPda.oappRegistry(oapp)),
+      rw(lzPda.sendLibraryConfig(oapp, eid)),
+      ro(lzPda.messageLibInfo(msglib)),
+      ro(lzPda.endpointEventAuthority()),
+      ro(LZ_ENDPOINT),
+    ],
+  })
+}
+
+/** Pins the OApp's RECEIVE library for `eid` to `msglib` (no grace period:
+ * from the endpoint's default to the very library that default names).
+ * Delegate only. */
+export function setReceiveLibraryIx(delegate: PublicKey, oapp: PublicKey, eid: number, msglib: PublicKey): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: LZ_ENDPOINT,
+    data: toBuffer(concat(LZ_IX.set_receive_library, oapp.toBytes(), eidLE(eid), msglib.toBytes(), uintLE(0n, 8))),
+    keys: [
+      { pubkey: delegate, isSigner: true, isWritable: false },
+      ro(lzPda.oappRegistry(oapp)),
+      rw(lzPda.receiveLibraryConfig(oapp, eid)),
+      ro(lzPda.messageLibInfo(msglib)),
+      ro(lzPda.endpointEventAuthority()),
+      ro(LZ_ENDPOINT),
     ],
   })
 }

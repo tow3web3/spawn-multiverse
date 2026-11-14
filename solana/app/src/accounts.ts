@@ -36,6 +36,8 @@ export interface Store {
   returnUnit: bigint
   tradeLegs: number
   spawnLegs: number
+  /** Legs an `open_token` prepays (v7.2). */
+  openLegs: number
 }
 
 export function decodeStore(data: Uint8Array): Store {
@@ -61,7 +63,41 @@ export function decodeStore(data: Uint8Array): Store {
     returnUnit: r.u128(),
     tradeLegs: r.u8(),
     spawnLegs: r.u8(),
+    openLegs: r.u8(),
   }
+}
+
+/** The price of moves toward one chain (v7.2). No account, or 0 legs: closed. */
+export interface MoveRoute {
+  dstChain: number
+  legs: number
+  bump: number
+}
+
+export function decodeMoveRoute(data: Uint8Array): MoveRoute {
+  const r = reader(data, 'MoveRoute')
+  return { dstChain: r.u32(), legs: r.u16(), bump: r.u8() }
+}
+
+/** What a move to `dstChain` prepays (`send_to_hub.rs::move_legs`): the
+ * route's price, never fewer legs than a trade's; 0 = closed. */
+export function moveLegs(store: Store, route: MoveRoute | null, dstChain: number): number {
+  if (!route || route.dstChain !== dstChain || route.legs === 0) return 0
+  return Math.max(route.legs, store.tradeLegs)
+}
+
+/** A peer vault for CCTP rebalancing (set once per label). */
+export interface CctpPeer {
+  label: number
+  domain: number
+  /** CCTP's mint recipient there: an EVM `OmniUSD` address, left-padded. */
+  vault: Uint8Array
+  bump: number
+}
+
+export function decodeCctpPeer(data: Uint8Array): CctpPeer {
+  const r = reader(data, 'CctpPeer')
+  return { label: r.u32(), domain: r.u32(), vault: r.fixed(32), bump: r.u8() }
 }
 
 export interface PeerConfig {

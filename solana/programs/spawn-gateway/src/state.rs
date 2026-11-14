@@ -19,7 +19,9 @@ pub struct Store {
     /// Can only pause.
     pub guardian: Pubkey,
     pub bump: u8,
-    /// Blocks NEW exposure only (spawn, buy). Never sells, claims, redeems.
+    /// Blocks NEW exposure only (spawn, buy, open). Never sells, claims,
+    /// redemptions or a claim moving out. A store is BORN paused: nothing
+    /// goes out before the operator says the wiring is complete.
     pub paused: bool,
     /// Sends ride the tank instead of the user (testnets only).
     pub sponsored: bool,
@@ -66,6 +68,11 @@ pub struct Store {
     /// SYNC fan-out (the number of remote chains the hub must reach).
     pub trade_legs: u8,
     pub spawn_legs: u8,
+    /// Replies prepaid by `open_token` (v7.2): the SYNC the hub sends back
+    /// here. Its own count — a SYNC can cost more than the DELIVER a trade
+    /// leg is priced on — and 1 from birth, never 0 by default: an open
+    /// that prepaid nothing would be the hub tank's to pay.
+    pub open_legs: u8,
 }
 
 impl Store {
@@ -101,6 +108,42 @@ pub struct LzReceiveTypesAccounts {
 }
 
 impl LzReceiveTypesAccounts {
+    pub const SIZE: usize = 8 + Self::INIT_SPACE;
+}
+
+/// What a claim moved to ONE destination chain prepays (v7.2) — the PAYOUT
+/// the hub carries there, in this chain's reply units
+/// (PDA, seeds = [MOVE_ROUTE_SEED, dst_chain_be]). No account, or 0 legs:
+/// the route is closed. `SpawnGateway.moveLegs[dst]`.
+#[account]
+#[derive(InitSpace)]
+pub struct MoveRoute {
+    pub dst_chain: u32,
+    pub legs: u16,
+    pub bump: u8,
+}
+
+impl MoveRoute {
+    pub const SIZE: usize = 8 + Self::INIT_SPACE;
+}
+
+/// Another chain's vault this one may send USDC to over Circle CCTP
+/// (PDA, seeds = [CCTP_PEER_SEED, label_be]). Written ONCE per label and
+/// never re-aimed — `OmniUSD.setPeer`: a peer is a way out of the vault.
+#[account]
+#[derive(InitSpace)]
+pub struct CctpPeer {
+    /// SPAWN! chain label of the peer's chain.
+    pub label: u32,
+    /// Its Circle CCTP domain (Base 6, Arbitrum 3, Optimism 2, Ethereum 0).
+    pub domain: u32,
+    /// The peer vault as CCTP's mint recipient: an EVM `OmniUSD` address,
+    /// left-padded.
+    pub vault: [u8; 32],
+    pub bump: u8,
+}
+
+impl CctpPeer {
     pub const SIZE: usize = 8 + Self::INIT_SPACE;
 }
 

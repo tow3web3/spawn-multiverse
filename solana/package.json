@@ -6,7 +6,8 @@
     "client:typecheck": "tsc -p app/tsconfig.json --noEmit && tsc -p app/test/tsconfig.json",
     "client:build": "tsc -p app/tsconfig.json",
     "client:test": "cd app && NODE_OPTIONS=--no-experimental-strip-types TS_NODE_PROJECT=test/tsconfig.json TS_NODE_TRANSPILE_ONLY=true mocha --config .mocharc.json",
-    "wire": "NODE_OPTIONS=--no-experimental-strip-types TS_NODE_PROJECT=app/test/tsconfig.json TS_NODE_TRANSPILE_ONLY=true node -r ts-node/register scripts/wire.ts"
+    "wire": "NODE_OPTIONS=--no-experimental-strip-types TS_NODE_PROJECT=app/test/tsconfig.json TS_NODE_TRANSPILE_ONLY=true node -r ts-node/register scripts/wire.ts",
+    "cli": "NODE_OPTIONS=--no-experimental-strip-types TS_NODE_PROJECT=app/test/tsconfig.json TS_NODE_TRANSPILE_ONLY=true node -r ts-node/register scripts/cli.ts"
   },
   "dependencies": {
     "@anchor-lang/core": "^1.0.2"

@@ -1,4 +1,4 @@
-//! LiteSVM tests of the v7 receive path, the user instructions and the
+//! LiteSVM tests of the v7.2 receive path, the user instructions and the
 //! roles — in the SENTINEL world: the store is initialized with the test
 //! sentinel endpoint (default pubkey), so the endpoint CPIs (register,
 //! clear) are skipped and `lz_receive` can be driven directly with any hub
@@ -6,8 +6,10 @@
 //!
 //! What these tests prove: every hub→Solana op and what it does when it
 //! cannot be settled on the spot (parking, claims), with NO lamports taken
-//! from the `lz_receive` payer; the holder-fee pool's arithmetic; the
-//! decimal bridge to the wei; authentication; roles and pause.
+//! from the `lz_receive` payer; a PAYOUT for ANY 32-byte recipient (v7.2: a
+//! claim moved here names one its sender chose); the holder-fee pool's
+//! arithmetic; the decimal bridge to the wei; authentication; roles and
+//! pause.
 //!
 //! What they leave to test_live_endpoint.rs: the real endpoint (clear),
 //! the real executor's lamport check, and the whole send path.
@@ -282,13 +284,17 @@ fn a_delivery_to_a_missing_or_frozen_token_account_is_parked_too() {
     assert_eq!(ua.parked[0].amount_e18, 20 * E18);
     assert_eq!(w.token_amount(&ata), 0);
 
-    // with no user account there is nowhere to park: the message fails and
-    // stays executable — anyone can open the account and run it again
+    // a recipient with no user account at all (never the case for a
+    // delivery the hub sends in answer to a buy — the buyer opened one —
+    // but nothing may hang on that): the account is opened on the spot,
+    // out of the tank, and the bag parked in it
     let stranger = w.new_user();
-    let err = deliver(&mut w, TOK, &stranger.pubkey(), 10 * E18, 0).unwrap_err();
-    assert!(err.contains("NoUserAccount"), "{err}");
-    w.open_user_account(&stranger.pubkey());
+    let (exec_before, tank_before) = (w.lamports(&w.exec.pubkey()), w.lamports(&w.ids.tank));
     deliver(&mut w, TOK, &stranger.pubkey(), 10 * E18, 0).unwrap();
+    let ua: UserAccount = w.read(&w.ids.user(&stranger.pubkey()));
+    assert_eq!((ua.owner, ua.parked[0].amount_e18), (stranger.pubkey(), 10 * E18));
+    assert_eq!(w.lamports(&w.exec.pubkey()), exec_before, "the executor paid for it");
+    assert!(w.lamports(&w.ids.tank) < tank_before, "the tank did not");
 }
 
 #[test]
@@ -378,6 +384,191 @@ fn a_payout_is_usdc_when_it_can_be_and_a_claim_when_it_cannot() {
     assert_eq!(w.store().claims_total, 16 * ONE_USDC);
     let ix = redeem(&w, 17 * ONE_USDC);
     assert!(w.send(&[ix], &[&u]).unwrap_err().contains("NothingToRedeem"));
+}
+
+/// v7.2: `moveClaim` on another chain names ANY 32-byte recipient here, and
+/// the hub forwards it. A PAYOUT must settle for every one of them — a
+/// failed PAYOUT is value in a message nobody can ever deliver.
+#[test]
+fn a_payout_settles_for_any_32_byte_recipient() {
+    let mut w = setup();
+    let tank = w.ids.tank;
+    w.fund(&tank, 1_000_000_000);
+    let vault = w.ids.vault;
+    let someone = Keypair::new().pubkey(); // never seen here, no lamports, no account of any kind
+    let other_user = w.ids.user(&Keypair::new().pubkey());
+    let recipients: Vec<(&str, Pubkey)> = vec![
+        ("a key never seen here", someone),
+        ("an off-curve address (another program's PDA)", pda(&[b"treasury"], &ATA_PROGRAM)),
+        ("the all-zero key (the system program)", Pubkey::default()),
+        ("the all-ones key", Pubkey::new_from_array([0xff; 32])),
+        ("the token program", TOKEN_PROGRAM),
+        ("this program", w.ids.program),
+        ("the store", w.ids.store),
+        ("the vault (a token account)", vault),
+        ("the tank", tank),
+        ("the USDC mint", USDC),
+        ("a sysvar", solana_sdk::sysvar::rent::id()),
+        ("someone else's user account address", other_user),
+        ("the executor that delivers it", w.exec.pubkey()),
+    ];
+    let (exec_before, tank_before) = (w.lamports(&w.exec.pubkey()), w.lamports(&tank));
+
+    // an empty vault: every payout is booked as a claim, in a user account
+    // opened on the spot out of the tank
+    let mut total = 0u64;
+    for (i, (what, to)) in recipients.iter().enumerate() {
+        let units = (i as u64 + 1) * ONE_USDC;
+        let meta = payout(&mut w, to, units as u128 * E12 + 7).unwrap_or_else(|e| panic!("PAYOUT to {what} failed: {e}"));
+        if i == 0 {
+            println!("CU payout (claim, opens the recipient's user account): {}", meta.compute_units_consumed);
+        }
+        let ua: UserAccount = w.read(&w.ids.user(to));
+        assert_eq!((ua.owner, ua.usd_claim), (*to, units), "{what}");
+        total += units;
+    }
+    assert_eq!(w.store().claims_total, total);
+    assert_eq!(w.lamports(&w.exec.pubkey()), exec_before, "a payout cost the executor lamports");
+    let rent = (tank_before - w.lamports(&tank)) / recipients.len() as u64;
+    println!("rent of a user account opened by a payout, from the tank: {rent} lamports");
+    assert_eq!(w.lamports(&tank), tank_before - rent * recipients.len() as u64);
+
+    // a second payout to each adds to the same claim and opens nothing
+    let tank_mid = w.lamports(&tank);
+    for (_, to) in &recipients {
+        payout(&mut w, to, ONE_USDC as u128 * E12).unwrap();
+    }
+    assert_eq!(w.lamports(&tank), tank_mid);
+    assert_eq!(w.store().claims_total, total + recipients.len() as u64 * ONE_USDC);
+
+    // a liquid vault changes nothing for a recipient with no USDC account…
+    w.set_token_amount(&vault, 1_000 * ONE_USDC);
+    payout(&mut w, &someone, 5 * E18).unwrap();
+    let ua: UserAccount = w.read(&w.ids.user(&someone));
+    assert_eq!(ua.usd_claim, 7 * ONE_USDC);
+    assert_eq!(w.token_amount(&vault), 1_000 * ONE_USDC);
+    // …and pays one who has it, without opening anything for them
+    let holder = Keypair::new().pubkey();
+    w.give_usdc(&holder, 0);
+    payout(&mut w, &holder, 5 * E18).unwrap();
+    assert_eq!(w.token_amount(&ata_of(&holder, &USDC)), 5 * ONE_USDC);
+    assert!(!w.exists(&w.ids.user(&holder)));
+    // a token account at the right address that is NOT theirs (its owner
+    // field was re-assigned) is not paid into: a claim instead
+    let moved = Keypair::new().pubkey();
+    w.plant_token_account(ata_of(&moved, &USDC), &USDC, &holder, 0);
+    payout(&mut w, &moved, 5 * E18).unwrap();
+    assert_eq!(w.token_amount(&ata_of(&moved, &USDC)), 0);
+    let ua: UserAccount = w.read(&w.ids.user(&moved));
+    assert_eq!(ua.usd_claim, 5 * ONE_USDC);
+}
+
+/// What a claim booked for a stranger is worth: its owner redeems it like
+/// any other, and their later actions find the account already there.
+#[test]
+fn a_claim_booked_for_a_stranger_is_theirs_to_redeem() {
+    let mut w = setup();
+    let tank = w.ids.tank;
+    w.fund(&tank, 1_000_000_000);
+    let u = Keypair::new();
+    payout(&mut w, &u.pubkey(), 12 * E18).unwrap();
+    // nobody but its owner
+    let thief = w.new_user();
+    let redeem = |w: &World, who: &Pubkey, account_of: &Pubkey| {
+        Instruction::new_with_bytes(
+            w.ids.program,
+            &spawn_gateway::instruction::RedeemClaim { units: 12 * ONE_USDC }.data(),
+            spawn_gateway::accounts::RedeemClaim {
+                user: *who,
+                store: w.ids.store,
+                user_account: w.ids.user(account_of),
+                usdc_mint: USDC,
+                vault: w.ids.vault,
+                user_usdc: ata_of(who, &USDC),
+                token_program: TOKEN_PROGRAM,
+                associated_token_program: ATA_PROGRAM,
+                system_program: SYSTEM,
+            }
+            .to_account_metas(None),
+        )
+    };
+    let ix = redeem(&w, &thief.pubkey(), &u.pubkey());
+    assert!(w.send(&[ix], &[&thief]).is_err());
+    // the vault is funded again; the owner — who needs SOL of their own for
+    // their token account, like anyone receiving USDC — takes it
+    let vault = w.ids.vault;
+    w.set_token_amount(&vault, 100 * ONE_USDC);
+    w.fund(&u.pubkey(), 100_000_000);
+    let ix = redeem(&w, &u.pubkey(), &u.pubkey());
+    w.send(&[ix], &[&u]).unwrap();
+    assert_eq!(w.token_amount(&ata_of(&u.pubkey(), &USDC)), 12 * ONE_USDC);
+    assert_eq!(w.store().claims_total, 0);
+    // and `open_user_account` on an account a payout opened is a no-op
+    w.open_user_account(&u.pubkey());
+    let ua: UserAccount = w.read(&w.ids.user(&u.pubkey()));
+    assert_eq!((ua.owner, ua.usd_claim), (u.pubkey(), 0));
+}
+
+/// With a dry tank the rent of a stranger's account falls on whoever
+/// executes the message: a volunteer may accept it (here), LayerZero's
+/// executor will not (test_live_endpoint) — the packet then waits, it is
+/// never lost. Anyone can also open the account first, for 0 lamports of
+/// the executor's.
+#[test]
+fn a_dry_tank_never_strands_a_payout() {
+    let mut w = setup();
+    assert_eq!(w.lamports(&w.ids.tank), 0);
+    let a = Keypair::new().pubkey();
+    let exec_before = w.lamports(&w.exec.pubkey());
+    payout(&mut w, &a, 3 * E18).unwrap();
+    assert!(w.lamports(&w.exec.pubkey()) < exec_before, "the payer funded the account");
+    let ua: UserAccount = w.read(&w.ids.user(&a));
+    assert_eq!(ua.usd_claim, 3 * ONE_USDC);
+
+    // the other way round: someone opens the account, the delivery is free
+    let b = Keypair::new().pubkey();
+    w.open_user_account(&b);
+    let exec_before = w.lamports(&w.exec.pubkey());
+    payout(&mut w, &b, 3 * E18).unwrap();
+    assert_eq!(w.lamports(&w.exec.pubkey()), exec_before);
+
+    // a pre-funded address (griefing, or a tip) does not block the opening
+    let c = Keypair::new().pubkey();
+    w.set_lamports(&w.ids.user(&c), 1_000_000);
+    payout(&mut w, &c, 3 * E18).unwrap();
+    let ua: UserAccount = w.read(&w.ids.user(&c));
+    assert_eq!((ua.owner, ua.usd_claim), (c, 3 * ONE_USDC));
+}
+
+/// The envelope's last word (v7.2) is what the executor was asked to
+/// deliver with the message. The hub sends 0. If a message ever names a
+/// value, the delivery must bring it — into the tank — exactly as the hub
+/// adapter requires of deliveries from here.
+#[test]
+fn a_value_the_envelope_names_is_taken_into_the_tank() {
+    let mut w = setup();
+    let u = user_with_accounts(&mut w);
+    let vault = w.ids.vault;
+    w.set_token_amount(&vault, 10 * ONE_USDC);
+    let msg = SpawnMsg::Payout { to: WireAddr::from_pubkey(&u.pubkey()), usd_out: U256::from_u128(E18) };
+    let (exec_before, tank_before) = (w.lamports(&w.exec.pubkey()), w.lamports(&w.ids.tank));
+    let bytes = w.wire_with_value(&msg, 3_000_000);
+    let accounts = w.payout_accounts(&u.pubkey());
+    deliver_raw(&mut w, hub_peer(), HUB_EID, bytes, accounts).unwrap();
+    assert_eq!(exec_before - w.lamports(&w.exec.pubkey()), 3_000_000);
+    assert_eq!(w.lamports(&w.ids.tank) - tank_before, 3_000_000);
+    assert_eq!(w.token_amount(&ata_of(&u.pubkey(), &USDC)), ONE_USDC);
+    // a payer that cannot bring it is turned away; nothing moved
+    let poor = Keypair::new();
+    w.fund(&poor.pubkey(), 1_000_000);
+    let bytes = w.wire_with_value(&msg, 3_000_000);
+    let params = LzReceiveParams { src_eid: HUB_EID, sender: hub_peer(), nonce: 2, guid: [0u8; 32], message: bytes, extra_data: vec![] };
+    let mut metas = spawn_gateway::accounts::LzReceive { payer: poor.pubkey(), store: w.ids.store, peer: w.ids.peer }
+        .to_account_metas(None);
+    metas.extend(w.payout_accounts(&u.pubkey()));
+    let ix = Instruction::new_with_bytes(w.ids.program, &spawn_gateway::instruction::LzReceive { params }.data(), metas);
+    assert!(w.send(&[ix], &[&poor]).is_err());
+    assert_eq!(w.token_amount(&ata_of(&u.pubkey(), &USDC)), ONE_USDC);
 }
 
 /* ------------------------- FEE_DROP and the pool --------------------- */
@@ -555,20 +746,49 @@ fn only_the_hub_pad_through_the_hub_adapter_is_heard() {
     evil[31] ^= 1;
     assert!(deliver_raw(&mut w, evil, HUB_EID, good.clone(), accounts.clone()).unwrap_err().contains("NotPeer"));
     // the hub adapter, but the envelope names another protocol sender
-    let forged = Envelope { src_sender: WireAddr([7; 32]), dst_addr: WireAddr(w.ids.store.to_bytes()), payload: msg.encode() }
-        .encode();
+    let forged = Envelope {
+        src_sender: WireAddr([7; 32]),
+        dst_addr: WireAddr(w.ids.store.to_bytes()),
+        payload: msg.encode(),
+        value: U256::from_u128(0),
+    }
+    .encode();
     assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, forged, accounts.clone()).unwrap_err().contains("NotPeer"));
     // addressed to someone else
-    let stray = Envelope { src_sender: WireAddr(hub_pad()), dst_addr: WireAddr([9; 32]), payload: msg.encode() }.encode();
+    let stray =
+        Envelope { src_sender: WireAddr(hub_pad()), dst_addr: WireAddr([9; 32]), payload: msg.encode(), value: U256::from_u128(0) }
+            .encode();
     assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, stray, accounts.clone()).unwrap_err().contains("NotPeer"));
     // a recipient account that is not the wire's recipient
     let other = user_with_accounts(&mut w);
     let wrong = w.payout_accounts(&other.pubkey());
     assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, good.clone(), wrong).unwrap_err().contains("RecipientMismatch"));
     // a spoke→hub op can never arrive at a spoke
-    let buy = SpawnMsg::Buy { hub_token: WireAddr(token_id(1)), buyer: WireAddr([1; 32]), usd_in: U256::from_u128(1) };
+    let buy = SpawnMsg::Buy {
+        hub_token: WireAddr(token_id(1)),
+        buyer: WireAddr([1; 32]),
+        usd_in: U256::from_u128(1),
+        min_tokens_out: U256::from_u128(1),
+    };
     let bytes = w.wire(&buy);
     assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, bytes, accounts.clone()).unwrap_err().contains("UnknownOp"));
+    // …nor the two v7.2 ones
+    for msg in [
+        SpawnMsg::Open { hub_token: WireAddr(token_id(1)) },
+        SpawnMsg::Move { from: WireAddr([1; 32]), to: WireAddr([2; 32]), amount: U256::from_u128(1), dst_chain: 1 },
+    ] {
+        let bytes = w.wire(&msg);
+        assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, bytes, accounts.clone()).unwrap_err().contains("UnknownOp"));
+    }
+    // the pre-v7.2 envelope (three fields) is not half-read: it is refused
+    let old = {
+        let mut e = good.clone();
+        // drop the value word and re-aim the payload offset, as v7.1 wrote it
+        e.drain(96..128);
+        e[95] = 0x60;
+        e
+    };
+    assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, old, accounts.clone()).unwrap_err().contains("BadPayload"));
     // garbage
     assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, vec![1, 2, 3], accounts.clone()).is_err());
 
@@ -598,6 +818,7 @@ fn three_keys_admin_operator_guardian() {
     };
 
     // nobody is anybody
+    assert!(!w.store().paused, "setup() unpaused the store it found paused");
     assert!(w.govern(ix::Pause {}.data(), &nobody).unwrap_err().contains("NotGuardian"));
     assert!(w.govern(ix::SetDepositCap { cap: 1 }.data(), &nobody).unwrap_err().contains("NotOperator"));
     assert!(w.govern(ix::SetOperator { operator: nobody.pubkey() }.data(), &nobody).unwrap_err().contains("NotAdmin"));
@@ -624,8 +845,104 @@ fn three_keys_admin_operator_guardian() {
     assert!(w.govern(ix::SetSponsored { on: true }.data(), &operator).unwrap_err().contains("NotAdmin"));
     assert!(w.govern(ix::SetGuardian { guardian: operator.pubkey() }.data(), &operator).unwrap_err().contains("NotAdmin"));
     assert!(w.govern(ix::TransferAdmin { nominee: operator.pubkey() }.data(), &operator).unwrap_err().contains("NotAdmin"));
+    // v7.2's prices are the operator's too, each within its bound
+    assert!(w.govern(ix::SetOpenLegs { legs: 2 }.data(), &nobody).unwrap_err().contains("NotOperator"));
+    assert!(w.govern(ix::SetOpenLegs { legs: 2 }.data(), &guardian).unwrap_err().contains("NotOperator"));
+    assert_eq!(w.store().open_legs, 1, "an open prepays one leg from birth");
+    w.govern(ix::SetOpenLegs { legs: 2 }.data(), &operator).unwrap();
+    assert_eq!(w.store().open_legs, 2);
+    assert!(w.govern(ix::SetOpenLegs { legs: 9 }.data(), &operator).unwrap_err().contains("OutOfBounds"));
+    let i = w.set_move_legs_ix(&nobody.pubkey(), 4, 3);
+    assert!(w.send(&[i], &[&nobody]).unwrap_err().contains("NotOperator"));
+    let i = w.set_move_legs_ix(&guardian.pubkey(), 4, 3);
+    assert!(w.send(&[i], &[&guardian]).unwrap_err().contains("NotOperator"));
+    let i = w.set_move_legs_ix(&operator.pubkey(), 4, 3);
+    w.send(&[i], &[&operator]).unwrap();
+    let route: spawn_gateway::state::MoveRoute = w.read(&w.ids.move_route(4));
+    assert_eq!((route.dst_chain, route.legs), (4, 3));
+    let i = w.set_move_legs_ix(&operator.pubkey(), 4, 4097);
+    assert!(w.send(&[i], &[&operator]).unwrap_err().contains("OutOfBounds"));
+    for bad in [0u32, 1] {
+        let i = w.set_move_legs_ix(&operator.pubkey(), bad, 3);
+        assert!(w.send(&[i], &[&operator]).unwrap_err().contains("BadDestination"));
+    }
+    let i = w.set_move_legs_ix(&operator.pubkey(), 4, 0); // closes the route
+    w.send(&[i], &[&operator]).unwrap();
+    let route: spawn_gateway::state::MoveRoute = w.read(&w.ids.move_route(4));
+    assert_eq!(route.legs, 0);
+
+    // a CCTP peer is a way out of the vault: the admin's, once per label
+    let peer_ix = |who: &Pubkey, w: &World, label: u32, vault: [u8; 32]| {
+        Instruction::new_with_bytes(
+            w.ids.program,
+            &ix::SetCctpPeer { label, domain: 6, vault }.data(),
+            spawn_gateway::accounts::SetCctpPeer {
+                admin: *who,
+                store: w.ids.store,
+                cctp_peer: w.ids.cctp_peer(label),
+                system_program: SYSTEM,
+            }
+            .to_account_metas(None),
+        )
+    };
+    let base_vault = pad32(&[0xba; 20]);
+    let i = peer_ix(&operator.pubkey(), &w, 3, base_vault);
+    assert!(w.send(&[i], &[&operator]).unwrap_err().contains("NotAdmin"));
+    let i = peer_ix(&admin.pubkey(), &w, 1, base_vault);
+    assert!(w.send(&[i], &[]).unwrap_err().contains("BadCctpPeer"), "this chain is not its own peer");
+    let i = peer_ix(&admin.pubkey(), &w, 3, [0u8; 32]);
+    assert!(w.send(&[i], &[]).unwrap_err().contains("BadCctpPeer"));
+    let i = peer_ix(&admin.pubkey(), &w, 3, base_vault);
+    w.send(&[i], &[]).unwrap();
+    let peer: spawn_gateway::state::CctpPeer = w.read(&w.ids.cctp_peer(3));
+    assert_eq!((peer.label, peer.domain, peer.vault), (3, 6, base_vault));
+    let i = peer_ix(&admin.pubkey(), &w, 3, pad32(&[0xee; 20]));
+    assert!(w.send(&[i], &[]).is_err(), "a peer is never re-aimed");
+    let peer: spawn_gateway::state::CctpPeer = w.read(&w.ids.cctp_peer(3));
+    assert_eq!(peer.vault, base_vault);
+
+    // the executor's lookup table: named, replaced or cleared by the admin
+    let table = Pubkey::new_unique();
+    w.svm
+        .set_account(
+            table,
+            solana_sdk::account::Account {
+                lamports: 10_000_000,
+                data: vec![0u8; 56],
+                owner: solana_sdk::address_lookup_table::program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let table_ix = |who: &Pubkey, w: &World, alt: Option<Pubkey>| {
+        Instruction::new_with_bytes(
+            w.ids.program,
+            &ix::SetReceiveTable {}.data(),
+            spawn_gateway::accounts::SetReceiveTable {
+                admin: *who,
+                store: w.ids.store,
+                lz_receive_types_accounts: w.ids.types_acc,
+                alt,
+            }
+            .to_account_metas(None),
+        )
+    };
+    let i = table_ix(&operator.pubkey(), &w, Some(table));
+    assert!(w.send(&[i], &[&operator]).unwrap_err().contains("NotAdmin"));
+    let i = table_ix(&admin.pubkey(), &w, Some(w.ids.vault));
+    assert!(w.send(&[i], &[]).unwrap_err().contains("BadLookupTable"), "only a lookup table");
+    let i = table_ix(&admin.pubkey(), &w, Some(table));
+    w.send(&[i], &[]).unwrap();
+    let t: spawn_gateway::state::LzReceiveTypesAccounts = w.read(&w.ids.types_acc);
+    assert_eq!(t.alt, table);
+    let i = table_ix(&admin.pubkey(), &w, None);
+    w.send(&[i], &[]).unwrap();
+    let t: spawn_gateway::state::LzReceiveTypesAccounts = w.read(&w.ids.types_acc);
+    assert_eq!(t.alt, Pubkey::default());
+
     // the peer — who may forge payouts — is the admin's alone
-    let peer_ix = |who: &Pubkey, w: &World| {
+    let hub_peer_ix = |who: &Pubkey, w: &World| {
         Instruction::new_with_bytes(
             w.ids.program,
             &ix::SetPeerConfig {
@@ -636,7 +953,7 @@ fn three_keys_admin_operator_guardian() {
                 .to_account_metas(None),
         )
     };
-    let i = peer_ix(&operator.pubkey(), &w);
+    let i = hub_peer_ix(&operator.pubkey(), &w);
     assert!(w.send(&[i], &[&operator]).unwrap_err().contains("NotAdmin"));
 
     // two-step admin: nothing moves until the nominee accepts

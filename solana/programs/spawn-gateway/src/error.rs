@@ -66,4 +66,24 @@ pub enum GatewayError {
     NotEnoughStaked,
     #[msg("GW: the fee payer of the send list must be the user")]
     BadFeePayer,
+    #[msg("GW: zero min")]
+    ZeroMinimum,
+    #[msg("GW: already open")]
+    AlreadyOpen,
+    #[msg("GW: a hub token id is an EVM address, left-padded")]
+    BadTokenId,
+    #[msg("GW: bad destination")]
+    BadDestination,
+    #[msg("GW: route closed")]
+    RouteClosed,
+    #[msg("GW: the claim is smaller than that")]
+    ClaimTooSmall,
+    #[msg("GW: not an address lookup table")]
+    BadLookupTable,
+    #[msg("GW: bad peer")]
+    BadCctpPeer,
+    #[msg("GW: no peer")]
+    NoCctpPeer,
+    #[msg("GW: not the CCTP program")]
+    BadCctpProgram,
 }
