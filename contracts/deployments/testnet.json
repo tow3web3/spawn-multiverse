@@ -153,7 +153,7 @@
       "at": "2026-11-13T17:25:25.281Z"
     }
   },
-  "baseSepolia": {
+  "baseSepolia_v71_pre72": {
     "adapter": "0x6F0F64BCC949e92cf8210dED9006496F24FaA3BF",
     "transport": "v7.1",
     "usd": "0x6e2a794642B7370e16a08FF7b6373319d6b781Ca",
@@ -173,7 +173,7 @@
       "at": "2026-11-13T20:38:01.934Z"
     }
   },
-  "optimismSepolia": {
+  "optimismSepolia_v71_pre72": {
     "adapter": "0x08d503Cf70E5aF4395E20d392Ab4fbF7df7D06e4",
     "transport": "v7.1",
     "usdc": "0xe41852f6d9ed190031728727aE316b56cEbA04E1",
@@ -191,7 +191,7 @@
       "at": "2026-11-13T20:38:31.535Z"
     }
   },
-  "arbitrumSepolia": {
+  "arbitrumSepolia_v71_pre72": {
     "adapter": "0x13aDa7713Fd5f07D139f2F57fC4E9A5004e08b1d",
     "transport": "v7.1",
     "usdc": "0x1Af7d7eb1C96d1c2F722B459Af785fE1B655436E",
@@ -208,5 +208,34 @@
       "timelock": "0x439dD0D1bA9799BcB2646EeD419DA6c33791FCe6",
       "at": "2026-11-13T20:39:17.639Z"
     }
+  },
+  "baseSepolia": {
+    "adapter": "0x43d89C077403194a59a3aB05390EbB1eCb8baBeb",
+    "transport": "v7.2",
+    "usd": "0x613df51656D7bF7095433FE89C499FDf7CaeB61e",
+    "pad": "0x82Fc7dAfB7458D5B992855d63d6B0415D8184c98",
+    "venue": "0x9B3980607F63CB8e6a74F153Fba2051c17D7bDA3",
+    "usdc": "0xCc972B17950a47d98eBA8d62242667C8aF174F9E",
+    "localUsd": "0x3300d1283D93a149Eec42155D0933cbF18e322Ec",
+    "gateway": "0xC23c2AE14eB3B6487B19776d92e9bBDA45231702",
+    "localDist": "0x37479eBFf47b6aFd5cBA00fbaA5a13C0620e7e40"
+  },
+  "optimismSepolia": {
+    "adapter": "0xc0610D53298FbE4194eD1B71d2baCbc495259A8C",
+    "transport": "v7.2",
+    "usdc": "0x261dB55a8C3ad80e94547E01357AAAF49324D985",
+    "usd": "0x97375e8F377C40bC8619EFcE1a27489024384716",
+    "gateway": "0x8711E7AF156769E2ff947F42075fa46C3dd77E96",
+    "dist": "0xf97ACe8Cfba3Ce576Df6024fbd922BD66838F93a",
+    "ready": true
+  },
+  "arbitrumSepolia": {
+    "adapter": "0x83D2afd9d71Ab7a8C4F537193441F72C53C6050F",
+    "transport": "v7.2",
+    "usdc": "0x08B2B30C411627336FC3EAafE2565616f060e617",
+    "usd": "0x433aEc21bA011f1B95E59aAc8F2bc64a528fa2B1",
+    "gateway": "0xe0cdBF396D018dEEC14388E58b69011cE7e74c51",
+    "dist": "0x3d38131f5105384E62b123b680f2e0eCBF77e13e",
+    "ready": true
   }
 }

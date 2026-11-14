@@ -59,6 +59,25 @@ const syncCapOf = (net, d) => eth(env(`SPAWN_SYNC_CAP_${envKey(net)}`, d))
 /** The label no profile may use for an EVM chain: Solana's, kept for it. */
 const RESERVED_LABELS = { 1: 'solana' }
 
+/**
+ * Executor gas per destination AND kind of message
+ * (`LayerZeroOmniMessenger.setGasForOp`), set by the deploy where none is
+ * and kept by tune-fees.js. 0 / absent = the destination's own limit
+ * (`gasLimit`: hubGasFor toward the hub — the SPAWN —, gasToSpoke toward a
+ * spoke). Sized from the five-fork measurements (scripts/fork-rehearsal.js;
+ * docs/RUNBOOK.md §11), with the contract's rule: a kind of message that can
+ * meet a REFUSING leg (SPAWN, OPEN, MOVE toward the hub) is sold at least
+ * 200,000 gas (SpawnPad.SYNC_GAS_FLOOR) more than its failure path uses —
+ * the rehearsal asserts it for OPEN and MOVE. The testnet profile uses the
+ * SAME table: only real executors show that these limits deliver.
+ */
+const OP_GAS = {
+  // toward the hub: BUY, SELL, CLAIM, PULL_FEES, OPEN, MOVE (SPAWN: gasLimit)
+  toHub: { 2: 800_000, 3: 750_000, 4: 700_000, 5: 800_000, 6: 900_000, 7: 1_200_000 },
+  // toward a spoke: SYNC (a replica deploy), DELIVER, PAYOUT, FEE_DROP
+  toSpoke: { 10: 1_000_000, 11: 250_000, 12: 200_000, 13: 250_000 },
+}
+
 /* ------------------------------- testnet ------------------------------- */
 
 const testnet = {
@@ -115,6 +134,7 @@ const testnet = {
   // same executor gas as mainnet: the rehearsal must exercise the real limits
   gasToHub: 5_200_000n,
   gasToSpoke: 1_200_000n,
+  opGas: OP_GAS,
   // tanks: sized to whatever the faucet-fed deployer can spare
   tank: { mode: 'spare', floor: eth('0.002'), max: eth('0.005') },
   gasDrip: '/.netlify/functions/gas-drip',
@@ -248,23 +268,8 @@ const mainnet = {
   // see hubGasFor) and the spoke-bound default (a SYNC deploys a replica).
   gasToHub: 5_200_000n,
   gasToSpoke: 1_200_000n,
-  /**
-   * Executor gas per destination AND kind of message (second round:
-   * `LayerZeroOmniMessenger.setGasForOp`), set by the deploy where none is
-   * and kept by tune-fees.js. 0 / absent = the destination's own limit
-   * (`gasLimit`: hubGasFor toward the hub — the SPAWN —, gasToSpoke toward a
-   * spoke). Sized from the five-fork measurements (scripts/fork-rehearsal.js;
-   * docs/RUNBOOK.md §11), with the contract agent's rule: a kind of message
-   * that can meet a REFUSING leg (SPAWN, OPEN, MOVE toward the hub) is sold
-   * at least 200,000 gas (SpawnPad.SYNC_GAS_FLOOR) more than its failure
-   * path uses — the rehearsal asserts it for OPEN and MOVE.
-   */
-  opGas: {
-    // toward the hub: BUY, SELL, CLAIM, PULL_FEES, OPEN, MOVE (SPAWN: gasLimit)
-    toHub: { 2: 800_000, 3: 750_000, 4: 700_000, 5: 800_000, 6: 900_000, 7: 1_200_000 },
-    // toward a spoke: SYNC (a replica deploy), DELIVER, PAYOUT, FEE_DROP
-    toSpoke: { 10: 1_000_000, 11: 250_000, 12: 200_000, 13: 250_000 },
-  },
+  // executor gas per destination and kind of message — see OP_GAS above
+  opGas: OP_GAS,
   // the hub tank is a buffer between prepaid reply budgets and reply fees;
   // spokes need none (their users pay each send in full)
   tank: { mode: 'fixed', hub: eth('0.003'), spoke: 0n },

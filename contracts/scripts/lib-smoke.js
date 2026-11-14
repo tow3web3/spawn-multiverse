@@ -89,13 +89,42 @@ async function smoke(opts) {
   const SCALE = dollarScale(profile, NET) // one smallest unit of the dollar, in oUSD wei
 
   async function waitFor(what, fn, tries = 90, everyMs = POLL_MS) {
+    // a poll that throws is retried — but its error is kept: a watcher that
+    // can never succeed (an RPC that refuses the query) must say so at the end
+    let lastErr
     for (let i = 0; i < tries; i++) {
-      const v = await fn().catch(() => undefined)
+      const v = await fn().catch((e) => {
+        lastErr = e
+        return undefined
+      })
       if (v) return v
       if (i % 6 === 0) log(`  … waiting for ${what} (${(i * everyMs) / 1000}s)`)
       await sleep(everyMs)
     }
-    throw new Error(`${what} not observed after ${(tries * everyMs) / 60000} min — check gas tanks and LayerZero scan`)
+    const why = lastErr ? ` (last poll error: ${String(lastErr.shortMessage ?? lastErr.message).slice(0, 160)})` : ''
+    throw new Error(`${what} not observed after ${(tries * everyMs) / 60000} min — check gas tanks and LayerZero scan${why}`)
+  }
+
+  /**
+   * Finds one event of `contract` from block `from` on, polled by `waitFor`.
+   * Public RPCs cap the range of one eth_getLogs (Base Sepolia: 200 blocks)
+   * and a testnet message can take longer than that to land, so this never
+   * asks for one growing range: it scans forward in small windows from
+   * where the last successful poll stopped.
+   */
+  function eventScanner(contract, filter, from, match, windowBlocks = 100) {
+    let scanned = from - 1
+    return async () => {
+      const latest = await contract.runner.provider.getBlockNumber()
+      while (scanned < latest) {
+        const to = Math.min(latest, scanned + windowBlocks)
+        const evs = await contract.queryFilter(filter, scanned + 1, to)
+        scanned = to
+        const hit = evs.find(match)
+        if (hit) return hit
+      }
+      return undefined
+    }
   }
 
   const all = JSON.parse(fs.readFileSync(FILE, 'utf8'))
@@ -285,10 +314,15 @@ async function smoke(opts) {
     log(`proving the protection: a $${PROOF} buy that names an impossible minimum (buyTokenUsdcMin) — messaging fee ${ethers.formatEther(buyFee)} ${COIN}…`)
     await (await gw.buyTokenUsdcMin(token, U(PROOF), impossible, { value: buyFee })).wait()
     const me32 = ethers.zeroPadValue(dev.address, 32).toLowerCase()
-    const ev = await waitFor('the hub\'s refusal (Refused, reason 6)', async () => {
-      const evs = await pad.queryFilter(pad.filters.Refused(), hubBlock)
-      return evs.find((e) => Number(e.args.op) === 2 && e.args.actor.toLowerCase() === me32 && Number(e.args.reason) === 6)
-    })
+    const ev = await waitFor(
+      'the hub\'s refusal (Refused, reason 6)',
+      eventScanner(
+        pad,
+        pad.filters.Refused(),
+        hubBlock,
+        (e) => Number(e.args.op) === 2 && e.args.actor.toLowerCase() === me32 && Number(e.args.reason) === 6,
+      ),
+    )
     const home = await waitFor(`the ${SYM_USD} back, whole`, async () => {
       const b = await usdc.balanceOf(dev.address)
       return b === before ? b : undefined

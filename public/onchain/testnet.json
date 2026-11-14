@@ -1,48 +1,53 @@
 {
+  "generation": "v7.2",
   "dollar": {
     "symbol": "USDC",
     "decimals": 6
   },
   "chainId": 84532,
   "rpc": "https://sepolia.base.org",
-  "pad": "0x12572Ae0262401565629dB68293d0D2550530DEc",
-  "venue": "0x4A18DDFd43a753122eE27d68f3bB013935C02aB3",
-  "hubUsd": "0x6e2a794642B7370e16a08FF7b6373319d6b781Ca",
-  "fromBlock": 58396697,
+  "pad": "0x82Fc7dAfB7458D5B992855d63d6B0415D8184c98",
+  "venue": "0x9B3980607F63CB8e6a74F153Fba2051c17D7bDA3",
+  "hubUsd": "0x613df51656D7bF7095433FE89C499FDf7CaeB61e",
+  "hubMessenger": "0x43d89C077403194a59a3aB05390EbB1eCb8baBeb",
+  "fromBlock": 58553883,
   "gasDrip": "/.netlify/functions/gas-drip",
   "sponsored": true,
   "chains": [
     {
       "label": 3,
       "id": "base",
-      "gateway": "0x8711E7AF156769E2ff947F42075fa46C3dd77E96",
-      "usd": "0x97375e8F377C40bC8619EFcE1a27489024384716",
-      "usdc": "0x261dB55a8C3ad80e94547E01357AAAF49324D985",
-      "dist": "0xf97ACe8Cfba3Ce576Df6024fbd922BD66838F93a",
+      "gateway": "0xC23c2AE14eB3B6487B19776d92e9bBDA45231702",
+      "usd": "0x3300d1283D93a149Eec42155D0933cbF18e322Ec",
+      "usdc": "0xCc972B17950a47d98eBA8d62242667C8aF174F9E",
+      "dist": "0x37479eBFf47b6aFd5cBA00fbaA5a13C0620e7e40",
       "chainId": 84532,
       "rpc": "https://sepolia.base.org",
-      "local": true
+      "local": true,
+      "vault": "cctp"
     },
     {
       "label": 6,
       "id": "optimism",
-      "gateway": "0x41bcBBc8A1ea91d1b11868200b0C9DD3f1d5CB54",
-      "usd": "0x439dD0D1bA9799BcB2646EeD419DA6c33791FCe6",
-      "usdc": "0xe41852f6d9ed190031728727aE316b56cEbA04E1",
-      "dist": "0xd1D8d07948546b4Cd8e878778E3143a15900e5A5",
+      "gateway": "0x8711E7AF156769E2ff947F42075fa46C3dd77E96",
+      "usd": "0x97375e8F377C40bC8619EFcE1a27489024384716",
+      "usdc": "0x261dB55a8C3ad80e94547E01357AAAF49324D985",
+      "dist": "0xf97ACe8Cfba3Ce576Df6024fbd922BD66838F93a",
       "chainId": 11155420,
-      "rpc": "https://sepolia.optimism.io"
+      "rpc": "https://sepolia.optimism.io",
+      "vault": "cctp"
     },
     {
       "label": 5,
       "id": "arbitrum",
-      "gateway": "0x125213ef1bB6312967c140599198752B00F14a40",
-      "usd": "0xC852a74cD1db2e014122815bA2bD64cE5a3A39De",
-      "usdc": "0x1Af7d7eb1C96d1c2F722B459Af785fE1B655436E",
-      "dist": "0xf5ce2baa26ce156A2Dd68327FDABE8d2a7521828",
+      "gateway": "0xe0cdBF396D018dEEC14388E58b69011cE7e74c51",
+      "usd": "0x433aEc21bA011f1B95E59aAc8F2bc64a528fa2B1",
+      "usdc": "0x08B2B30C411627336FC3EAafE2565616f060e617",
+      "dist": "0x3d38131f5105384E62b123b680f2e0eCBF77e13e",
       "chainId": 421614,
-      "rpc": "https://sepolia-rollup.arbitrum.io/rpc"
+      "rpc": "https://sepolia-rollup.arbitrum.io/rpc",
+      "vault": "cctp"
     }
   ],
-  "deployedAt": 1794602385379
+  "deployedAt": 1794635459978
 }
