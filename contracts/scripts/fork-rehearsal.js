@@ -175,6 +175,15 @@ async function main() {
     report.checks = await checkEndState({ profile, url, relay })
     report.canaryDeliveries = relay.records.slice()
 
+    // what the two commands cost the deployer in each chain's own coin: every
+    // transaction it sent since the fork (value + gas at the fork's prices).
+    // A fork tops the deployer up at every step, so balances cannot say it.
+    report.deployerSpend = await deployerSpend({ url, from: forks.blocks })
+    console.log(`\n━━━ what launch.sh + finish.sh cost the deployer (value + gas, at the fork's prices; no rollup L1 data fee) ━━━`)
+    for (const [net, v] of Object.entries(report.deployerSpend)) {
+      console.log(`  ${net.padEnd(9)} ${ethers.formatEther(v.total).padEnd(22)} ${profile.nets[net].native ?? 'ETH'}  (value ${ethers.formatEther(v.value)}, gas ${ethers.formatEther(v.gas)}, ${v.txs} tx)`)
+    }
+
     if (process.env.FORK_MEASURE !== '0') {
       console.log(`\n━━━ measurements — ${mins()} ━━━`)
       report.measure = await measure({ profile, url, relay, abi })
@@ -189,6 +198,33 @@ async function main() {
     await relay.stop()
     forks.stop()
   }
+}
+
+/* ------------------------------ deployer spend ---------------------------- */
+
+/** Per chain: the native coin every transaction FROM the deployer moved
+ * since the fork block — its value (tank floats, message fees) and its gas. */
+async function deployerSpend({ url, from }) {
+  const out = {}
+  const me = DEPLOYER.toLowerCase()
+  for (const net of NETS) {
+    const latest = Number(await rpc(url[net], 'eth_blockNumber'))
+    let value = 0n
+    let gas = 0n
+    let txs = 0
+    for (let b = from[net] + 1; b <= latest; b++) {
+      const block = await rpc(url[net], 'eth_getBlockByNumber', [ethers.toQuantity(b), true])
+      for (const tx of block?.transactions ?? []) {
+        if (String(tx.from).toLowerCase() !== me) continue
+        const rc = await rpc(url[net], 'eth_getTransactionReceipt', [tx.hash])
+        value += BigInt(tx.value ?? 0)
+        gas += BigInt(rc.gasUsed) * BigInt(rc.effectiveGasPrice ?? tx.gasPrice ?? 0)
+        txs++
+      }
+    }
+    out[net] = { value, gas, total: value + gas, txs }
+  }
+  return out
 }
 
 /* --------------------------------- checks --------------------------------- */

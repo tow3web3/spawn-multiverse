@@ -63,18 +63,22 @@ const CHAINS = {
 /** Gas first on every chain, test dollars last — if SOL runs short, the
  * USDC targets are the ones to miss. Targets are balances to REACH. */
 const ORDERS = [
-  { chain: 'base', asset: 'ETH', target: 0.015 },
-  { chain: 'optimism', asset: 'ETH', target: 0.006 },
-  { chain: 'arbitrum', asset: 'ETH', target: 0.006 },
-  { chain: 'base', asset: 'USDC', target: 20 },
-  { chain: 'optimism', asset: 'USDC', target: 10 },
-  { chain: 'arbitrum', asset: 'USDC', target: 10 },
+  // Targets from the five-chain fork rehearsal of 2026-11-14 (what launch.sh
+  // + finish.sh move out of the deployer: tank float and message fees, plus
+  // gas at live prices), with about half as much again:
+  //   Base 0.0051 ETH · Optimism 0.0014 · Arbitrum 0.0018 · BNB Chain 0.0061 BNB
+  //   · Ethereum 0.0071 ETH at 0.08 gwei (0.022 at 1 gwei)
+  { chain: 'base', asset: 'ETH', target: 0.008 },
+  { chain: 'optimism', asset: 'ETH', target: 0.003 },
+  { chain: 'arbitrum', asset: 'ETH', target: 0.003 },
   // 'ETH' means the chain's gas coin and 'USDC' its dollar (see CHAINS.bnb)
-  { chain: 'bnb', asset: 'ETH', target: 0.006 },
-  { chain: 'bnb', asset: 'USDC', target: 5 },
-  // 0.03: the fork rehearsal measured ~0.011 ETH for Ethereum's canary round
-  // trip (open, buy, sell, pull) on top of the deployment itself
+  { chain: 'bnb', asset: 'ETH', target: 0.012 },
   { chain: 'ethereum', asset: 'ETH', target: 0.03 },
+  // the canary's own dollars: a 3-dollar buy and a 1-dollar proof per chain
+  { chain: 'base', asset: 'USDC', target: 10 },
+  { chain: 'optimism', asset: 'USDC', target: 5 },
+  { chain: 'arbitrum', asset: 'USDC', target: 5 },
+  { chain: 'bnb', asset: 'USDC', target: 5 },
   { chain: 'ethereum', asset: 'USDC', target: 5 },
 ]
 /** What an order's asset is called on its chain. */
