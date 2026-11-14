@@ -410,6 +410,12 @@ export type TradeResult =
       note?: string
       /** The message is still crossing chains — the figures are an estimate. */
       pending?: boolean
+      /** Filled at the hub; the tokens or dollars are crossing back to the
+       * chain the order came from. */
+      arriving?: boolean
+      /** No verdict yet (`pending`): the hub's answer when it comes — a fill,
+       * or a refusal that came back whole. */
+      later?: Promise<TradeResult>
     }
   | {
       ok: false

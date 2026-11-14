@@ -72,7 +72,7 @@ export function OpenToken({
       <p className="font-mono text-[11px] font-bold tracking-wide">🚪 ${ticker} IS NOT OPEN ON {name} YET</p>
       <p className="mt-1 font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-75">
         ITS LAUNCH SKIPPED THIS CHAIN (A CHAIN TOO EXPENSIVE AT THAT MOMENT IS LEFT OUT), SO THERE IS NOTHING TO
-        TRADE HERE YET. OPEN IT: YOU PAY THE NETWORK FEE FOR THE ROUND TRIP, THE HUB SENDS ${ticker} BACK{' '}
+        TRADE HERE YET. OPEN IT: {onchain?.sponsored ? 'THE ROUND TRIP IS SPONSORED HERE' : 'YOU PAY THE NETWORK FEE FOR THE ROUND TRIP'}, THE HUB SENDS ${ticker} BACK{' '}
         {instant ? 'IN THE SAME TRANSACTION' : 'WITHIN A FEW MINUTES'}, AND IT IS TRADABLE ON {name} FOR EVERYONE.
         {chain === 'ethereum' ? ' EVERY ACTION ON ETHEREUM PAYS L1 GAS.' : ''}
       </p>
@@ -94,8 +94,8 @@ export function OpenToken({
           {!instant && (
             <span className="opacity-60">
               {' '}
-              IF A MESSAGE TO {name} GETS DEARER BEFORE YOUR REQUEST ARRIVES, THE HUB WILL NOT SEND IT AND THE FEE PAYS
-              FOR THE ATTEMPT.
+              IF A MESSAGE TO {name} GETS DEARER BEFORE YOUR REQUEST ARRIVES, THE HUB WILL NOT SEND IT
+              {onchain?.sponsored ? ' — TRY AGAIN LATER.' : ' AND THE FEE PAYS FOR THE ATTEMPT.'}
             </span>
           )}
         </p>

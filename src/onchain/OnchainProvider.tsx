@@ -1810,95 +1810,135 @@ export function OnchainProvider({
 
         // The hub's verdict: in this very receipt when the pad is on the same
         // chain (local devnet, or the hub chain's own gateway); otherwise it
-        // arrives over LayerZero in a minute or three.
+        // arrives over LayerZero — one message takes 3 to 15 minutes on the
+        // public networks, and the reply as long again.
         const instant = syncRef.current || c.local
+        const dollarsHere = st.liquidity
+
+        /** A hub verdict (or none yet) as what the user is told. */
+        const settle = async (got: ReturnType<typeof readOutcome>, provisional: boolean): Promise<TradeResult> => {
+          if (got?.kind === 'refused') {
+            // the hub turned it away and sent it home whole — under its
+            // minimum or past its deadline (reason 6, a trade that crossed),
+            // or for another reason. It is what happened, not a failure:
+            // said plainly, with a retry. An expiry is told by the hub
+            // block's time.
+            let refusedAt: number | undefined
+            if (got.block !== undefined && c.orderTtl)
+              refusedAt = await hubClientRef.current!
+                .getBlock({ blockNumber: got.block })
+                .then((b) => at(b.timestamp))
+                .catch(() => undefined)
+            await poll()
+            return {
+              ok: false,
+              code: 'returned',
+              reason: returnedText(side, got.reason, {
+                chain: up(chainId),
+                ticker: entry.meta.ticker,
+                money: side === 'buy' ? money(c, exp.spendUnits) : undefined,
+                hadMin: exp.protected,
+                expired: expired(sentAt, refusedAt, c.orderTtl),
+                sponsored: sponsoredRef.current,
+                arriving: !instant,
+              }),
+            }
+          }
+          if (got?.kind === 'bounced') {
+            await poll()
+            const cap = fairGenesisRef.current[num]?.capUsd ?? 250
+            return {
+              ok: false,
+              reason: `FAIR GENESIS turned the buy away (spawn block or your $${cap.toLocaleString('en-US')} window cap) — $${got.refunded.toFixed(2)} refunded${instant ? '' : ` on ${up(chainId)}, landing in a few minutes`}.`,
+            }
+          }
+
+          let usd: number
+          let tokens: number
+          let price: number
+          let ascended = false
+          let pending = false
+          let arriving = false
+          if (got?.kind === 'trade') {
+            usd = got.usd
+            tokens = got.tokens
+            price = got.price
+            ascended = got.ascended
+            if (got.guardRefund > 0.005) note = `FAIR GENESIS CAPPED IT — $${got.guardRefund.toFixed(2)} REFUNDED`
+            if (!instant) {
+              // filled at the hub; what it bought or paid is now crossing back
+              arriving = true
+              const back =
+                side === 'buy'
+                  ? `YOUR $${entry.meta.ticker} ARRIVE ON ${up(chainId)} WITHIN A FEW MINUTES`
+                  : toUnits(usd, c.dec) > dollarsHere
+                    ? `${up(chainId)}'S VAULT HOLDS ONLY ${money(c, dollarsHere)}: THE PAYOUT LANDS THERE WITHIN A FEW MINUTES AS AN oUSD CLAIM YOU CAN MOVE (PORTFOLIO)`
+                    : `YOUR ${c.dollar.symbol} ARRIVE ON ${up(chainId)} WITHIN A FEW MINUTES`
+              note = note ? `${note} · ${back}` : back
+            }
+          } else {
+            // still in flight (or an unreadable receipt) — the expectation serves
+            usd = side === 'buy' ? ef(exp.spendWei) : ef(exp.expected)
+            tokens = side === 'buy' ? ef(exp.expected) : ef(exp.tokensWei)
+            price = entry.market.state.vBase / entry.market.state.vTokens
+            pending = !instant
+            note = pending
+              ? exp.protected
+                ? `STILL CROSSING CHAINS — IT FILLS AT YOUR MINIMUM OR BETTER${c.orderTtl ? ` WITHIN ${ttlText(c.orderTtl).toUpperCase()}` : ''}, OR COMES BACK WHOLE. THIS MESSAGE UPDATES WHEN THE HUB ANSWERS`
+                : 'STILL CROSSING CHAINS — YOUR BALANCE UPDATES WHEN IT LANDS'
+              : note
+          }
+          // a sell paid as a claim instead of the dollar token is worth saying out loud
+          if (side === 'sell' && instant) {
+            const paid = parseEventLogs({ abi: usdAbi, logs: receipt.logs }).find(
+              (e) => e.eventName === 'PaidOut' && String(e.args.to).toLowerCase() === addr.toLowerCase(),
+            )
+            if (paid && paid.args.usdcOut === 0n && paid.args.minted >= c.scale)
+              note = c.v72
+                ? `${up(chainId)}'S VAULT IS SHORT — PAID AS AN oUSD CLAIM: UNWRAP IT LATER, OR MOVE IT TO A CHAIN THAT CAN PAY (PORTFOLIO)`
+                : `${up(chainId)}'S VAULT IS SHORT — PAID AS AN oUSD CLAIM, UNWRAP IT WHEN LIQUIDITY RETURNS`
+          }
+
+          if (!pending && !provisional) {
+            if (side === 'buy') {
+              costsRef.current[num] = (costsRef.current[num] ?? 0) + usd
+              heldRef.current[num] = (heldRef.current[num] ?? 0) + tokens
+            } else {
+              const pos = wallet?.positions[num]
+              if (pos && pos.tokens > 0) {
+                costsRef.current[num] = Math.max(0, (costsRef.current[num] ?? 0) * (1 - tokens / pos.tokens))
+              }
+              heldRef.current[num] = Math.max(0, (heldRef.current[num] ?? 0) - tokens)
+            }
+            saveCosts()
+          }
+          await poll()
+          return { ok: true, usd, tokens, price, ascended, note, pending, arriving }
+        }
+
         const got = instant
           ? readOutcome(receipt.logs, entry.token, addr, side, c.label)
           : await waitHub(entry.token, addr, side, c.label, hubMark, 240_000)
-
-        if (got?.kind === 'refused') {
-          // the hub turned it away and sent it home whole — under its
-          // minimum or past its deadline (reason 6, a trade that crossed),
-          // or for another reason. It is what happened, not a failure: said
-          // plainly, with a retry. An expiry is told by the hub block's time.
-          let refusedAt: number | undefined
-          if (got.block !== undefined && c.orderTtl)
-            refusedAt = await hubClientRef.current
-              .getBlock({ blockNumber: got.block })
-              .then((b) => at(b.timestamp))
-              .catch(() => undefined)
-          await poll()
-          return {
-            ok: false,
-            code: 'returned',
-            reason: returnedText(side, got.reason, {
-              chain: up(chainId),
-              ticker: entry.meta.ticker,
-              money: side === 'buy' ? money(c, exp.spendUnits) : undefined,
-              hadMin: exp.protected,
-              expired: expired(sentAt, refusedAt, c.orderTtl),
-            }),
-          }
-        }
-        if (got?.kind === 'bounced') {
-          await poll()
-          const cap = fairGenesisRef.current[num]?.capUsd ?? 250
-          return {
-            ok: false,
-            reason: `FAIR GENESIS turned the buy away (spawn block or your $${cap.toLocaleString('en-US')} window cap) — $${got.refunded.toFixed(2)} refunded.`,
-          }
-        }
-
-        let usd: number
-        let tokens: number
-        let price: number
-        let ascended = false
-        let pending = false
-        if (got?.kind === 'trade') {
-          usd = got.usd
-          tokens = got.tokens
-          price = got.price
-          ascended = got.ascended
-          if (got.guardRefund > 0.005)
-            note = `FAIR GENESIS CAPPED IT — $${got.guardRefund.toFixed(2)} REFUNDED`
-        } else {
-          // still in flight (or an unreadable receipt) — the expectation serves
-          usd = side === 'buy' ? ef(exp.spendWei) : ef(exp.expected)
-          tokens = side === 'buy' ? ef(exp.expected) : ef(exp.tokensWei)
-          price = entry.market.state.vBase / entry.market.state.vTokens
-          pending = !instant
-          note = pending
-            ? exp.protected
-              ? `STILL CROSSING CHAINS — IT FILLS AT YOUR MINIMUM OR BETTER${c.orderTtl ? ` WITHIN ${ttlText(c.orderTtl).toUpperCase()}` : ''}, OR COMES BACK WHOLE`
-              : 'STILL CROSSING CHAINS — YOUR BALANCE UPDATES WHEN IT LANDS'
-            : note
-        }
-        // a sell paid as a claim instead of the dollar token is worth saying out loud
-        if (side === 'sell' && instant) {
-          const paid = parseEventLogs({ abi: usdAbi, logs: receipt.logs }).find(
-            (e) => e.eventName === 'PaidOut' && String(e.args.to).toLowerCase() === addr.toLowerCase(),
-          )
-          if (paid && paid.args.usdcOut === 0n && paid.args.minted >= c.scale)
-            note = c.v72
-              ? `${up(chainId)}'S VAULT IS SHORT — PAID AS AN oUSD CLAIM: UNWRAP IT LATER, OR MOVE IT TO A CHAIN THAT CAN PAY (PORTFOLIO)`
-              : `${up(chainId)}'S VAULT IS SHORT — PAID AS AN oUSD CLAIM, UNWRAP IT WHEN LIQUIDITY RETURNS`
-        }
-
-        if (!pending) {
-          if (side === 'buy') {
-            costsRef.current[num] = (costsRef.current[num] ?? 0) + usd
-            heldRef.current[num] = (heldRef.current[num] ?? 0) + tokens
-          } else {
-            const pos = wallet?.positions[num]
-            if (pos && pos.tokens > 0) {
-              costsRef.current[num] = Math.max(0, (costsRef.current[num] ?? 0) * (1 - tokens / pos.tokens))
-            }
-            heldRef.current[num] = Math.max(0, (heldRef.current[num] ?? 0) - tokens)
-          }
-          saveCosts()
-        }
-        await poll()
-        return { ok: true, usd, tokens, price, ascended, note, pending }
+        if (got || instant) return await settle(got, false)
+        // No verdict yet: say so now, and keep listening for the hub's answer
+        // for as long as the order can live (its deadline, plus the trip).
+        const provisional = await settle(null, true)
+        const later = waitHub(
+          entry.token,
+          addr,
+          side,
+          c.label,
+          hubMark,
+          ((c.orderTtl ?? 1800) + 15 * 60) * 1000,
+        ).then((g) =>
+          g
+            ? settle(g, false)
+            : ({
+                ok: false,
+                reason: `No answer from the hub yet for your ${side} from ${up(chainId)}. Check your balance there: an order the hub never fills comes back whole.`,
+              } as TradeResult),
+        )
+        return { ...provisional, later } as TradeResult
       } catch (e) {
         // the protection doing its job is not a failure: nothing moved, and
         // trying again (or widening the tolerance) is the whole remedy
@@ -2570,7 +2610,7 @@ export function OnchainProvider({
           return {
             ok: false,
             code: 'returned',
-            reason: `The hub could not hand your ${usd} on to ${up(to)} right now, so it came back to you on ${up(from)} as the same claim. Only the network fee is spent.`,
+            reason: `The hub could not hand your ${usd} on to ${up(to)} right now, so it ${instant ? 'came back' : 'is on its way back'} to you on ${up(from)} as the same claim. ${sponsoredRef.current ? 'Nothing is spent but gas.' : 'Only the network fee is spent.'}`,
           }
         if (got && instant) {
           // the destination vault's payout sits in this same receipt

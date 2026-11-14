@@ -417,8 +417,8 @@ export function GenesisLab({
                       ? 'Local devnet: the launch lands in one transaction.'
                       : chainSet.single
                         ? `${from.label} is the only live chain: your token exists in one transaction.`
-                        : `${from.label} is the hub chain: your token exists there in one transaction, and reaches the other chains a minute or two later.`
-                    : `From ${from.label} the launch crosses LayerZero to the hub first: allow 1–3 minutes before it appears.`}{' '}
+                        : `${from.label} is the hub chain: your token exists there in one transaction, and reaches the other chains a few minutes later.`
+                    : `From ${from.label} the launch crosses LayerZero to the hub first: allow a few minutes (up to a quarter of an hour) before it appears.`}{' '}
                   <span className="text-lime">
                     {onchain.sponsored ? (
                       'Network fee: sponsored on this testnet — you only pay gas.'

@@ -229,6 +229,7 @@ function ConnectButton() {
   const { wallet, connect, onchain } = useStore()
   const dollars = useDollars()
   const [open, setOpen] = useState(false)
+  const [minting, setMinting] = useState(false)
   const [busy, setBusy] = useState<WalletSource | 'any' | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const hasInjected =
@@ -306,6 +307,29 @@ function ConnectButton() {
                 {onchain?.walletSource === 'injected' ? '🦊 METAMASK' : '⚡ BURNER WALLET'} ·{' '}
                 {shortAddr(wallet.address)}
               </p>
+              {/* on a phone the bar has no room for the mint button: it lives here */}
+              {onchain?.airdrop && (
+                <button
+                  className={`${option} mb-2 bg-lime sm:hidden`}
+                  disabled={minting}
+                  data-testid="mint-menu"
+                  onClick={() => {
+                    if (minting) return
+                    setMinting(true)
+                    void onchain.airdrop!()
+                      .catch(() => undefined)
+                      .finally(() => {
+                        setMinting(false)
+                        setOpen(false)
+                      })
+                  }}
+                >
+                  {minting ? '✳ MINTING…' : '+ MINT PLAY CASH'}
+                  <span className="block font-body text-[10px] font-normal opacity-70">
+                    1,337 on every chain, in its own dollar
+                  </span>
+                </button>
+              )}
               <button
                 className={`${option} bg-white hover:bg-hotpink`}
                 onClick={() => {

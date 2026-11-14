@@ -173,16 +173,23 @@ export function returnedText(
     hadMin?: boolean
     /** The refusal landed after the order's deadline (see `expired`). */
     expired?: boolean
+    /** The messages are paid by the protocol (testnets): no fee was spent. */
+    sponsored?: boolean
+    /** The refusal was read on the hub while the value is still crossing
+     * back to the source chain (a trade that crossed): say it is on its way,
+     * not that it has landed. */
+    arriving?: boolean
   },
 ): string {
-  const back =
-    side === 'buy'
-      ? `Your ${where.money ?? 'dollars'} came back to you on ${where.chain}.`
-      : `Your $${where.ticker} came back to you on ${where.chain}.`
+  const what = side === 'buy' ? `Your ${where.money ?? 'dollars'}` : `Your $${where.ticker}`
+  const back = where.arriving
+    ? `${what} are on the way back to you on ${where.chain} — whole, within a few minutes.`
+    : `${what} came back to you on ${where.chain}.`
+  const spent = where.sponsored ? 'Nothing is spent but gas' : 'Only the network fee is spent'
   if (reason === R.TERMS && where.expired)
-    return `Your order reached the hub after its deadline, so it expired unfilled. ${back} Only the network fee is spent — try again.`
+    return `Your order reached the hub after its deadline, so it expired unfilled. ${back} ${spent} — try again.`
   if (reason === R.TERMS && where.hadMin)
-    return `The price moved past the minimum you set while your order crossed to the hub, so it was not filled. ${back} Only the network fee is spent — try again, or widen your tolerance.`
+    return `The price moved past the minimum you set while your order crossed to the hub, so it was not filled. ${back} ${spent} — try again, or widen your tolerance.`
   return `The hub refused it — ${REFUSAL[reason] ?? 'see the hub events'}. ${back}`
 }
 

@@ -111,6 +111,11 @@ test('a refused trade is said as what happened: it came back whole, in plain wor
   // any other refusal still says why, and that the value came back
   assert.match(returnedText('buy', R.PAUSED, { chain: 'ARBITRUM', ticker: 'X' }), /hub is paused.*came back/)
   assert.match(returnedText('buy', 99, { chain: 'ARBITRUM', ticker: 'X' }), /see the hub events/)
+  // read on the hub while the value still crosses back: "on the way", not "came back"
+  const flying = returnedText('buy', R.TERMS, { chain: 'ARBITRUM', ticker: 'X', money: '$30.00 USDC', hadMin: true, arriving: true, sponsored: true })
+  assert.match(flying, /\$30\.00 USDC are on the way back to you on ARBITRUM — whole, within a few minutes/)
+  assert.match(flying, /Nothing is spent but gas/)
+  assert.doesNotMatch(flying, /network fee/)
   // reason 6 without a minimum: the market refused it, said as such
   assert.match(returnedText('buy', R.TERMS, { chain: 'BASE', ticker: 'X' }), /terms were not met, or the market refused it.*came back/)
   // reason 6 after the deadline: expired, not a price move
