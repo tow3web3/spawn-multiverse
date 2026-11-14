@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Adds a spoke chain to the LIVE, handed-over CORE universe — through the timelocks.
+# Adds a spoke chain to the LIVE, handed-over universe — through the timelocks.
 #
 #   bash scripts/add-chain.sh <network> prepare    # from contracts/ — day 0
 #   bash scripts/add-chain.sh <network> finish     # after the delay (48h on mainnet)
 #
-# <network> is a `nets` entry of the core profile (config/profiles.js) that
-# is not live yet. NOT Ethereum L1: a leg there would make every launch on
-# every chain pay an Ethereum SYNC forever ($3 today, $100+ at 30 gwei), so
-# Ethereum is a universe of its own — bash scripts/launch.sh ethereum. The
-# core profile's `ethereum` entry is rehearsal-only (forks); the deploy
-# refuses it on a live network.
+# <network> is a `nets` entry of the profile (config/profiles.js) that is not
+# live yet — an EVM chain. (Solana, label 1, joins through its own program and
+# wiring script: solana/; this script is for EVM spokes.)
+#
+# v7.2: from the moment the hub batch executes, every launch reaches the new
+# chain (unless the profile gives it a launch ceiling, `syncCap`), every
+# other chain may move claims to it and open tokens from it — so `finish`
+# re-prices EVERY chain: reply units, spawn / open / move legs (every
+# existing gateway gets a price toward the newcomer, the newcomer one toward
+# every chain), the hub-bound gas, then the pad's request ceilings last.
 #
 # Why two commands: once a deployment is handed over, every topology step
 # (the hub's route to the new chain, pad.setGateway, the CCTP peers, the hub
@@ -57,20 +61,24 @@ fi
 PROFILE="${SPAWN_LAUNCH_PROFILE:-mainnet}"
 export SPAWN_PROFILE="$PROFILE"
 export SPAWN_ENABLE="${SPAWN_ENABLE:-$NEW}"
+SMOKE_ENV="SPAWN_REHEARSAL=1"
 if [[ "$PROFILE" == "mainnet" ]]; then
   export SPAWN_MAINNET_CONFIRM=I_UNDERSTAND_THIS_IS_REAL_MONEY
-  SMOKE_ENV="SMOKE_BUY_USDC=3"
   CANARY_CAP="${SPAWN_CANARY_CAP_USDC:-100}"
-  LAUNCH_CAP="${SPAWN_LAUNCH_CAP_USDC:-25000}"
   WITH_DVN=1
 elif [[ "$PROFILE" == "testnet" ]]; then
-  SMOKE_ENV="SPAWN_REHEARSAL=1"
   CANARY_CAP="${SPAWN_CANARY_CAP_USDC:-1000000}"
-  LAUNCH_CAP="${SPAWN_LAUNCH_CAP_USDC:-500000000}"
   WITH_DVN=0
 else
   echo "unknown SPAWN_LAUNCH_PROFILE \"$PROFILE\" (mainnet | testnet)"; exit 1
 fi
+# the newcomer's own launch cap and dollar (USDC, or a dollar of its own)
+CAPINFO=$(NEW="$NEW" node -e "
+const {PROFILES,launchCapOf,dollarOfNet}=require('./config/profiles');
+const p=PROFILES[process.env.SPAWN_PROFILE];const n=process.env.NEW;
+if(!p.nets[n]){console.log('0 ?');process.exit(0)}
+console.log(launchCapOf(p,n)+' '+dollarOfNet(p,n).symbol)")
+LAUNCH_CAP="${CAPINFO%% *}"; DOLLAR="${CAPINFO##* }"
 LOG_DIR="deployments/logs"
 mkdir -p "$LOG_DIR"
 
@@ -84,7 +92,7 @@ if(!p.nets[n])fail('\"'+n+'\" is not a network of the '+p.name+' profile ('+Obje
 if(p.nets[n].role!=='spoke')fail(n+' is the hub');
 let st={};try{st=JSON.parse(fs.readFileSync(p.stateFile,'utf8'))}catch{}
 const hub=st[p.hub];
-if(!hub||!hub.handover)fail('the hub ('+p.hub+') is not deployed and handed over — use launch-mainnet.sh / finish-mainnet.sh for a first deployment');
+if(!hub||!hub.handover)fail('the hub ('+p.hub+') is not deployed and handed over — use launch.sh / finish.sh for a first deployment');
 const spokes=Object.keys(p.nets).filter(k=>k!==p.hub&&k!==n&&st[k]&&st[k].gateway&&st[k].handover);
 console.log([p.hub,spokes.join(','),hub.handover.owner,hub.handover.operator,hub.handover.guardian].join(' '));
 ")
@@ -151,7 +159,7 @@ if [[ "$PHASE" == "prepare" ]]; then
     logged "configure-dvn $NEW" 'verifier set configured and read back' hh "$NEW" configure-dvn.js
   fi
 
-  step "3. operator pre-steps on the live chains (spawns keep working)"
+  step "3. operator pre-steps on the live chains (spawns keep working; a claim moved toward $NEW goes home until it is wired)"
   logged "pre-steps $HUB" "$PREP" hh "$HUB" deploy.js
   for n in $SPOKES; do
     logged "pre-steps $n" "$PREP" hh "$n" deploy.js
@@ -196,9 +204,12 @@ for n in $HUB $SPOKES; do
   fi
 done
 
-step "2. every chain re-priced from live quotes; wiring read back"
-for n in $SPOKES $NEW; do
-  logged "tune-fees $n" 'tune-fees' SPAWN_APPLY=1 hh "$n" tune-fees.js
+step "2. every chain re-priced from live quotes (spokes, then the hub's request ceilings — twice); wiring read back"
+for round in 1 2; do
+  for n in $SPOKES $NEW; do
+    logged "tune-fees $n (round $round)" 'tune-fees' SPAWN_APPLY=1 hh "$n" tune-fees.js
+  done
+  logged "tune-fees $HUB (round $round)" 'tune-fees' SPAWN_APPLY=1 hh "$HUB" tune-fees.js
 done
 # SPAWN_OPEN_DEPOSITS=0: a read-back must not open the new vault at the
 # launch cap — it opens below, at the canary cap, and only after this
@@ -215,7 +226,7 @@ if [[ "$WITH_DVN" == "1" ]]; then
   fi
 fi
 
-step "4. $NEW opens with a canary cap ($CANARY_CAP USDC)"
+step "4. $NEW opens with a canary cap ($CANARY_CAP $DOLLAR)"
 logged "canary cap $NEW" 'already set|setDepositCap\(' SPAWN_APPLY=1 SPAWN_CAP_USDC="$CANARY_CAP" hh "$NEW" set-cap.js
 logged "unpause $NEW" 'already open|gateway\.unpause\(\) ✓' SPAWN_GATE=unpause hh "$NEW" gate.js
 
@@ -227,6 +238,8 @@ elif canary_passed "$NEW"; then
   step "canary from $NEW — already passed ($(cat "$(canary_mark_file "$NEW")"))"
 else
   step "canary — a full round trip from $NEW (the deployer's own money)"
+  # the canary reuses the universe's canary token: it OPENS it on $NEW (the
+  # token predates the chain), then trades a round trip
   LOG_TRIES=1 logged "canary $NEW (cross-chain)" '🎉' "$SMOKE_ENV" hh "$NEW" smoke.js
   canary_record "$NEW"
 fi
@@ -245,6 +258,6 @@ fi
 cat <<EOF
 
 ════════ $NEW IS LIVE ════════
-Wired on the hub, priced, handed over to OWNER's timelock, capped at $LAUNCH_CAP USDC.
+Wired on the hub, priced, handed over to OWNER's timelock, capped at $LAUNCH_CAP $DOLLAR.
 Next: publish the site — the frontend manifest now lists $NEW.
 EOF

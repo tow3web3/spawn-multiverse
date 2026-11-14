@@ -1,5 +1,5 @@
 /**
- * READ-ONLY: what deploying ONE universe costs its deployer at today's gas
+ * READ-ONLY: what deploying THE universe costs its deployer at today's gas
  * prices, per network — the life-cycle gas measured on mainnet forks
  * (LIFE_GAS in scripts/lib-net.js: deploy + wiring, verifier set, hand-over),
  * plus the L1 data fee a rollup's fork cannot show (OP-stack GasPriceOracle /
@@ -7,12 +7,10 @@
  * On an L1 (Ethereum, BNB Chain) the gas term is the whole story, so it is
  * also shown at a few other gas prices — and so is what a user pays there.
  *
- *   SPAWN_PROFILE=mainnet  npx hardhat run scripts/estimate-budget.js   # the core: Base, Optimism, Arbitrum (ETH)
- *   SPAWN_PROFILE=bnb      npx hardhat run scripts/estimate-budget.js   # the BNB universe (BNB)
- *   SPAWN_PROFILE=ethereum npx hardhat run scripts/estimate-budget.js   # the Ethereum universe (ETH)
+ *   npx hardhat run scripts/estimate-budget.js     # Base, Optimism, Arbitrum, Ethereum (ETH), BNB Chain (BNB)
  *
- * Gas figures: re-measure after any contract change (npm run rehearse,
- * rehearse:bnb, rehearse:ethereum print what the fork used).
+ * Gas figures: re-measure after any contract change (npm run rehearse
+ * prints what the forks used).
  */
 const { ethers, artifacts } = require('hardhat')
 const { PROFILES, activeNets } = require('../config/profiles')
@@ -25,17 +23,17 @@ const ARB_GAS_INFO = '0x000000000000000000000000000000000000006C'
 async function main() {
   const name = process.env.SPAWN_PROFILE ?? 'mainnet'
   const profile = PROFILES[name]
-  if (!profile?.mainnet) throw new Error(`SPAWN_PROFILE must be a mainnet universe (mainnet | bnb | ethereum), got "${name}"`)
-  const coin = nativeOf(profile)
+  if (!profile?.mainnet) throw new Error(`SPAWN_PROFILE must be the mainnet universe, got "${name}"`)
   const nets = activeNets(profile)
-  const vault = vaultName(profile)
-  const CONTRACTS = {
-    hub: ['LayerZeroOmniMessenger', 'OmniUSD', vault, 'SpawnPad', 'InternalCurveVenue', 'SpawnGateway', 'FeeDistributor', 'SpawnTimelock'],
-    spoke: ['LayerZeroOmniMessenger', vault, 'SpawnGateway', 'FeeDistributor', 'SpawnTimelock'],
-  }
-  console.log(`${profile.universe ?? name} universe — deploy budget — ${new Date().toISOString()} — ${Object.keys(nets).join(', ')} — in ${coin}\n`)
-  let total = 0n
+  console.log(`${profile.name} universe — deploy budget — ${new Date().toISOString()} — ${Object.keys(nets).join(', ')}\n`)
+  const totals = {}
   for (const [net, c] of Object.entries(nets)) {
+    const coin = nativeOf(profile, net)
+    const vault = vaultName(profile, net)
+    const CONTRACTS = {
+      hub: ['LayerZeroOmniMessenger', 'OmniUSD', vault, 'SpawnPad', 'InternalCurveVenue', 'SpawnGateway', 'FeeDistributor', 'SpawnTimelock'],
+      spoke: ['LayerZeroOmniMessenger', vault, 'SpawnGateway', 'FeeDistributor', 'SpawnTimelock'],
+    }
     const provider = new ethers.JsonRpcProvider(c.rpc, c.chainId, { staticNetwork: true })
     const role = c.role
     const b = await deployBudget({ profile, cfg: c, signer: { provider } })
@@ -62,12 +60,12 @@ async function main() {
     // 3x on what moves with gas prices; the tank float is a fixed amount
     const padded = (exec + l1) * 3n + tank
     const fund = padded > b.floor ? padded : b.floor
-    total += fund
+    totals[coin] = (totals[coin] ?? 0n) + fund
     console.log(`${net} (${role})`)
     console.log(`  gas price ${ethers.formatUnits(b.gasPrice, 'gwei')} gwei × ${b.gas} gas = ${ethers.formatEther(exec)} ${coin}`)
     console.log(`  L1 data for ~${bytes} bytes: ${ethers.formatEther(l1)} ${coin} (${l1How})`)
     if (tank) console.log(`  gas-tank float: ${ethers.formatEther(tank)} ${coin}`)
-    else console.log('  gas tank: none needed (nothing leaves this chain)')
+    else console.log('  gas tank: none needed (users pay each send in full)')
     console.log(
       `  estimate ${ethers.formatEther(estimate)} ${coin} → fund the deployer with ${ethers.formatEther(fund)} ${coin} ` +
         `(3x on gas, preflight floor ${ethers.formatEther(b.floor)})`,
@@ -76,18 +74,10 @@ async function main() {
       // an L1: the same deploy at other gas prices, and what a user pays
       const rows = [1n, 5n, 30n].map((g) => `${g} gwei → ${ethers.formatEther(b.gas * g * 10n ** 9n * 2n)} ${coin}`)
       console.log(`  the same deploy (×2 margin) at ${rows.join(', ')}`)
-      if (profile.actionGas) {
-        const a = profile.actionGas
-        const at = (gas, p) => ethers.formatEther(gas * p)
-        console.log(
-          `  a user at ${ethers.formatUnits(b.gasPrice, 'gwei')} gwei: launch ${at(a.launch, b.gasPrice)}, buy ${at(a.buy, b.gasPrice)}, sell ${at(a.sell, b.gasPrice)} ${coin}` +
-            ` — at 30 gwei: launch ${at(a.launch, 30n * 10n ** 9n)}, buy ${at(a.buy, 30n * 10n ** 9n)} ${coin} (no messaging fee)`,
-        )
-      }
     }
     console.log('')
   }
-  console.log(`total across networks: ${ethers.formatEther(total)} ${coin}`)
+  console.log(`total across networks: ${Object.entries(totals).map(([c, v]) => `${ethers.formatEther(v)} ${c}`).join(' + ')}`)
   process.exit(0)
 }
 

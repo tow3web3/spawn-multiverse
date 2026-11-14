@@ -22,13 +22,22 @@ const SCALE = 10n ** 12n
 const OP = { SPAWN: 1, BUY: 2, SELL: 3, CLAIM: 4, PULL: 5, SYNC: 10, DELIVER: 11, PAYOUT: 12, FEE_DROP: 13 }
 
 /** A private copy of the mainnet profile whose state and manifest live in a
- * temp dir — the real deploy code, pointed away from the repo's files. */
-function forkProfile() {
+ * temp dir — the real deploy code, pointed away from the repo's files.
+ * `off`: nets left out (enabled: false) — a single-chain fork suite only
+ * stands in for the spokes it names. `plain`: nets whose launch ceiling is
+ * dropped (these suites measure the plain fan-out; the five-chain rehearsal,
+ * scripts/fork-rehearsal.js, measures the ceilings). */
+function forkProfile({ off = ['ethereum', 'bnb'], plain = ['ethereum'] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-fork-'))
   const m = PROFILES.mainnet
   return {
     ...m,
-    nets: Object.fromEntries(Object.entries(m.nets).map(([k, v]) => [k, { ...v }])),
+    nets: Object.fromEntries(
+      Object.entries(m.nets).map(([k, v]) => [
+        k,
+        { ...v, ...(off.includes(k) ? { enabled: false } : {}), ...(plain.includes(k) ? { syncCap: undefined } : {}) },
+      ]),
+    ),
     dvn: { ...m.dvn, addresses: JSON.parse(JSON.stringify(m.dvn.addresses)) },
     stateFile: path.join(dir, 'mainnet.json'),
     manifestFile: path.join(dir, 'manifest.json'),

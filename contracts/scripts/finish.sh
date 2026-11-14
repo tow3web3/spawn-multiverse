@@ -1,65 +1,71 @@
 #!/usr/bin/env bash
-# After launch.sh: hand ONE universe to its owner and open it.
+# After launch.sh: hand THE universe to its owner and open it.
 #
-#   bash scripts/finish.sh                # the CORE universe (Base + Optimism + Arbitrum)
-#   bash scripts/finish.sh bnb            # the BNB universe
-#   bash scripts/finish.sh ethereum       # the Ethereum universe
+#   bash scripts/finish.sh                # mainnet (the five chains launch.sh deployed)
 #   bash scripts/finish.sh testnet        # rehearsal on the public testnets
 #
-# (`bash scripts/finish-mainnet.sh` is the same script for the core universe.)
+# (`bash scripts/finish-mainnet.sh` is the same script.)
 #
 # OWNER = the wallet in contracts/.env.owner (or SPAWN_FINISH_OWNER=0x… for a
 # Safe / hardware wallet). It becomes the only proposer/executor of the 48h
-# timelock that owns every contract. If nobody can sign for it, admin powers
-# are gone for good — so control of it must be PROVEN: either its key is the
-# one in contracts/.env.owner, or it has already sent a transaction on the
-# hub chain.
+# timelock that owns every contract, on every chain. If nobody can sign for
+# it, admin powers are gone for good — so control of it must be PROVEN:
+# either its key is the one in contracts/.env.owner, or it has already sent a
+# transaction on the hub chain.
 #
 # Roles after this script:
 #   admin    = the timelock (OWNER schedules, waits 48h in public, executes)
-#   operator = the deployer hot key: reply budgets, legs, deposit caps,
-#              rebalancing between the universe's own vaults, unpause, resync
+#   operator = the deployer hot key: reply budgets, legs, ceilings, deposit
+#              caps, rebalancing between the USDC vaults, unpause, resync
 #   guardian = the deployer hot key: pause, veto a scheduled admin change
 # Neither hot role can withdraw funds or rewire the protocol.
 #
-# Steps: (core) a canary round trip from the second spoke — the launch only
-# crossed from the first; the hand-over on every chain; status; then the
-# launch deposit caps (default 25,000 of the universe's dollar per vault).
-# Resumable: finished steps are skipped or send nothing.
+# Steps: the canary of any chain whose canary has not passed yet (Ethereum,
+# if launch.sh found it unaffordable) — tried once more; the hand-over on
+# every chain; status; then the LAUNCH CAPS, per chain: 25,000 USDC for each
+# USDC vault, 10,000 USDT for the BNB vault (what bounds everyone's exposure
+# to a USDT de-peg). A chain whose canary has not passed keeps the canary
+# cap, and the script says so. Resumable: finished steps send nothing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROFILE="${1:-${SPAWN_LAUNCH_PROFILE:-mainnet}}"
-[[ "$PROFILE" == "core" ]] && PROFILE=mainnet
+case "$PROFILE" in
+  core) PROFILE=mainnet ;;
+  bnb|ethereum)
+    echo "✗ \"$PROFILE\" is no longer a universe of its own: it is a chain of THE universe."
+    echo "  Run:  bash scripts/finish.sh"
+    exit 1 ;;
+esac
 if [[ "$PROFILE" =~ ^0x ]]; then
-  echo "usage: bash scripts/finish.sh [mainnet|bnb|ethereum|testnet]   (another owner: SPAWN_FINISH_OWNER=0x…)"
+  echo "usage: bash scripts/finish.sh [mainnet|testnet]   (another owner: SPAWN_FINISH_OWNER=0x…)"
   exit 1
 fi
 export SPAWN_PROFILE="$PROFILE"
 
+# the chains launch.sh deployed (state file), the hub's RPC, per-chain caps
 TOPO=$(node -e "
-const {PROFILES,activeNets}=require('./config/profiles');
+const fs=require('fs');const {PROFILES,activeNets,launchCapOf,dollarOfNet}=require('./config/profiles');
 const p=PROFILES[process.env.SPAWN_PROFILE];
-if(!p){console.error('unknown universe \"'+process.env.SPAWN_PROFILE+'\" ('+Object.keys(PROFILES).join(' | ')+', or core)');process.exit(1)}
+if(!p){console.error('unknown universe \"'+process.env.SPAWN_PROFILE+'\" ('+Object.keys(PROFILES).join(' | ')+')');process.exit(1)}
+let st={};try{st=JSON.parse(fs.readFileSync(p.stateFile,'utf8'))}catch{}
 const nets=activeNets(p);
-const spokes=Object.keys(nets).filter(n=>nets[n].role==='spoke'&&!nets[n].rehearsalOnly);
-const live=p.launchSpokes||spokes;
-console.log([p.hub,live.join(',')||'-',p.mainnet?1:0,nets[p.hub].rpc,(p.dollar&&p.dollar.symbol)||'USDC',p.universe||p.name].join(' '));
+if(!st[p.hub]||!st[p.hub].gateway){console.error('nothing deployed on '+p.hub+' — run launch.sh first');process.exit(1)}
+const spokes=Object.keys(nets).filter(n=>nets[n].role==='spoke'&&st[n]&&st[n].gateway);
+const missing=Object.keys(nets).filter(n=>nets[n].role==='spoke'&&!(st[n]&&st[n].gateway));
+if(p.mainnet&&missing.length){console.error('not deployed: '+missing.join(', ')+' — run launch.sh first');process.exit(1)}
+const caps=[p.hub,...spokes].map(n=>n+':'+launchCapOf(p,n)+':'+dollarOfNet(p,n).symbol).join(',');
+console.log([p.hub,spokes.join(',')||'-',p.mainnet?1:0,nets[p.hub].rpc,caps].join(' '));
 ") || exit 1
 set -- $TOPO
 HUB="$1"; SPOKES="${2//,/ }"; [[ "$SPOKES" == "-" ]] && SPOKES=""
-IS_MAINNET="$3"; HUB_RPC="$4"; DOLLAR="$5"; UNIVERSE="$6"
-set -- $SPOKES
-SPOKE_B="${2:-}"
+IS_MAINNET="$3"; HUB_RPC="$4"; CAPS="${5//,/ }"
 
 if [[ "$IS_MAINNET" == "1" ]]; then
   export SPAWN_MAINNET_CONFIRM=I_UNDERSTAND_THIS_IS_REAL_MONEY
-  SMOKE_ENV="SMOKE_BUY_USDC=${SPAWN_CANARY_BUY:-3}"
-  LAUNCH_CAP="${SPAWN_LAUNCH_CAP_USDC:-25000}"
-else
-  SMOKE_ENV="SPAWN_REHEARSAL=1"
-  LAUNCH_CAP="${SPAWN_LAUNCH_CAP_USDC:-500000000}"
 fi
+SMOKE_ENV="SPAWN_REHEARSAL=1"
+[[ -n "${SPAWN_CANARY_BUY:-}" ]] && SMOKE_ENV="SMOKE_BUY_USDC=$SPAWN_CANARY_BUY"
 LOG_DIR="${SPAWN_LOG_DIR:-deployments/logs}"
 MARK_DIR="${SPAWN_MARK_DIR:-deployments}"
 mkdir -p "$LOG_DIR" "$MARK_DIR"
@@ -126,8 +132,7 @@ fi
 step() { printf '\n════════ %s ════════\n' "$*"; }
 # logged <label> <success-regex> [VAR=value…] <command…> — output kept in a
 # log file, success = exit 0 AND the line that proves it. LOG_TRIES attempts
-# (default 1): the hand-over and the caps are idempotent and resume, so a
-# network blip or a lagging node is retried; a canary is never repeated.
+# (default 1): the hand-over and the caps are idempotent and resume.
 logged() {
   local label="$1" ok="$2"; shift 2
   local try tries="${LOG_TRIES:-1}" log
@@ -151,20 +156,34 @@ logged() {
   exit 1
 }
 
-echo "finish — universe $UNIVERSE (profile $PROFILE) — hub $HUB${SPOKES:+ — spokes $SPOKES} — settled in $DOLLAR"
+echo "finish — profile $PROFILE — hub $HUB — spokes ${SPOKES:-none}"
 
-# The launch script's canary crossed from the first spoke; the second has
-# only been deployed and configured. Prove its pathway with real money
-# before anything is handed over or opened.
-if [[ -n "$SPOKE_B" && -z "${SPAWN_SKIP_XCHAIN_CANARY:-}" ]]; then
-  source scripts/lib-canary.sh # a mark is bound to the gateway it proved
-  if canary_passed "$SPOKE_B"; then
-    step "canary from $SPOKE_B — already passed ($(cat "$(canary_mark_file "$SPOKE_B")"))"
-  else
-    step "canary — a full round trip from $SPOKE_B (the deployer's own money)"
-    logged "canary $SPOKE_B (cross-chain)" '🎉' "$SMOKE_ENV" hh "$SPOKE_B" smoke.js
-    canary_record "$SPOKE_B"
-  fi
+# Every chain is proved with real money before anything is handed over or
+# opened. launch.sh ran them; one that could not afford it (Ethereum at an
+# L1 gas spike) is tried once more here — and if it still cannot, its vault
+# simply stays at the canary cap.
+source scripts/lib-canary.sh # a mark is bound to the gateway it proved
+UNPROVEN=""
+if [[ -z "${SPAWN_SKIP_XCHAIN_CANARY:-}" ]]; then
+  for n in $HUB $SPOKES; do
+    if canary_passed "$n"; then continue; fi
+    step "canary from $n — not passed yet: a round trip with the deployer's own money"
+    log="$LOG_DIR/$(date +%Y%m%d-%H%M%S)-canary_$n.log"
+    code=0
+    ( export $SMOKE_ENV; hh "$n" smoke.js ) > "$log" 2>&1 || code=$?
+    tail -n 12 "$log" | cut -c1-240
+    if [[ "$code" == "4" ]] && grep -q 'CANARY NOT AFFORDABLE' "$log"; then
+      echo "⚠ $n: canary still not affordable — its vault stays at the canary cap"
+      UNPROVEN="$UNPROVEN $n"
+    elif [[ "$code" != "0" ]] || ! grep -q '🎉' "$log"; then
+      echo "✗ canary $n failed — stopping. Full output: contracts/$log"
+      echo "  ➜ Écris « fait » à Claude : il lira ce journal."
+      exit 1
+    else
+      canary_record "$n"
+      echo "✓ canary $n"
+    fi
+  done
 fi
 
 step "hand-over — OWNER $OWNER · operator/guardian $HOT"
@@ -173,25 +192,31 @@ for n in $HUB $SPOKES; do
     SPAWN_OWNER="$OWNER" SPAWN_OPERATOR="$HOT" SPAWN_GUARDIAN="$HOT" hh "$n" handover.js
 done
 
-show_status() {
-  if [[ -n "${SPAWN_FORK_REHEARSAL:-}" ]]; then hh "$HUB" status.js; else npx hardhat run scripts/status.js; fi
-}
 step "status"
-show_status
+hh "$HUB" status.js
 
-step "launch deposit caps — $LAUNCH_CAP $DOLLAR per vault"
-for n in $HUB $SPOKES; do
-  LOG_TRIES=4 logged "set-cap $n" 'already set|setDepositCap\(' \
-    SPAWN_APPLY=1 SPAWN_CAP_USDC="$LAUNCH_CAP" hh "$n" set-cap.js
+step "launch deposit caps — each chain in its own dollar"
+for entry in $CAPS; do
+  n="${entry%%:*}"; rest="${entry#*:}"; cap="${rest%%:*}"; sym="${rest#*:}"
+  if [[ " $UNPROVEN " == *" $n "* ]] || { [[ -z "${SPAWN_SKIP_XCHAIN_CANARY:-}" ]] && ! canary_passed "$n"; }; then
+    echo "⚠ $n: its canary has not passed — left at the canary cap (run bash scripts/finish.sh again once it can)"
+    continue
+  fi
+  LOG_TRIES=4 logged "set-cap $n ($cap $sym)" 'already set|setDepositCap\(' \
+    SPAWN_APPLY=1 SPAWN_CAP_USDC="$cap" hh "$n" set-cap.js
 done
 
 step "status"
-show_status
+hh "$HUB" status.js
 
+if [[ -n "$UNPROVEN" ]]; then
+  echo
+  echo "⚠ not opened yet (canary not affordable):$UNPROVEN — run  bash scripts/finish.sh  again when gas is cheaper."
+fi
 if [[ "$IS_MAINNET" == "1" ]]; then
   cat <<EOF
 
-════════ $UNIVERSE: HANDED OVER AND OPEN ════════
+════════ HANDED OVER AND OPEN ════════
 Every contract answers to the owner's 48h timelock; the hot key only tunes.
 ➜ Écris « fait » à Claude. Il vérifie les verrous, puis branche le site sur cet univers.
 EOF

@@ -21,9 +21,9 @@ export SPAWN_MAINNET_CONFIRM=I_UNDERSTAND_THIS_IS_REAL_MONEY
 DEFAULT_NETS=$(node -e "
 const {PROFILES,activeNets}=require('./config/profiles');
 const p=PROFILES[process.env.SPAWN_PROFILE];
-if(!p||!p.mainnet){console.error('unknown mainnet universe \"'+process.env.SPAWN_PROFILE+'\" (mainnet | bnb | ethereum, or core)');process.exit(1)}
+if(!p||!p.mainnet){console.error('unknown mainnet universe \"'+process.env.SPAWN_PROFILE+'\" (mainnet, or core)');process.exit(1)}
 const nets=activeNets(p);
-console.log([p.hub,...Object.keys(nets).filter(n=>n!==p.hub&&!nets[n].rehearsalOnly)].join(' '))") || exit 1
+console.log([p.hub,...Object.keys(nets).filter(n=>n!==p.hub)].join(' '))") || exit 1
 NETS="${SPAWN_CLOSE_NETS:-$DEFAULT_NETS}"
 
 # attempt <label> <success-regex> <command…> — these steps are idempotent,

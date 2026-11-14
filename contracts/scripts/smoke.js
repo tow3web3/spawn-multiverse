@@ -1,63 +1,67 @@
 /**
- * Smoke test of a LIVE deployment, v7 paths end to end — the testnet dress
+ * Smoke test of a LIVE deployment, v7.2 paths end to end — the testnet dress
  * rehearsal and the mainnet CANARY are the same script.
  *
- *   npx hardhat run scripts/smoke.js --network optimismSepolia   # a remote chain (testnet)
- *   npx hardhat run scripts/smoke.js --network baseSepolia       # the hub chain (local trading)
+ *   npx hardhat run scripts/smoke.js --network baseSepolia       # the hub chain (local trading) — launches the canary token
+ *   npx hardhat run scripts/smoke.js --network optimismSepolia   # a remote chain — reuses it
  *
  *   # mainnet canary — a few REAL dollars from the signer's own wallet
  *   SPAWN_MAINNET_CONFIRM=I_UNDERSTAND_THIS_IS_REAL_MONEY SMOKE_BUY_USDC=3 \
  *     npx hardhat run scripts/smoke.js --network base
  *
- * On a REMOTE chain it spawns a token from this spoke, waits for LayerZero
- * to land OP_SPAWN on the hub and for the replica to sync back, then:
- *   - buys with USDC (`buyTokenUsdc`). On testnets $260 inside the FAIR
- *     GENESIS window: the $250 cap clamps it and the $10 REFUND leg must
- *     come home as USDC. On mainnet SMOKE_BUY_USDC (default 3);
- *   - sells half the bag — the PAYOUT leg must come home as USDC;
- *   - pulls this chain's share of the holder fees home (`pullFees`: the hub
- *     books it and waits to be asked), claims it from the local pool and
- *     unwraps it to USDC.
+ * ONE canary token for the universe: the HUB chain's canary launches it in
+ * one local transaction (its SYNC fans out to every spoke); every spoke's
+ * canary then REUSES it — a round trip from that spoke, on its own vault and
+ * its own verifier pathway:
+ *   - if the launch skipped this chain (Ethereum above its launch ceiling),
+ *     or the chain joined later, the canary OPENS the token here first
+ *     (`openToken`, it pays the hub's SYNC back);
+ *   - buys with this chain's dollar (USDC — or USDT on BNB Chain, every
+ *     amount through the token's own decimals), sells half, the PAYOUT must
+ *     come home in that dollar;
+ *   - pulls this chain's holder fees home, claims them from the local pool;
+ *   - on BNB Chain, MOVES half of that claim to the hub chain, where it must
+ *     arrive in USDC (`moveClaim` — the portable claim of v7.2);
+ *   - unwraps what is left.
  * Expect minutes, not seconds.
  *
- * On the HUB chain the same sequence runs through the loopback: every step
- * settles inside its own transaction, with no LayerZero message — only the
- * spawn's SYNC fan-out to the remote chains leaves the hub.
+ * SLIPPAGE: on the hub chain the trades go through `buyTokenUsdcMin` /
+ * `sellTokenMin` with a real minimum computed from the curve, after PROVING
+ * that an impossible minimum is refused ("GW: min out"). On a remote chain
+ * the script asks the gateway whether its `*Min` covers a cross-chain trade
+ * (contract round 2) and uses it when it does; otherwise (round 1) it proves
+ * the remote `*Min` refuses, and trades with the plain entrypoints.
+ *
+ * BUDGET: a chain with a `canaryBudget` in the profile (Ethereum) first
+ * prices a round trip at the LIVE gas price against what the deployer holds
+ * there. If it cannot afford it, it says so plainly, sends nothing and exits
+ * with code 4 — launch.sh goes on with the other chains, and that chain's
+ * vault stays at the canary cap until its canary passes.
  *
  * Fees: when the gateway is not sponsored (always on mainnet) the script
  * attaches the exact `quote*` fee to every call, like a user would.
- * Money: testnets mint MockUSDC; on mainnet the signer must already hold
- * the universe's dollar (USDC — or USDT in the BNB universe: every amount
- * goes through the token's own decimals), and the approval is for exactly
- * what the run spends.
- *
- * SLIPPAGE (v7.1): on a LOCAL gateway (the hub chain, and the only chain of
- * a single-chain universe) the trades go through `buyTokenUsdcMin` /
- * `sellTokenMin` with a real minimum computed from the curve — and the
- * script first PROVES the protection: the same buy with a minimum no trade
- * can meet must revert "GW: min out" and move nothing. On a remote gateway
- * the reply is asynchronous, so the plain entrypoints are used (a `*Min`
- * call there always reverts — also checked).
  */
 const { network } = require('hardhat')
-const { getProfile, netKeyOf } = require('../config/profiles')
-const { MAINNET_CONFIRM, isDevNode, cliSigner, dollarOf } = require('./lib-net')
+const { getProfile, netKeyOf, dollarOfNet } = require('../config/profiles')
+const { MAINNET_CONFIRM, isDevNode, cliSigner } = require('./lib-net')
 const { smoke } = require('./lib-smoke')
 
 async function main() {
   const profile = getProfile(network.name)
+  const net = netKeyOf(network.name)
   // the deployer key — or, on a fork only, the address it impersonates
   const signer = await cliSigner()
   if (profile.mainnet && !(await isDevNode(signer.provider)) && process.env.SPAWN_MAINNET_CONFIRM !== MAINNET_CONFIRM) {
-    throw new Error(`mainnet canary: real ${dollarOf(profile)} and real fees — set SPAWN_MAINNET_CONFIRM=${MAINNET_CONFIRM}`)
+    throw new Error(`mainnet canary: real ${dollarOfNet(profile, net).symbol} and real fees — set SPAWN_MAINNET_CONFIRM=${MAINNET_CONFIRM}`)
   }
-  await smoke({
+  const res = await smoke({
     profile,
-    netKey: netKeyOf(network.name),
+    netKey: net,
     signer,
-    buy: profile.mockUsdc ? undefined : Number(process.env.SMOKE_BUY_USDC ?? 3),
+    buy: profile.mockUsdc ? undefined : process.env.SMOKE_BUY_USDC ? Number(process.env.SMOKE_BUY_USDC) : undefined,
     pollMs: process.env.SMOKE_POLL_MS ? Number(process.env.SMOKE_POLL_MS) : undefined,
   })
+  if (res.skipped) process.exit(4)
 }
 
 main().catch((e) => {

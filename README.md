@@ -21,24 +21,22 @@ Four modes, same UI (toggle in the nav):
   on Optimism + Arbitrum Sepolia over real LayerZero V2 messages, a gas drip
   for visitors, MetaMask or an instant burner wallet, play USDC anyone can
   mint.
-- **◉ MAINNET** — not one deployment but several independent **universes**,
-  each with its own hub, its own tokens, its own dollar and its own manifest
-  (a universe appears on the site only once its manifest is published):
-  - **MAINNET / omnichain** (`public/onchain/mainnet.json`) — Base (hub) +
-    Optimism + Arbitrum, settled in USDC; Solana and Robinhood are the chains
-    still to come here.
-  - **BNB** (`public/onchain/mainnet-bnb.json`) — BNB Chain alone, settled in
-    BSC USDT (18 decimals, a Binance-custodied peg). One chain, one
-    transaction per trade, no messaging fee.
-  - **ETHEREUM** (`public/onchain/mainnet-ethereum.json`) — Ethereum mainnet
-    alone, settled in USDC; every action pays L1 gas.
-
-  A token launched in one universe does not exist in another — the switcher,
-  the banner, the token page and the Launch Lab all say which universe you are
-  in. Real money, your own wallet only (no burner, no drip, no mint), a risk
-  notice accepted once **per universe** before the first transaction there, a
+- **◉ MAINNET** — **one universe on six chains** (`public/onchain/mainnet.json`):
+  the hub on Base, spokes on Optimism, Arbitrum, Ethereum and BNB Chain,
+  launched together; Solana joins later. One market per token for every
+  chain. The dollar is per chain: Circle USDC on Base, Optimism, Arbitrum and
+  Ethereum (vaults levelled by CCTP), Binance-Peg USDT (18 decimals) on BNB
+  Chain — a claim (oUSD) is a claim on the universe's dollars, mostly USDC,
+  partly USDT, and can be moved from one chain to another. Ethereum is left
+  out of a launch while its message is dear, and opened there later by
+  whoever wants the token there. Real money, your own wallet only (no
+  burner, no drip, no mint), a risk notice before the first transaction, a
   permanent "guarded beta — unaudited" banner with each chain's deposit cap,
-  and the network fee shown before every signature.
+  and the network fee shown before every signature. The launch itself is two
+  lines for the owner — `bash scripts/launch.sh` then `bash scripts/finish.sh`
+  from `contracts/` — rehearsed end to end on forks of the five chains
+  (`npm run rehearse`); see [docs/RUNBOOK.md](docs/RUNBOOK.md). On hold until
+  the hub's v7.2 is final (`contracts/deployments/HOLD-MAINNET`).
 - **LOCAL** — the same Solidity protocol on a hardhat chain: every buy,
   sell and spawn is a transaction against the hub-and-spoke protocol in
   [contracts/](contracts/). Price discovery is a pluggable **venue module**
