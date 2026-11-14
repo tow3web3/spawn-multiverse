@@ -157,8 +157,35 @@ sends refuse to run. `tests/test_live_endpoint.rs` uses the real endpoint.
   the pre-v7 version read the op from the raw message.
 - **Fixtures are a snapshot.** The fees and verifier lists the tests print
   are those of the day `fetch-fixtures.sh` ran.
-- **`app/smoke.cjs` is stale** (phase 1). Nothing outside the tests builds
-  these transactions yet.
+- **The lookup table must exist before `init_store`.** `init_store` is the
+  only place the executor's table (`LzReceiveTypes.alt`) is recorded, it
+  checks the table's owner, and there is no setter. V7.md §6 creates the
+  table at step 7: following it literally leaves the store without one for
+  good. `scripts/wire.ts` creates it first (step 2a) and fills it at step 7.
+- **`quote_send` knows ops 1–5 only.** A new send (`open_token`,
+  `move_claim`) needs its arm there too, or clients cannot quote it.
+
+## Client (`app/`) and wiring (`scripts/wire.ts`)
+
+```bash
+npm run client:typecheck     # core with no Node types (browser-safe), tests, scripts
+npm run client:test          # LiteSVM (npm litesvm 0.3.3) + the mainnet fixtures
+npm run wire -- --cluster devnet --dry-run --admin <key> --hub-eid 40245 \
+  --hub-pad 0x… --hub-adapter 0x… --verifiers default --spawn-legs 3
+```
+
+`app/src/client.ts` (`GatewayClient.load(connectionRpc(conn))`) reads the
+store, the peer, the effective LayerZero send path (OApp config merged over
+the pathway default, each worker's price feed read from its config) and the
+table the store names; it quotes by simulating `quote_send` and builds
+unsigned v0 transactions (700k CU for sends). Sends are entries in
+`SENDS` (`app/src/instructions.ts`). The tests check builders and decoders
+against the IDL through Anchor's coder, the codec against
+`tests/codec-vectors.json`, and run every user instruction and the whole
+wiring through the real LayerZero programs. Devnet's default pathway
+toward Base Sepolia is one required DVN (LayerZero Labs, the same config
+account as mainnet), 10 confirmations; the devnet RPC faucet is closed
+(faucet.solana.com instead).
 
 ## Venue programs for a future curve adapter
 

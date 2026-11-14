@@ -1,7 +1,8 @@
 /**
  * Turns SOL held by the project's Solana key into mainnet deploy fuel:
- * ETH (gas) and USDC (live smoke tests) on Base, Optimism and Arbitrum,
- * delivered straight to the EVM deployer through Relay (api.relay.link).
+ * the gas coin and the test dollars on Base, Optimism, Arbitrum, BNB Chain
+ * and Ethereum, delivered straight to the EVM deployer through Relay
+ * (api.relay.link).
  *
  *   node scripts/fund-from-sol.mjs plan          # fresh quotes, no transaction
  *   node scripts/fund-from-sol.mjs test          # one small order (SOL -> ETH on Base)
@@ -46,7 +47,9 @@ const CHAINS = {
   base: { id: 8453, rpc: 'https://mainnet.base.org', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
   optimism: { id: 10, rpc: 'https://mainnet.optimism.io', usdc: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85' },
   arbitrum: { id: 42161, rpc: 'https://arb1.arbitrum.io/rpc', usdc: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' },
-  // the separate BNB universe: gas is BNB, the dollar is BSC USDT (18 decimals)
+  // Ethereum L1: gas is ETH at L1 prices, the dollar is Circle's USDC
+  ethereum: { id: 1, rpc: 'https://ethereum-rpc.publicnode.com', usdc: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
+  // BNB Chain: gas is BNB, the dollar is BSC USDT (18 decimals)
   bnb: {
     id: 56,
     rpc: 'https://bsc-rpc.publicnode.com',
@@ -69,6 +72,8 @@ const ORDERS = [
   // 'ETH' means the chain's gas coin and 'USDC' its dollar (see CHAINS.bnb)
   { chain: 'bnb', asset: 'ETH', target: 0.006 },
   { chain: 'bnb', asset: 'USDC', target: 5 },
+  { chain: 'ethereum', asset: 'ETH', target: 0.02 },
+  { chain: 'ethereum', asset: 'USDC', target: 5 },
 ]
 /** What an order's asset is called on its chain. */
 const nameOf = (order) => (order.asset === 'ETH' ? (CHAINS[order.chain].native ?? 'ETH') : (CHAINS[order.chain].usd ?? 'USDC'))
