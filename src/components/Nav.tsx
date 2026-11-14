@@ -84,7 +84,7 @@ export function Nav({
 
   return (
     <header className="sticky top-0 z-40 border-b-3 border-ink bg-cream/95 backdrop-blur">
-      <div className="mx-auto flex max-w-[1480px] items-center gap-4 px-4 py-3 sm:px-6">
+      <div className="mx-auto flex max-w-[1480px] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-6 md:flex-nowrap">
         <button className="flex shrink-0 items-center gap-2.5" onClick={onHome}>
           <LogoBlob />
           <span className="font-display text-2xl tracking-wide">SPAWN!</span>
@@ -114,7 +114,7 @@ export function Nav({
         {/* market mode switch: mainnet (once live — wearing the logos of
             its live chains), then the play worlds */}
         <div
-          className="flex shrink-0 overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold"
+          className="order-last flex w-full shrink-0 overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold md:order-none md:w-auto"
           role="tablist"
           aria-label="Market"
         >
@@ -130,7 +130,7 @@ export function Nav({
                 aria-selected={mode === m}
                 data-mode={m}
                 onClick={() => setMode(m)}
-                className={`inline-flex items-center gap-1 whitespace-nowrap px-2.5 py-1.5 transition ${
+                className={`inline-flex flex-1 items-center justify-center gap-1 whitespace-nowrap px-2.5 py-1.5 transition md:flex-none ${
                   mode === m ? 'bg-ink text-lime' : 'bg-white hover:bg-lime'
                 } ${i > 0 ? 'border-l-2 border-ink' : ''}`}
                 title={title}
@@ -274,7 +274,7 @@ function ConnectButton() {
             ? `${fmtUsd(wallet.balance)} across the live chains — each chain's own dollar (${dollars.map((d) => d.symbol).join(', ')}) plus oUSD claims`
             : undefined
         }
-        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border-3 border-ink bg-ink px-4 py-2.5 font-mono text-[11px] font-bold tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
+        className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border-3 border-ink bg-ink px-3 py-2 font-mono text-[10px] font-bold sm:px-4 sm:py-2.5 sm:text-[11px] tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
       >
         {wallet ? (
           <>
@@ -283,7 +283,7 @@ function ConnectButton() {
             </span>
             {/* on-chain the wallet's dollars are the chains' dollars; the simulation's are not */}
             {onchainMode && (
-              <span className="flex items-center -space-x-1">
+              <span className="hidden items-center -space-x-1 sm:flex">
                 {dollars.map((d) => (
                   <CoinLogo key={d.symbol} id={d.coin} size={15} />
                 ))}

@@ -104,20 +104,27 @@ manifest (`public/onchain/mainnet.json`, written by the deployment tooling,
 - **Price protection everywhere.** Every trade goes through `buyTokenUsdcMin`
   / `buyTokenMin` / `sellTokenMin` with the user's tolerance. On the hub
   chain an order under its minimum reverts before it is signed; from another
-  chain the hub refuses it minutes later and sends it back whole (`Refused`),
-  which the site says in plain words. (This leans on the second v7.2 contract
-  round, where the minimum rides the message; a pre-v7.2 manifest keeps the
-  v7.1 behaviour: protection only where the hub answers in the same
-  transaction.)
+  chain the minimum rides the message and the hub refuses an order under it
+  minutes later (`Refused`, reason 6) and sends it back whole, which the site
+  says in plain words. Where the gateway has `orderTtl()` (third v7.2
+  round) the panel says how long a cross-chain order stays valid, and a
+  reason-6 refusal dated after that deadline reads as "expired". A v7.1
+  manifest (today's public testnet) keeps the v7.1 behaviour: protection only
+  where the hub answers in the same transaction.
 - **Open a token on your chain.** A token with no replica on a chain (its
   SYNC was skipped at launch, or the chain joined later) offers `openToken`
   instead of a trade — only after the site has checked that the hub would
-  send the SYNC (the hub adapter's live `quote` for that leg ≤
-  `pad.requestCap(chain)`); otherwise it says the chain is too expensive
-  right now and takes no fee.
+  send the SYNC: the hub adapter's live `quote(chain, gateway, sync, 1)`
+  (one return leg), asked as the pad, ≤ `pad.requestCap(chain, 10)`;
+  otherwise it says the chain is too expensive right now and takes no fee.
 - **Move your dollars.** A claim the local vault cannot pay (`liquidity()`)
   can be sent with `moveClaim` to any chain whose vault can pay it, priced by
-  `quoteMove(dst)` (a closed route is not offered).
+  `quoteMove(dst)`. A destination is offered only if its route is open AND
+  the hub would forward the PAYOUT there (its quote, one return leg, ≤
+  `pad.requestCap(dst, 12)`) — otherwise the claim would only come home and
+  the fee would be spent. The recipient must have the destination's shape:
+  an address toward an EVM chain, a 32-byte key toward a chain whose gateway
+  is not an address (Solana).
 
 The decisions behind these (reading hub events, the open verdict, which
 chains a claim can go to) live in `src/lib/v72.ts` and are unit-tested on
@@ -146,6 +153,7 @@ manifest has:
 - the BNB vault is left short: Hardhat account #19 holds an oUSD claim on BNB
   that the vault cannot pay — load its key as the burner (the script prints
   the `localStorage` line) to find it waiting in the portfolio with MOVE IT.
+  The same wallet launched `INTRN`, so its dev dashboard has a fee share.
 
 `npm run chain:bots` predates this world (it assumes 6-decimal dollars and
 free messages) and does not run against it.

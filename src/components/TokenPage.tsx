@@ -28,6 +28,7 @@ import { CreatureArt } from './CreatureCard'
 import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 import { PriceChart } from './PriceChart'
 import { OpenToken } from './OpenToken'
+import { ttlText } from '../lib/v72'
 
 const QUICK_USD = [10, 50, 100]
 const QUICK_PCT = [25, 50, 75, 100]
@@ -868,6 +869,9 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   <li>
                     ⏱ FROM {chain.toUpperCase()} THE TRADE CROSSES TO THE HUB AND BACK: A FEW MINUTES, ALL OR NOTHING AT THE
                     MINIMUM YOU SET.
+                    {ci.orderTtl
+                      ? ` THE ORDER IS VALID FOR ${ttlText(ci.orderTtl).toUpperCase()}; IF IT LANDS LATER IT COMES BACK WHOLE.`
+                      : ''}
                   </li>
                 )}
                 {chain === 'bnb' && (
@@ -940,6 +944,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               </p>
             )}
 
+            {/* while the token is not open here, the open panel is the only offer */}
+            {unavailableHere !== 'closed' && (
             <button
               onClick={() => void doTrade()}
               disabled={
@@ -966,6 +972,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                     ? `BUY $${c.ticker} ON ${chain.toUpperCase()} ↗`
                     : `SELL $${c.ticker} ON ${chain.toUpperCase()} ↘`}
             </button>
+            )}
 
             {msg && (
               <p

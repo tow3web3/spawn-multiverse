@@ -68,6 +68,10 @@ import { expectBuy, expectSell, type CurveState, type GenesisState } from '../li
 import {
   CLAIM_DUST,
   availability,
+  expired,
+  isWide,
+  moveRecipient,
+  ttlText,
   declaredDollar,
   moveTargets,
   openVerdict,
@@ -148,6 +152,10 @@ const MIN_SELECTOR = toFunctionSelector('buyTokenUsdcMin(address,uint256,uint256
 /** The v7.2 gateway's `openToken` and `moveClaim` — absent before v7.2. */
 const OPEN_SELECTOR = toFunctionSelector('openToken(address)').slice(2).toLowerCase()
 const MOVE_SELECTOR = toFunctionSelector('moveClaim(uint32,bytes32,uint256)').slice(2).toLowerCase()
+/** The third v7.2 round's order deadline — absent before it. */
+const TTL_SELECTOR = toFunctionSelector('orderTtl()').slice(2).toLowerCase()
+/** What the pad sends, as keys of `requestCap(chain, op)`. */
+const OP_PAYOUT = 12
 /** OP_SYNC_TOKEN, as `SpawnPad._syncPayload` builds it. */
 const OP_SYNC_TOKEN = 10
 // Hardhat's well-known dev account #0 — funds wallets with gas on the LOCAL
@@ -240,6 +248,9 @@ interface ChainIO {
   hasMin: boolean
   /** The gateway has the v7.2 actions (`openToken`, `moveClaim`). */
   v72: boolean
+  /** Seconds a cross-chain order from here stays valid (`orderTtl()`), when
+   * the gateway has it (third v7.2 round). */
+  orderTtl?: number
   chain: Chain
   client: PublicClient
 }
@@ -1214,6 +1225,7 @@ export function OnchainProvider({
             let verified = false
             let hasMin = false
             let v72 = false
+            let orderTtl: number | undefined
             try {
               const [d, s, code] = await Promise.all([
                 read<number>(client, { address: c.usdc!, abi: usdcAbi, functionName: 'decimals' }),
@@ -1232,6 +1244,10 @@ export function OnchainProvider({
               const hex = (code ?? '').toLowerCase()
               hasMin = hex.includes(MIN_SELECTOR)
               v72 = hex.includes(OPEN_SELECTOR) && hex.includes(MOVE_SELECTOR)
+              if (!c.local && hex.includes(TTL_SELECTOR))
+                orderTtl = Number(
+                  await read<bigint>(client, { address: c.gateway, abi: gatewayAbi, functionName: 'orderTtl' }).catch(() => 0n),
+                ) || undefined
             } catch (e) {
               // a real mismatch is fatal; a chain that merely did not answer
               // is confirmed before its first transaction (see `sure`)
@@ -1254,6 +1270,7 @@ export function OnchainProvider({
               vault: c.vault ?? (declared.decimals === 6 ? 'cctp' : 'local'),
               hasMin,
               v72,
+              orderTtl,
               chain,
               client,
             }
@@ -1566,8 +1583,9 @@ export function OnchainProvider({
   /** The trade is protected when the gateway has the `*Min` entrypoints and
    * the minimum is enforced: in this very transaction (the hub chain, the
    * devnet), or — v7.2 — at the hub, which refuses a crossed trade under it
-   * and sends it back whole. A pre-v7.2 remote gateway would always revert
-   * them, so there the trade stays unprotected and the page says so. */
+   * and sends it back whole. On a v7.1 deployment (today's public testnet)
+   * a remote gateway reverts them, so there the trade stays unprotected and
+   * the page says so. */
   const protectedOn = (c: ChainIO) => c.hasMin && (syncRef.current || c.local || v72Ref.current)
 
   /**
@@ -1699,6 +1717,8 @@ export function OnchainProvider({
         // the hub block to start looking from — read fresh: a cached number
         // could sit before this wallet's previous trade and resurrect it
         const hubMark = (await hubClientRef.current.getBlockNumber({ cacheTime: 0 })) + 1n
+        /** When the order left (the gateway dates its deadline from its own block). */
+        const sentAt = Date.now()
         let receipt
         if (side === 'buy') {
           if (hubPausedRef.current)
@@ -1798,8 +1818,15 @@ export function OnchainProvider({
 
         if (got?.kind === 'refused') {
           // the hub turned it away and sent it home whole — under its
-          // minimum (v7.2, a trade that crossed), or for another reason. It
-          // is what happened, not a failure: said plainly, with a retry.
+          // minimum or past its deadline (reason 6, a trade that crossed),
+          // or for another reason. It is what happened, not a failure: said
+          // plainly, with a retry. An expiry is told by the hub block's time.
+          let refusedAt: number | undefined
+          if (got.block !== undefined && c.orderTtl)
+            refusedAt = await hubClientRef.current
+              .getBlock({ blockNumber: got.block })
+              .then((b) => at(b.timestamp))
+              .catch(() => undefined)
           await poll()
           return {
             ok: false,
@@ -1808,6 +1835,8 @@ export function OnchainProvider({
               chain: up(chainId),
               ticker: entry.meta.ticker,
               money: side === 'buy' ? money(c, exp.spendUnits) : undefined,
+              hadMin: exp.protected,
+              expired: expired(sentAt, refusedAt, c.orderTtl),
             }),
           }
         }
@@ -1840,7 +1869,7 @@ export function OnchainProvider({
           pending = !instant
           note = pending
             ? exp.protected
-              ? 'STILL CROSSING CHAINS — IT FILLS AT YOUR MINIMUM OR BETTER, OR COMES BACK WHOLE'
+              ? `STILL CROSSING CHAINS — IT FILLS AT YOUR MINIMUM OR BETTER${c.orderTtl ? ` WITHIN ${ttlText(c.orderTtl).toUpperCase()}` : ''}, OR COMES BACK WHOLE`
               : 'STILL CROSSING CHAINS — YOUR BALANCE UPDATES WHEN IT LANDS'
             : note
         }
@@ -2272,7 +2301,7 @@ export function OnchainProvider({
    * Would the hub send `entry`'s SYNC to chain `c` right now? The hub sends
    * the SYNC an open asks for only if its live quote for that leg (its
    * adapter's `quote(label, gateway, syncPayload, 0)`, asked AS the pad) is
-   * at most `requestCap(label)`. Checked before an open is offered, so no
+   * at most `requestCap(label, 10)`. Checked before an open is offered, so no
    * fee is ever taken for an open the hub would decline.
    */
   const openPrice = async (
@@ -2284,7 +2313,7 @@ export function OnchainProvider({
     if (!hub || !m) return { ok: false, reason: 'Chain offline.' }
     if (!c.v72) return { ok: false, reason: `${up(c.id)}'s gateway predates v7.2: tokens cannot be opened from there.` }
     const [cap, gw, adapter] = await Promise.all([
-      hub.readContract({ address: m.pad, abi: padAbi, functionName: 'requestCap', args: [c.label] }),
+      hub.readContract({ address: m.pad, abi: padAbi, functionName: 'requestCap', args: [c.label, OP_SYNC_TOKEN] }),
       hub.readContract({ address: m.pad, abi: padAbi, functionName: 'gateways', args: [c.label] }),
       hubMessengerRef.current ?? hub.readContract({ address: m.pad, abi: padAbi, functionName: 'messenger' }),
     ])
@@ -2306,7 +2335,8 @@ export function OnchainProvider({
         address: adapter as Address,
         abi: messengerAbi,
         functionName: 'quote',
-        args: [c.label, gw, sync, 0n],
+        // the hub prices a requested leg with ONE return leg (second round)
+        args: [c.label, gw, sync, 1n],
         account: m.pad,
       })
     } catch {
@@ -2410,30 +2440,70 @@ export function OnchainProvider({
     }
   }
 
+  /**
+   * Would the hub FORWARD a moved claim to `d` right now? It sends the
+   * PAYOUT only if its live quote for that leg (one return leg, asked as the
+   * pad) is within `requestCap(d, 12)`; otherwise the claim comes home and
+   * the mover's fee is spent — so such a destination is not offered.
+   * Also says whether `d`'s gateway is wide (not an EVM address: Solana),
+   * which decides the shape a recipient must have there.
+   */
+  const hubForwards = async (d: ChainIO, amount: bigint, to: string): Promise<{ ok: boolean; wide: boolean }> => {
+    const hub = hubClientRef.current
+    const m = manifestRef.current
+    if (!hub || !m) return { ok: false, wide: false }
+    const [cap, gw, adapter] = await Promise.all([
+      hub.readContract({ address: m.pad, abi: padAbi, functionName: 'requestCap', args: [d.label, OP_PAYOUT] }),
+      hub.readContract({ address: m.pad, abi: padAbi, functionName: 'gateways', args: [d.label] }),
+      hubMessengerRef.current ?? hub.readContract({ address: m.pad, abi: padAbi, functionName: 'messenger' }),
+    ])
+    const payout = encodeAbiParameters(
+      [{ type: 'uint8' }, { type: 'bytes' }],
+      [OP_PAYOUT, encodeAbiParameters([{ type: 'bytes32' }, { type: 'uint256' }], [to as `0x${string}`, amount])],
+    )
+    let quote: bigint | null = null
+    try {
+      quote = await hub.readContract({
+        address: adapter as Address,
+        abi: messengerAbi,
+        functionName: 'quote',
+        args: [d.label, gw, payout, 1n],
+        account: m.pad,
+      })
+    } catch {
+      quote = null
+    }
+    return { ok: openVerdict(quote, cap).ok, wide: isWide(gw) }
+  }
+
   /** The chains a claim of `amount` dollars held on `from` can be moved to:
-   * a priced route, and a vault there that can pay it in full now. */
+   * a priced route, a hub that would forward it, and a vault there that can
+   * pay it in full now. */
   const moveOptions = useCallback(async (from: string, amount: number): Promise<MoveOption[]> => {
     const c = io(from)
+    const addr = activeAddr()
     if (!c || !c.v72 || !(amount > 0)) return []
     const want = toUnits(amount, 18)
+    // the payload's size is fixed: any 32-byte recipient prices it exactly
+    const probe = padHex(addr ?? ZERO, { size: 32 })
     const routes = await Promise.all(
       iosRef.current
         .filter((d) => d.id !== c.id && d.v72)
         .map(async (d) => {
-          const [fee, liquidity] = await Promise.all([
+          const [fee, liquidity, hub] = await Promise.all([
             movePrice(c, d),
             read<bigint>(d.client, { address: d.usd, abi: usdAbi, functionName: 'liquidity' }).catch(
               () => stateOf(d.id).liquidity,
             ),
+            hubForwards(d, want, probe).catch(() => ({ ok: false, wide: false })),
           ])
-          return { chain: d.id, fee, liquidity, scale: d.scale, dec: d.dec }
+          return { chain: d.id, fee: hub.ok ? fee : null, liquidity, scale: d.scale, dec: d.dec, wide: hub.wide }
         }),
     )
-    return moveTargets(want, routes).map((r) => ({
-      chain: r.chain,
-      fee: ef(r.fee ?? 0n),
-      liquidity: fromUnits(r.liquidity, routes.find((x) => x.chain === r.chain)!.dec),
-    }))
+    return moveTargets(want, routes).map((r) => {
+      const x = routes.find((y) => y.chain === r.chain)!
+      return { chain: r.chain, fee: ef(r.fee ?? 0n), liquidity: fromUnits(r.liquidity, x.dec), wide: x.wide }
+    })
   }, [])
 
   /** Sends `amount` dollars of the wallet's claim on `from` to chain `to`,
@@ -2448,20 +2518,30 @@ export function OnchainProvider({
       if (!connectedRef.current) return { ok: false, reason: 'Connect a wallet first.' }
       if (!cleared()) return { ok: false, reason: 'Read and accept the risk notice first.' }
       if (!c.v72 || !d.v72) return { ok: false, reason: 'Moves need the v7.2 gateways on both chains.' }
-      let dest: Address = addr
-      if (recipient && recipient.trim()) {
-        try {
-          dest = getAddress(recipient.trim())
-        } catch {
-          return { ok: false, reason: 'That recipient is not an address.' }
-        }
-      }
       const st = stateOf(from)
       let wei = toUnits(amount, 18)
       // "the whole claim" must not leave float dust behind
       if (wei > st.ousd || st.ousd - wei < CLAIM_DUST) wei = st.ousd
       if (wei < MIN_AMOUNT) return { ok: false, reason: 'That amount is too small to move.' }
       try {
+        // the hub forwards only toward a recipient of the destination's
+        // shape (an address to an EVM chain, a 32-byte key to Solana) and
+        // only within its ceiling: otherwise the claim would just come home
+        const own = padHex(addr, { size: 32 })
+        const hub = await hubForwards(d, wei, own)
+        const r = recipient?.trim()
+          ? moveRecipient(recipient, hub.wide)
+          : hub.wide
+            ? ({ ok: false, reason: `${up(to)} takes a 32-byte account key: name the recipient there.` } as const)
+            : ({ ok: true, to: own } as const)
+        if (!r.ok) return { ok: false, reason: r.reason }
+        const destB32 = r.to as `0x${string}`
+        const dest = hub.wide ? destB32 : getAddress(`0x${destB32.slice(26)}`)
+        if (!hub.ok)
+          return {
+            ok: false,
+            reason: `The hub would not forward a claim to ${up(to)} at today's price, so nothing was sent. Try again later.`,
+          }
         const fee = await movePrice(c, d)
         if (fee === null) return { ok: false, reason: `Moves from ${up(from)} to ${up(to)} are closed right now.` }
         const sym = c.chain.nativeCurrency.symbol
@@ -2476,7 +2556,7 @@ export function OnchainProvider({
           address: c.gateway,
           abi: gatewayAbi,
           functionName: 'moveClaim',
-          args: [d.label, padHex(dest, { size: 32 }), wei],
+          args: [d.label, destB32, wei],
           value: fee,
         })
         const instant = syncRef.current || c.local
@@ -2593,6 +2673,7 @@ export function OnchainProvider({
         dollar: { symbol: c.dollar.symbol, decimals: c.dec },
         vault: c.vault,
         v72: c.v72,
+        orderTtl: c.orderTtl,
         usdc: fromUnits(s.usdc, c.dec),
         ousd: ef(s.ousd),
         protected: protectedOn(c),

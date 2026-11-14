@@ -458,6 +458,9 @@ export interface ChainInfo {
   vault: 'cctp' | 'local'
   /** The gateway has the v7.2 actions: open a token here, move a claim. */
   v72: boolean
+  /** How long a cross-chain order from here stays valid, in seconds
+   * (`orderTtl()`), when the gateway has it. */
+  orderTtl?: number
   /** The wallet's dollars here: this chain's dollar token (the field keeps
    * its historical name), plus oUSD claims on this chain's vault. */
   usdc: number
@@ -490,6 +493,9 @@ export interface MoveOption {
   fee: number
   /** What the destination vault holds, in its own dollar. */
   liquidity: number
+  /** Its gateway is not an EVM address (Solana): the recipient must be a
+   * 32-byte key, never an address. */
+  wide: boolean
 }
 
 export type ActionResult =

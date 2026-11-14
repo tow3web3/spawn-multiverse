@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useStore, type MoveOption } from '../store'
 import { fmtUsd } from '../lib/format'
 import { chainName, dollarOn } from '../lib/liveChains'
+import { moveRecipient } from '../lib/v72'
 import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 
 /**
@@ -53,13 +54,18 @@ export function MoveClaim({ from, onDone }: { from: string; onDone?: (text: stri
   const there = dst ? dollarOn(dst, info) : undefined
   const instant = onchain?.network === 'local' || ci.local
   const gasCoin = coinOf(ci.nativeSymbol)
+  // a destination whose gateway is not an EVM address (Solana) takes a
+  // 32-byte key, never the wallet's own address: the recipient is required
+  const wide = !!chosen?.wide
+  const naming = other || wide
+  const shape = naming ? moveRecipient(recipient, wide) : null
 
   const go = async () => {
     if (busy || !dst || !onchain?.moveClaim) return
     setBusy(true)
     setMsg(null)
     try {
-      const r = await onchain.moveClaim(from, dst, Math.min(amount, claim), other ? recipient : undefined)
+      const r = await onchain.moveClaim(from, dst, Math.min(amount, claim), naming ? recipient : undefined)
       setMsg(r.ok ? { ok: true, text: r.text } : { ok: false, neutral: r.code === 'returned', text: r.reason.toUpperCase() })
       if (r.ok) onDone?.(r.text)
     } finally {
@@ -137,19 +143,24 @@ export function MoveClaim({ from, onDone }: { from: string; onDone?: (text: stri
       </div>
 
       <div className="mt-2 font-mono text-[9px] font-bold">
-        {other ? (
+        {naming ? (
           <span className="flex flex-wrap items-center gap-1.5">
-            <span className="opacity-55">RECIPIENT ON {dst ? dst.toUpperCase() : 'THAT CHAIN'}</span>
+            <span className="opacity-55">
+              {wide ? `${dst?.toUpperCase()} ACCOUNT KEY (32 BYTES)` : `RECIPIENT ON ${dst ? dst.toUpperCase() : 'THAT CHAIN'}`}
+            </span>
             <input
               value={recipient}
               onChange={(e) => setRecipient(e.target.value.trim())}
-              placeholder="0x…"
-              aria-label="Recipient address"
+              placeholder={wide ? '0x + 64 hex' : '0x…'}
+              aria-label="Recipient"
               className="w-72 max-w-full rounded-md border-2 border-ink bg-white px-1.5 py-0.5 outline-none"
             />
-            <button type="button" onClick={() => setOther(false)} className="underline">
-              BACK TO MY OWN ADDRESS
-            </button>
+            {!wide && (
+              <button type="button" onClick={() => setOther(false)} className="underline">
+                BACK TO MY OWN ADDRESS
+              </button>
+            )}
+            {recipient && shape && !shape.ok && <span className="basis-full text-down">{shape.reason.toUpperCase()}</span>}
           </span>
         ) : (
           <span className="opacity-60">
@@ -185,7 +196,7 @@ export function MoveClaim({ from, onDone }: { from: string; onDone?: (text: stri
       <button
         type="button"
         onClick={() => void go()}
-        disabled={busy || !chosen || !(amount > 0) || amount > claim + 0.005 || (other && !/^0x[0-9a-fA-F]{40}$/.test(recipient))}
+        disabled={busy || !chosen || !(amount > 0) || amount > claim + 0.005 || (naming && !shape?.ok)}
         data-testid="move-button"
         className="mt-2 rounded-xl border-3 border-ink bg-lime px-4 py-2 font-mono text-[11px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
       >

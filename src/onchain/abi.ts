@@ -28,7 +28,9 @@ export const padAbi = parseAbi([
   // v7.2: what the hub may front for a request toward a chain (an open's
   // SYNC, a moved claim's PAYOUT), in hub-native wei; its gateways and its
   // adapter, to price that SYNC before an open is offered.
-  'function requestCap(uint32 chain) view returns (uint256)',
+  // per kind of message the hub sends (second round): 10 = the SYNC an
+  // open asks for, 12 = the PAYOUT a move forwards
+  'function requestCap(uint32 chain, uint8 op) view returns (uint256)',
   'function syncCap(uint32 chain) view returns (uint256)',
   'function gateways(uint32 chain) view returns (bytes32)',
   'function messenger() view returns (address)',
@@ -53,11 +55,11 @@ export const gatewayAbi = parseAbi([
   'function buyToken(address hubToken, uint256 usdIn) payable',
   'function buyTokenUsdc(address hubToken, uint256 usdcIn) payable',
   'function sellToken(address hubToken, uint256 tokens) payable',
-  // Price protection. v7.1: where the hub answers in the same transaction,
-  // the trade reverts ("GW: min out") unless the minimum arrived. v7.2
-  // (second round): the minimum rides the message to the hub, which refuses
-  // a trade under it and sends it back whole — the same signatures, now on
-  // every chain. Before v7.2 a remote gateway always reverts them.
+  // Price protection. Where the hub answers in the same transaction the
+  // trade reverts ("GW: min out") unless the minimum arrived; from another
+  // chain (v7.2) the minimum rides the message and the hub refuses a trade
+  // under it (`Refused` reason 6) and sends it back whole. On a v7.1
+  // gateway (the public testnet) they only work on the hub chain.
   'function buyTokenUsdcMin(address hubToken, uint256 usdcIn, uint256 minTokensOut) payable',
   'function buyTokenMin(address hubToken, uint256 usdIn, uint256 minTokensOut) payable',
   'function sellTokenMin(address hubToken, uint256 tokens, uint256 minDollarsOut) payable',
@@ -77,6 +79,9 @@ export const gatewayAbi = parseAbi([
   // reverts "GW: route closed" for a destination with no price
   'function quoteMove(uint32 dstChain) view returns (uint256)',
   'function chainLabel() view returns (uint32)',
+  // third v7.2 round: how long a cross-chain order stays valid (seconds);
+  // absent before — read under try
+  'function orderTtl() view returns (uint256)',
   'function replicaOf(address hubToken) view returns (address)',
   'function pendingDelivery(address hubToken, address account) view returns (uint256)',
   'function distributor() view returns (address)',

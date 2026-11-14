@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useStore, shortAddr } from '../store'
 import { fmtMoney, fmtPrice, fmtTokens, fmtUsd } from '../lib/format'
-import { useChainSet } from '../lib/liveChains'
+import { dollarOn, useChainSet } from '../lib/liveChains'
 import { CreatureArt } from './CreatureCard'
 import { FEE_LABEL } from './TokenPage'
 
@@ -18,6 +18,16 @@ export function DevDashboard({
 }) {
   const { mode, creatures, wallet, connect, claimFees, onchain } = useStore()
   const chainSet = useChainSet()
+  // where a dev claim is sent from — the provider's rule: the hub chain when
+  // the wallet has gas there, else the first chain it has gas on — and the
+  // dollar it therefore pays out in
+  const info = onchain?.chainInfo
+  const claimFrom =
+    chainSet.live.find((c) => info?.[c.id]?.local && (info?.[c.id]?.gas ?? 0) > 0) ??
+    chainSet.live.find((c) => (info?.[c.id]?.gas ?? 0) > 0) ??
+    chainSet.live[0]
+  const claimDollar = dollarOn(claimFrom?.id, info).symbol
+  const otherDollars = [...new Set(chainSet.live.map((c) => dollarOn(c.id, info).symbol))].filter((d) => d !== claimDollar)
   const [busyNum, setBusyNum] = useState<number | null>(null)
   const [claimed, setClaimed] = useState<Record<number, number>>({})
   /** Claims the hub turned down (it refuses instead of reverting). */
@@ -225,8 +235,8 @@ export function DevDashboard({
           {mode === 'chain' && (
             <p className="mt-4 text-center font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-45">
               {chainSet.single
-                ? `A CLAIM IS ONE TRANSACTION ON ${chainSet.names.toUpperCase()} AND PAYS OUT THERE IN ITS DOLLAR.`
-                : 'A CLAIM IS SENT FROM THE FIRST CHAIN YOUR WALLET HAS GAS ON (THE HUB CHAIN FIRST: IT IS INSTANT) AND PAYS OUT THERE, IN THAT CHAIN’S DOLLAR.'}
+                ? `A CLAIM IS ONE TRANSACTION ON ${chainSet.names.toUpperCase()} AND PAYS OUT THERE IN ${claimDollar}.`
+                : `A CLAIM IS SENT FROM THE FIRST CHAIN YOUR WALLET HAS GAS ON (THE HUB CHAIN FIRST: IT IS INSTANT) AND PAYS OUT THERE — RIGHT NOW FROM ${(claimFrom?.label ?? 'BASE').toUpperCase()}, IN ${claimDollar}${otherDollars.length ? ` (${otherDollars.join(', ')} IF IT GOES FROM ${chainSet.live.filter((c) => dollarOn(c.id, info).symbol !== claimDollar).map((c) => c.label).join(' / ')})` : ''}.`}
               {onchain?.sponsored || chainSet.single
                 ? ''
                 : ' FROM ANOTHER CHAIN IT CROSSES LAYERZERO — A FEW MINUTES AND A NETWORK FEE.'}

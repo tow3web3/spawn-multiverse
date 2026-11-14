@@ -33,7 +33,7 @@
 const fs = require('fs')
 const path = require('path')
 const { ethers } = require('hardhat')
-const { deployDistributor, setV72Legs } = require('./lib-deploy')
+const { deployDistributor, setV72Legs, setRequestCaps } = require('./lib-deploy')
 
 const E = (n) => ethers.parseEther(String(n))
 const b32 = (addr) => ethers.zeroPadValue(addr, 32)
@@ -53,6 +53,9 @@ const ETHEREUM = 2
 const BNB = 4
 /** What the simulated network charges per message (native wei). */
 const FLAT_FEE = E('0.00002')
+/** The hub's ceiling for a requested message toward a chain: what its quote
+ * with one return leg costs on the simulated network (`flatFee × 2`). */
+const REQUEST_CAP = FLAT_FEE * 2n
 /** Hardhat's account #19 — the demo wallet the scenario leaves a claim with. */
 const DEMO_INDEX = 19
 const DEMO_MNEMONIC = 'test test test test test test test test test test test junk'
@@ -107,9 +110,11 @@ async function main() {
     // prepays the SYNC to every remote chain
     await (await gateway.setLegs(local ? 0 : 1, remotes)).wait()
     // v7.2: an open prepays its SYNC (nothing at home), a move one leg to any
-    // other chain; the hub hands on a request that costs at most one message
+    // other chain; the hub hands on a request (an open's SYNC, op 10; a
+    // moved claim's PAYOUT, op 12) that costs at most what it is quoted at:
+    // the hub prices those legs with one reply unit, i.e. two flat fees here
     await setV72Legs(gateway, { local, labels, self: c.label })
-    await (await pad.setRequestCap(c.label, FLAT_FEE)).wait()
+    await setRequestCaps(pad, c.label, REQUEST_CAP)
     chains.push({ ...c, kind: c.dollar, local, dollar, usd, gateway, dist, decimals, T })
     console.log(`  ${c.id.padEnd(9)}: gateway ${gateway.target} · ${c.dollar} (${decimals} dec)`)
   }
@@ -156,7 +161,7 @@ async function main() {
 
   async function spawnSeed(def) {
     const c = def.from ? at(def.from) : pick(usdcChains.filter((x) => !(def.skip ?? []).includes(x.label)))
-    const creator = pick(traders)
+    const creator = def.creator ?? pick(traders)
     const metaURI = JSON.stringify({ face: def.face })
     const fee = await c.gateway.quoteSpawn(def.name, def.sym, metaURI, false)
     const rc = await (
@@ -203,7 +208,8 @@ async function main() {
     { name: 'COSMIC PICKLE', sym: 'PICKL', mode: 2, face: 'pickle', buys: 10, size: [30, 250], sellEvery: 5, skip: [ETHEREUM], dear: ETHEREUM },
     // MOCHI pumps then takes a beating
     { name: 'MOCHI MAYHEM', sym: 'MOCHI', mode: 0, face: 'mochi', buys: 18, size: [60, 400], dumps: 5 },
-    { name: 'ALIEN INTERN', sym: 'INTRN', mode: 1, face: 'alien', buys: 4, size: [20, 120] },
+    // the demo wallet launched INTRN: its dev dashboard has a fee share to claim
+    { name: 'ALIEN INTERN', sym: 'INTRN', mode: 1, face: 'alien', buys: 4, size: [20, 120], creator: demo },
   ]
   const tokens = {}
   for (const def of seeds) {

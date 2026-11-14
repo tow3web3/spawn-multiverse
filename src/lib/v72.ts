@@ -46,15 +46,18 @@ export function designDollar(chainId: string): ChainDollar {
 export interface HubEvent {
   eventName: string
   args: Record<string, unknown>
+  /** The hub block it was logged in (to date a refusal). */
+  blockNumber?: bigint
 }
 
 /** Wire opcodes as they appear in `Refused.op`. */
 export const OP = { SPAWN: 1, BUY: 2, SELL: 3, CLAIM: 4, PULL: 5, OPEN: 6, MOVE: 7 } as const
 
-/** `Refused.reason` — SpawnPad's R_* constants. 7 is ASSUMED: the reason
- * the second v7.2 contract round gives a cross-chain trade that arrives
- * under the minimum its sender named (not in the contracts at 16f2d0a). */
-export const R = { PAUSED: 1, UNKNOWN: 2, FEE_MODE: 3, NOT_DEV: 4, NOTHING: 5, VENUE: 6, MIN_OUT: 7 } as const
+/** `Refused.reason` — SpawnPad's R_* constants. Since the second v7.2
+ * round, 6 (`TERMS`) means "the order's terms were not met, or the market
+ * refused it": a cross-chain trade under its minimum lands there, and (third
+ * round) so does one that arrives after its deadline. */
+export const R = { PAUSED: 1, UNKNOWN: 2, FEE_MODE: 3, NOT_DEV: 4, NOTHING: 5, TERMS: 6 } as const
 
 export const REFUSAL: Record<number, string> = {
   1: 'the hub is paused',
@@ -62,8 +65,7 @@ export const REFUSAL: Record<number, string> = {
   3: 'bad fee mode',
   4: 'only the dev can claim',
   5: 'nothing to pay out',
-  6: 'the market refused the trade (dust)',
-  7: 'the price moved past the minimum you set',
+  6: "the order's terms were not met, or the market refused it",
 }
 
 /** A bytes32 wire identity narrowed to its EVM address when it is one. */
@@ -84,7 +86,7 @@ export const wei = (v: unknown): number => {
 export type TradeOutcome =
   | { kind: 'trade'; usd: number; tokens: number; price: number; ascended: boolean; guardRefund: number }
   | { kind: 'bounced'; refunded: number }
-  | { kind: 'refused'; reason: number; amount: number }
+  | { kind: 'refused'; reason: number; amount: number; block?: bigint }
   | { kind: 'claimed'; amount: number }
 
 /**
@@ -148,7 +150,7 @@ export function readTrade(
       mine(e.args.actor) &&
       narrow(e.args.token) === tok,
   )
-  if (no) return { kind: 'refused', reason: Number(no.args.reason), amount: wei(no.args.amount) }
+  if (no) return { kind: 'refused', reason: Number(no.args.reason), amount: wei(no.args.amount), block: no.blockNumber }
   // a buy the genesis guard turned away whole leaves no Trade, only the guard
   if (guard) return { kind: 'bounced', refunded: guardRefund }
   return null
@@ -163,16 +165,63 @@ export function readTrade(
 export function returnedText(
   side: 'buy' | 'sell',
   reason: number,
-  where: { chain: string; ticker: string; money?: string },
+  where: {
+    chain: string
+    ticker: string
+    money?: string
+    /** The order carried a minimum (every protected trade does). */
+    hadMin?: boolean
+    /** The refusal landed after the order's deadline (see `expired`). */
+    expired?: boolean
+  },
 ): string {
   const back =
     side === 'buy'
       ? `Your ${where.money ?? 'dollars'} came back to you on ${where.chain}.`
       : `Your $${where.ticker} came back to you on ${where.chain}.`
-  if (reason === R.MIN_OUT)
+  if (reason === R.TERMS && where.expired)
+    return `Your order reached the hub after its deadline, so it expired unfilled. ${back} Only the network fee is spent — try again.`
+  if (reason === R.TERMS && where.hadMin)
     return `The price moved past the minimum you set while your order crossed to the hub, so it was not filled. ${back} Only the network fee is spent — try again, or widen your tolerance.`
   return `The hub refused it — ${REFUSAL[reason] ?? 'see the hub events'}. ${back}`
 }
+
+/** A cross-chain order carries a deadline its gateway sets (`orderTtl()`
+ * seconds after it is sent; third v7.2 round). A refusal dated after that
+ * deadline is an expiry, not a price move. Unknown TTL or dates: not expired. */
+export function expired(sentAtMs: number | undefined, refusedAtMs: number | undefined, ttlSeconds: number | undefined): boolean {
+  if (!sentAtMs || !refusedAtMs || !ttlSeconds) return false
+  return refusedAtMs > sentAtMs + ttlSeconds * 1000
+}
+
+/** "30 min", "1 h 30 min", "45 s" — an order's validity, for the panel. */
+export function ttlText(seconds: number): string {
+  if (seconds < 60) return `${seconds} s`
+  const m = Math.round(seconds / 60)
+  if (m < 60) return `${m} min`
+  const h = Math.floor(m / 60)
+  return m % 60 ? `${h} h ${m % 60} min` : `${h} h`
+}
+
+/** A move's recipient must have the shape of its destination (the hub
+ * sends it home otherwise): an address toward an EVM chain, a 32-byte key
+ * toward one whose gateway is not an address (Solana). `wideDest`: the
+ * destination gateway's id does not fit 20 bytes. Returns the bytes32 the
+ * gateway takes, or the reason it cannot. */
+export function moveRecipient(input: string, wideDest: boolean): { ok: true; to: string } | { ok: false; reason: string } {
+  const s = input.trim()
+  if (!wideDest) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(s) || /^0x0{40}$/.test(s))
+      return { ok: false, reason: 'That chain takes an EVM address (0x + 40 hex).' }
+    return { ok: true, to: '0x' + '0'.repeat(24) + s.slice(2).toLowerCase() }
+  }
+  if (!/^0x[0-9a-fA-F]{64}$/.test(s) || /^0x0{24}/.test(s))
+    return { ok: false, reason: 'That chain takes a 32-byte account key (0x + 64 hex), not an EVM address.' }
+  return { ok: true, to: s.toLowerCase() }
+}
+
+/** Is a bytes32 gateway id wide (not an EVM address)? */
+export const isWide = (b32: string) => /^0x[0-9a-fA-F]{64}$/.test(b32) && !b32.toLowerCase().startsWith('0x' + '0'.repeat(24))
 
 /** What became of an `openToken` request for `token` from chain `label`. */
 export function readOpen(events: HubEvent[], token: string, label: number): 'opened' | 'failed' | 'unknown-token' | null {
@@ -245,9 +294,10 @@ export function availability(p: {
   return p.canOpen ? 'closed' : 'failed'
 }
 
-/** The SYNC the hub would send: `abi.encode(uint8 10, abi.encode(bytes32
- * token, string name, string symbol))`, built by `SpawnPad._syncPayload`.
- * Encoded by the caller (viem); this is only the verdict on its price. */
+/** The hub sends a requested message (an open's SYNC, a moved claim's
+ * PAYOUT) only if its live quote — made with ONE return leg — is within
+ * `requestCap(chain, op)` (op 10 for the SYNC, 12 for the PAYOUT). The
+ * payload is encoded by the caller (viem); this is only the verdict. */
 export function openVerdict(quote: bigint | null, cap: bigint): { ok: boolean; why?: 'too-dear' | 'unpriced' } {
   if (quote === null) return { ok: false, why: 'unpriced' }
   return quote <= cap ? { ok: true } : { ok: false, why: 'too-dear' }
@@ -277,7 +327,9 @@ export function stuckClaim(s: ClaimState): boolean {
 
 export interface MoveRoute {
   chain: string
-  /** The source gateway's `quoteMove(dst)`, or null: "GW: route closed". */
+  /** The source gateway's `quoteMove(dst)`, or null: "GW: route closed",
+   * or the hub would not forward it (its quote for the PAYOUT toward that
+   * chain above `requestCap(dst, 12)` — the claim would only come home). */
   fee: bigint | null
   /** The destination vault's dollars, in ITS units, and its scale. */
   liquidity: bigint

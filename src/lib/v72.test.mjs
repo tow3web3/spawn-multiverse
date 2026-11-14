@@ -20,6 +20,10 @@ import {
   returnedText,
   stuckClaim,
   CLAIM_DUST,
+  expired,
+  isWide,
+  moveRecipient,
+  ttlText,
 } from './v72.ts'
 import { encodeAbiParameters, encodeEventTopics, parseAbi, parseEventLogs } from 'viem'
 
@@ -78,10 +82,10 @@ test('a filled trade is read from its Trade event, matched on chain, trader and 
 })
 
 test('a cross-chain buy under its minimum is REFUSED at the hub, with the amount sent home', () => {
-  const got = readTrade([refused(OP.BUY, R.MIN_OUT)], { token: TOKEN, actor: ME, want: 'buy', label: 6 })
-  assert.deepEqual(got, { kind: 'refused', reason: R.MIN_OUT, amount: 50 })
+  const got = readTrade([refused(OP.BUY, R.TERMS)], { token: TOKEN, actor: ME, want: 'buy', label: 6 })
+  assert.deepEqual(got, { kind: 'refused', reason: R.TERMS, amount: 50, block: undefined })
   // a sell refused the same way
-  const sold = readTrade([refused(OP.SELL, R.MIN_OUT, { amount: E(1_000_000) })], {
+  const sold = readTrade([refused(OP.SELL, R.TERMS, { amount: E(1_000_000) })], {
     token: TOKEN,
     actor: ME,
     want: 'sell',
@@ -90,23 +94,52 @@ test('a cross-chain buy under its minimum is REFUSED at the hub, with the amount
   assert.equal(sold.kind, 'refused')
   // a refusal of another op, another chain, or another wallet is not ours
   for (const ev of [
-    refused(OP.SELL, R.MIN_OUT),
-    refused(OP.BUY, R.MIN_OUT, { srcChain: 4 }),
-    refused(OP.BUY, R.MIN_OUT, { actor: b32(OTHER) }),
+    refused(OP.SELL, R.TERMS),
+    refused(OP.BUY, R.TERMS, { srcChain: 4 }),
+    refused(OP.BUY, R.TERMS, { actor: b32(OTHER) }),
   ])
     assert.equal(readTrade([ev], { token: TOKEN, actor: ME, want: 'buy', label: 6 }), null)
 })
 
 test('a refused trade is said as what happened: it came back whole, in plain words', () => {
-  const buy = returnedText('buy', R.MIN_OUT, { chain: 'OPTIMISM', ticker: 'PICKL', money: '$50.00 USDC' })
+  const buy = returnedText('buy', R.TERMS, { chain: 'OPTIMISM', ticker: 'PICKL', money: '$50.00 USDC', hadMin: true })
   assert.match(buy, /price moved past the minimum you set/)
   assert.match(buy, /\$50\.00 USDC came back to you on OPTIMISM/)
   assert.doesNotMatch(buy, /error|failed/i)
-  const sell = returnedText('sell', R.MIN_OUT, { chain: 'BNB', ticker: 'PICKL' })
+  const sell = returnedText('sell', R.TERMS, { chain: 'BNB', ticker: 'PICKL', hadMin: true })
   assert.match(sell, /\$PICKL came back to you on BNB/)
   // any other refusal still says why, and that the value came back
   assert.match(returnedText('buy', R.PAUSED, { chain: 'ARBITRUM', ticker: 'X' }), /hub is paused.*came back/)
   assert.match(returnedText('buy', 99, { chain: 'ARBITRUM', ticker: 'X' }), /see the hub events/)
+  // reason 6 without a minimum: the market refused it, said as such
+  assert.match(returnedText('buy', R.TERMS, { chain: 'BASE', ticker: 'X' }), /terms were not met, or the market refused it.*came back/)
+  // reason 6 after the deadline: expired, not a price move
+  const late = returnedText('sell', R.TERMS, { chain: 'ETHEREUM', ticker: 'X', hadMin: true, expired: true })
+  assert.match(late, /after its deadline, so it expired unfilled/)
+  assert.doesNotMatch(late, /price moved/)
+})
+
+test('a refusal dated after the order deadline is an expiry; unknown TTL never is', () => {
+  const sent = 1_000_000
+  assert.equal(expired(sent, sent + 30 * 60_000 + 1, 1800), true)
+  assert.equal(expired(sent, sent + 29 * 60_000, 1800), false)
+  assert.equal(expired(sent, sent + 99 * 60_000, undefined), false) // gateway without orderTtl()
+  assert.equal(expired(undefined, sent, 1800), false)
+  assert.equal(ttlText(1800), '30 min')
+  assert.equal(ttlText(5400), '1 h 30 min')
+  assert.equal(ttlText(45), '45 s')
+})
+
+test('a move recipient must have the shape of its destination', () => {
+  const r = moveRecipient(ME, false)
+  assert.deepEqual(r, { ok: true, to: b32(ME) })
+  assert.equal(moveRecipient('0x' + 'ab'.repeat(32), false).ok, false) // a 32-byte key to an EVM chain
+  assert.equal(moveRecipient(ME, true).ok, false) // an address to Solana
+  assert.equal(moveRecipient(b32(ME), true).ok, false) // a padded address is still an address
+  assert.deepEqual(moveRecipient('0x' + 'AB'.repeat(32), true), { ok: true, to: '0x' + 'ab'.repeat(32) })
+  assert.equal(moveRecipient('0x' + '0'.repeat(40), false).ok, false)
+  assert.equal(isWide(b32(ME)), false)
+  assert.equal(isWide('0x' + 'ab'.repeat(32)), true)
 })
 
 test('FAIR GENESIS: a buy turned away whole is a bounce, a capped one a trade with a refund', () => {
@@ -213,10 +246,10 @@ test('raw logs: a refused cross-chain buy decodes into "it came back whole"', ()
     'Refused',
     { op: OP.BUY, srcChain: 6 },
     [{ type: 'bytes32' }, { type: 'bytes32' }, { type: 'uint256' }, { type: 'uint8' }],
-    [b32(TOKEN), b32(ME), E(50), R.MIN_OUT],
+    [b32(TOKEN), b32(ME), E(50), R.TERMS],
   )
   const got = readTrade(decode([log]), { token: TOKEN, actor: ME, want: 'buy', label: 6 })
-  assert.deepEqual(got, { kind: 'refused', reason: R.MIN_OUT, amount: 50 })
+  assert.deepEqual(got, { kind: 'refused', reason: R.TERMS, amount: 50, block: 7n })
 })
 
 test('raw logs: a filled trade, an open and a move decode into their verdicts', () => {
