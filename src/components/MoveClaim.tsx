@@ -19,6 +19,9 @@ export function MoveClaim({ from, onDone }: { from: string; onDone?: (text: stri
   const claim = ci?.ousd ?? 0
   const [amountStr, setAmountStr] = useState(() => (Math.floor(claim * 100) / 100).toFixed(2))
   const amount = Number.parseFloat(amountStr) || 0
+  /** What will really move: within a cent of the whole claim, the whole
+   * claim goes (the provider leaves no dust behind) — the label must say so. */
+  const moving = amount <= claim + 0.005 && claim - amount < 0.01 ? claim : Math.min(amount, claim)
   const [options, setOptions] = useState<MoveOption[] | null>(null)
   const [dst, setDst] = useState<string | null>(null)
   const [other, setOther] = useState(false)
@@ -111,7 +114,7 @@ export function MoveClaim({ from, onDone }: { from: string; onDone?: (text: stri
           <span className="font-mono text-[10px] font-bold opacity-50">✳ ASKING EVERY CHAIN…</span>
         ) : options.length === 0 ? (
           <span className="font-mono text-[10px] font-bold text-down">
-            NO OTHER CHAIN CAN PAY {fmtUsd(Math.min(amount, claim))} IN FULL RIGHT NOW — TRY A SMALLER AMOUNT. YOUR CLAIM STAYS
+            NO OTHER CHAIN CAN PAY {fmtUsd(moving)} IN FULL RIGHT NOW — TRY A SMALLER AMOUNT. YOUR CLAIM STAYS
             VALID HERE.
           </span>
         ) : (
@@ -205,7 +208,7 @@ export function MoveClaim({ from, onDone }: { from: string; onDone?: (text: stri
             ? '✳ MOVING…'
             : '✳ CROSSING CHAINS…'
           : chosen
-            ? `MOVE ${fmtUsd(Math.min(amount, claim))} TO ${chainName(chosen.chain).toUpperCase()} ↗`
+            ? `MOVE ${fmtUsd(moving)} TO ${chainName(chosen.chain).toUpperCase()} ↗`
             : 'MOVE ↗'}
       </button>
       {msg && (

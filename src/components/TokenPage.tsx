@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   useStore,
   shortAddr,
@@ -9,6 +9,7 @@ import {
   SNIPE_MAX_RATE,
   type Side,
   type FeeMode,
+  type TradeResult,
 } from '../store'
 import { CHAINS } from '../lib/chains'
 import { chainName, dollarOn, useChainSet } from '../lib/liveChains'
@@ -76,6 +77,9 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   const [sideBusy, setSideBusy] = useState<string | null>(null)
   const [sideMsg, setSideMsg] = useState<{ at: 'fees' | 'bag'; ok: boolean; text: string } | null>(null)
 
+  /** The token on screen — a late hub verdict only speaks on its own page. */
+  const numRef = useRef(num)
+  numRef.current = num
   useEffect(() => {
     window.scrollTo(0, 0)
     // another token: the last trade's verdict does not belong to it
@@ -185,24 +189,40 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
         setMsg({ ok: true, text: 'WALLET CONNECTED — HIT IT AGAIN TO TRADE.' })
         return
       }
-      const r = await trade(num, side, amount, chain)
-      if (r.ok) {
-        const head = r.pending
-          ? `${side === 'buy' ? 'BUY' : 'SELL'} SENT FROM ${chain.toUpperCase()} (≈ ${fmtTokens(r.tokens)} $${c.ticker})`
-          : side === 'buy'
-            ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${onchain ? ` ${dollar.symbol}` : ''}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
-            : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${onchain ? ` ${dollar.symbol}` : ''}`
-        setMsg({ ok: true, text: r.note ? `${head} · ${r.note}` : head })
-      } else {
-        // the protection doing its job: nothing moved (or it came back
-        // whole from the hub) — said plainly, with a retry
-        setMsg({
-          ok: false,
-          text: r.reason.toUpperCase(),
-          retry: r.code === 'min-out' || r.code === 'returned',
-          neutral: r.code === 'min-out' || r.code === 'returned',
-        })
+      // what was traded where — the message must not follow later clicks
+      const sd = side
+      const ch = chain.toUpperCase()
+      const sym = onchain ? ` ${dollar.symbol}` : ''
+      const forNum = num
+      const show = (r: TradeResult) => {
+        if (r.ok) {
+          const head = r.pending
+            ? `${sd === 'buy' ? 'BUY' : 'SELL'} SENT FROM ${ch} (≈ ${fmtTokens(r.tokens)} $${c.ticker})`
+            : r.arriving
+              ? sd === 'buy'
+                ? `FILLED AT THE HUB: ${fmtTokens(r.tokens)} $${c.ticker} FOR ${fmtUsd(r.usd)}${sym}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
+                : `FILLED AT THE HUB: SOLD ${fmtTokens(r.tokens)} $${c.ticker} FOR ${fmtUsd(r.usd)}${sym}`
+              : sd === 'buy'
+                ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${ch} FOR ${fmtUsd(r.usd)}${sym}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
+                : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${ch} FOR ${fmtUsd(r.usd)}${sym}`
+          setMsg({ ok: true, text: r.note ? `${head} · ${r.note}` : head })
+          // the hub's answer to an order still crossing replaces this message
+          if (r.later)
+            void r.later.then((v) => {
+              if (numRef.current === forNum) show(v)
+            })
+        } else {
+          // the protection doing its job: nothing moved (or it came back
+          // whole from the hub) — said plainly, with a retry
+          setMsg({
+            ok: false,
+            text: r.reason.toUpperCase(),
+            retry: r.code === 'min-out' || r.code === 'returned',
+            neutral: r.code === 'min-out' || r.code === 'returned',
+          })
+        }
       }
+      show(await trade(num, side, amount, chain))
     } catch {
       setMsg({ ok: false, text: 'TRANSACTION FAILED — IS THE CHAIN RUNNING?' })
     } finally {
@@ -687,7 +707,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               {onchain && onchain.network !== 'local' && !chainSet.single
                 ? instant
                   ? ` · ${chain.toUpperCase()} SETTLES IN ONE TRANSACTION ⚡`
-                  : ` · ${chain.toUpperCase()} CROSSES LAYERZERO: 1–3 MIN`
+                  : ` · ${chain.toUpperCase()} CROSSES LAYERZERO: A FEW MINUTES EACH WAY`
                 : ''}
               {ci?.protected ? ' · PRICE-PROTECTED 🛡' : ''}
             </p>
@@ -805,7 +825,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                       </span>{' '}
                       {instant
                         ? `— OR THE TRADE CANCELS ITSELF AND NOTHING IS SPENT${onchain.network === 'mainnet' ? ' BUT GAS' : ''}.`
-                        : `— OR THE HUB REFUSES IT AND ${side === 'buy' ? `YOUR ${dollar.symbol}` : 'YOUR TOKENS'} COME BACK WHOLE: ALL OR NOTHING, ONLY THE NETWORK FEE IS SPENT.`}
+                        : `— OR THE HUB REFUSES IT AND ${side === 'buy' ? `YOUR ${dollar.symbol}` : 'YOUR TOKENS'} COME BACK WHOLE: ALL OR NOTHING, ${onchain.sponsored ? 'NOTHING SPENT BUT GAS' : 'ONLY THE NETWORK FEE IS SPENT'}.`}
                     </p>
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <span className="font-mono text-[9px] font-bold opacity-55">TOLERANCE</span>
@@ -965,7 +985,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               {busy
                 ? instant
                   ? '✳ CONFIRMING…'
-                  : '✳ CROSSING CHAINS — 1 TO 3 MIN…'
+                  : '✳ CROSSING TO THE HUB — A FEW MINUTES…'
                 : !wallet
                   ? '◉ CONNECT WALLET TO TRADE'
                   : side === 'buy'
