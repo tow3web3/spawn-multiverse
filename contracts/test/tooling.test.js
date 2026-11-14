@@ -1153,3 +1153,66 @@ describe('v7.1: a failed SYNC is seen and repaired; tradeLegs = 0 on a remote ga
     expect(fixed.check.ok).to.equal(true)
   })
 })
+
+/** The mainnet profile itself: the rules the tooling relies on. */
+describe('the mainnet profile: one universe, five EVM chains', function () {
+  const P = require('../config/profiles')
+  const m = P.PROFILES.mainnet
+
+  it('Base is the hub; Optimism, Arbitrum, Ethereum and BNB Chain are its spokes; label 1 is kept for Solana', () => {
+    expect(m.hub).to.equal('base')
+    expect(Object.keys(P.activeNets(m)).sort()).to.deep.equal(['arbitrum', 'base', 'bnb', 'ethereum', 'optimism'])
+    expect(Object.values(m.nets).map((c) => c.label)).to.not.include(1)
+    expect(() => P.validate({ name: 'x', nets: { s: { label: 1 } } })).to.throw(/reserved for solana/)
+  })
+
+  it('the dollar and the vault are per chain: USDC/CCTP on four chains, USDT/local on BNB Chain — and a local vault may name no CCTP plumbing', () => {
+    for (const n of ['base', 'optimism', 'arbitrum', 'ethereum']) {
+      expect(P.vaultKind(m, n), n).to.equal('cctp')
+      expect(P.dollarOfNet(m, n), n).to.deep.include({ symbol: 'USDC', decimals: 6 })
+    }
+    expect(P.vaultKind(m, 'bnb')).to.equal('local')
+    expect(P.vaultContract(m, 'bnb')).to.equal('OmniUSDLocal')
+    expect(P.dollarOfNet(m, 'bnb')).to.deep.include({ symbol: 'USDT', decimals: 18 })
+    expect(m.nets.bnb.usdc).to.equal('0x55d398326f99059fF775485246999027B3197955')
+    expect(P.dollarUnits(m, 10_000, 'bnb')).to.equal(10_000n * 10n ** 18n)
+    expect(P.dollarScale(m, 'bnb')).to.equal(1n)
+    expect(() => P.validate({ name: 'x', nets: { b: { label: 4, vault: 'local', cctpDomain: 0 } } })).to.throw(/no CCTP/)
+  })
+
+  it('caps: canary 100 everywhere at launch; then 25,000 per USDC vault and 10,000 for the BNB vault', () => {
+    expect(m.canaryCap).to.equal(100)
+    for (const n of ['base', 'optimism', 'arbitrum', 'ethereum']) expect(P.launchCapOf(m, n), n).to.equal(25_000n)
+    expect(P.launchCapOf(m, 'bnb')).to.equal(10_000n)
+  })
+
+  it('only Ethereum has a launch ceiling; every verifier address is checksummed on every chain', () => {
+    for (const [n, c] of Object.entries(m.nets)) expect(c.syncCap !== undefined, n).to.equal(n === 'ethereum')
+    for (const [name, byNet] of Object.entries(m.dvn.addresses)) {
+      for (const n of Object.keys(m.nets)) {
+        expect(byNet[n], `${name} on ${n}`).to.be.a('string')
+        expect(ethers.getAddress(byNet[n]), `${name} on ${n} must be EIP-55`).to.equal(byNet[n])
+      }
+    }
+  })
+
+  it('the retired single-chain universes are refused with a pointer, not silently mapped', () => {
+    const before = process.env.SPAWN_PROFILE
+    try {
+      for (const name of ['bnb', 'ethereum']) {
+        process.env.SPAWN_PROFILE = name
+        expect(() => P.getProfile('bnb')).to.throw(/retired/)
+      }
+    } finally {
+      if (before === undefined) delete process.env.SPAWN_PROFILE
+      else process.env.SPAWN_PROFILE = before
+    }
+    expect(P.getProfile('bnb').name).to.equal('mainnet')
+    expect(P.getProfile('ethereum').name).to.equal('mainnet')
+  })
+
+  it('hubGasFor covers the worst spawn measured on the forks (4 remote chains), with its margin', () => {
+    expect(P.hubGasFor(m, 4, 1)).to.be.gte((4_249_915n * 120n) / 100n)
+    expect(P.hubGasFor(m, 4, 4)).to.be.gte((4_515_748n * 120n) / 100n)
+  })
+})

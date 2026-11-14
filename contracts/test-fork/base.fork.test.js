@@ -103,7 +103,10 @@ run('Base mainnet fork — the hub over the real endpoint, real USDC, real CCTP'
     const third = await deploy()
     expect(third.gas.txs).to.equal(0)
     expect(third.check.ok).to.equal(true)
-    expect(third.check.soft).to.deep.equal([])
+    // the spokes here are stand-ins with no contract behind them: the v7.2
+    // request ceilings (which read every chain's gateway) cannot be priced —
+    // left closed (0), and said so. The five-chain rehearsal proves them.
+    expect(third.check.soft.filter((r) => !/request ceilings|requestCap/.test(r.what))).to.deep.equal([])
 
     S = state().base
     pad = await ethers.getContractAt('SpawnPad', S.pad)
@@ -341,7 +344,7 @@ run('Base mainnet fork — the hub over the real endpoint, real USDC, real CCTP'
     const sum =
       (await adapter.quote(op.label, dst, syncData, 0)) +
       (await adapter.quote(profile.nets.arbitrum.label, b32(state().arbitrum.gateway), syncData, 0))
-    const tuned = await tuneFees({ profile, netKey: 'base', signer: deployer, apply: true, log: h.quiet })
+    const tuned = await tuneFees({ profile, netKey: 'base', signer: deployer, apply: true, requestCaps: false, log: h.quiet })
     expect(tuned.applied).to.equal(true)
     // the SUM of the SYNC quotes + 25%, spread over the 2 legs a local spawn prepays (rounded up)
     expect(await adapter.returnUnit(0)).to.equal((sum * 125n - 1n) / 200n + 1n)

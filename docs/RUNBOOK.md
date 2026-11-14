@@ -145,7 +145,7 @@ unwrap.
 node scripts/fork-rehearsal.js        # or: npm run rehearse
 ```
 
-About ⟨REHEARSAL_MIN⟩ minutes on a laptop (most of it the forks fetching
+About 7 minutes on a laptop (most of it the forks fetching
 state from public RPCs). It starts five anvil forks (Base, Optimism,
 Arbitrum, Ethereum, BNB Chain — ports 8546–8550, pinned to a recent block),
 mints the canary dollars on them (Circle's minter, the BEP20 owner), runs
@@ -166,7 +166,7 @@ By default the rehearsal forces Ethereum's launch ceiling below the live
 price (`SPAWN_SYNC_CAP_ETHEREUM=0.0000001`) so that launches skip Ethereum and
 its canary must open the token; `SPAWN_SYNC_CAP_ETHEREUM=0.0003 node
 scripts/fork-rehearsal.js` rehearses the profile's own value. `FORK_MEASURE=0`
-skips the measurements (about ⟨LAUNCH_FINISH_MIN⟩ minutes then).
+skips the measurements (about 5 minutes then: launch.sh ≈ 3.5, finish.sh ≈ 0.7).
 `FORK_RPC_<NET>=https://…` picks another upstream for one chain.
 
 ## 4. Testnet run (the same five-chain shape, play money)
@@ -217,7 +217,7 @@ the hub) and a token is opened there later by whoever wants it there
 (`openToken` on Ethereum, which prepays the SYNC in Ethereum's units under
 `requestCap`), or by anyone paying a `resync` on Base. Measured on the forks
 (our verifier set, the fork block's gas): an Ethereum SYNC costs
-⟨ETH_SYNC⟩ ETH, so at that price launches ⟨ETH_SKIP⟩. Raise it only if the
+0.00104 ETH (the worst SYNC, at the fork block's L1 price) — about 3.5× the ceiling, so at that price launches SKIP Ethereum and every token is opened there by whoever wants it (an open from Ethereum prepaid 0.0035 ETH in the rehearsal). Raise it only if the
 spokes' `spawnLegs` can carry it: a launch from an L2 prepays at most 32 of
 its own legs.
 
@@ -333,10 +333,97 @@ and joins through `solana/`.
 `npm run rehearse:add-chain` rehearses it on forks from the LIVE state file
 (it needs a deployed `deployments/mainnet.json`).
 
-## 11. Measured on forks of the five chains (⟨DATE⟩, fork blocks in the report)
+## 11. Measured on forks of the five chains (2026-11-14, v7.2 first round)
 
-⟨MEASUREMENTS⟩
+Real EndpointV2 and our verifier set on every pathway; "exec" is what the
+executor's gas limit must cover where the message lands (the relay's
+`gasUsed` minus the intrinsic cost), max over the rehearsal.
+
+**Where each op lands, against what its sender buys:**
+
+| Op → where | Exec gas | Bought | Margin |
+|---|---|---|---|
+| SPAWN → hub, worst admitted (64/16/1024 bytes + dev buy), 4 remote chains, ceilings on all four | **4,515,748** | 5,200,000 (`hubGasFor(4,1)` = 5,256,000 after this run) | +15% / +16% |
+| … a ceiling on Ethereum only, under it (4 SYNCs + 1 quote) | 4,249,915 | | +22% |
+| … Ethereum over its ceiling (3 SYNCs + 1 quote) — the launch configuration | 4,041,216 | | +29% |
+| … no ceiling anywhere (4 SYNCs) | 4,170,593 | | |
+| SPAWN → hub, typical (short strings, no dev buy) | 2,933,332 | | |
+| BUY / SELL / PULL_FEES → hub (each sends one reply) | 587,414 / 538,563 / 606,939 | 5,200,000 | ×8 |
+| CLAIM → hub | 491,576 | | |
+| OPEN → hub (one quote, one SYNC send) | 546,926 | | |
+| MOVE → hub (BNB Chain → Base, forwarded by the loopback) | 118,546 | | |
+| SYNC → every spoke (a replica deploy), worst strings | **772,732** | 1,200,000 (Ethereum: 1,000,000) | +55% (+29%) |
+| DELIVER → spoke | 159,478 | same | ×7 |
+| PAYOUT → spoke (USDC / USDT) | 110,133 / 52,420 | same | ×10 |
+| FEE_DROP → spoke | 127,177 | same | ×9 |
+
+⇒ `hubGasFor`: worst spawn ≈ 3.34M + 0.209M per remote chain + 0.089M per
+ceiling quote (the mock suite's 4.95M / 4.99M were pessimistic: its send
+costs 0.52M, a real one 0.21–0.28M); the profile rounds it to 3.40M + 0.22M
++ 0.10M and adds 20%. The per-op figures above are the `opGas` table in the
+profile — used only once the adapter has `setGasForOp` (contract round 2).
+
+**The pad's `SYNC_GAS_FLOOR` (100,000), measured.** A held spawn (no dev
+buy, ceilings on all four remote chains: 4 real quotes + 4 real sends, then
+only an event) and a held open from Ethereum (1 quote + 1 send) were
+delivered under `debug_traceCall` (callTracer) at every gas from far below
+to just above the least that delivers them, in 5,000-gas steps:
+
+| | Spawn | Open |
+|---|---|---|
+| A real send, gas used | 0.21–0.28M remote; 0.77M the hub chain's own replica (loopback) | 0.25M |
+| A real quote | 0.12–0.23M (the first one cold) | 0.21M |
+| Call depth below the pad | **7** (adapter, endpoint, send library, executor / DVN, fee lib, price feed…) | 7 |
+| Least gas that delivers it | 4,292,443 | 543,798 |
+| Deliveries traced / starved a send or quote / succeeded while one failed | 829 / 485 / **0** | 79 / 69 / **0** |
+| Most gas left behind a STARVED call | **≈ 34,300** (the 0.77M local replica send) | ≈ 9,900 (a quote) |
+| Margin under the 100,000 floor | **×2.9** | ×10 |
+
+Every starved run reverted `PAD: gas`; no run skipped a chain by
+starvation. The thin end is the hub chain's OWN replica SYNC — a local call
+that deploys a contract, 0.77M — not a LayerZero send: what a starved call
+leaves grows with the gas it was given, about (depth/64) of it, so a call
+needing ~2.3M would reach the floor. The remote sends and quotes (≤ 0.28M)
+leave ≤ 10–15k.
+
+**Prices of our verifier set at the fork block (ETH):** worst SYNC from Base
+to Optimism 0.000127, Arbitrum 0.000168, BNB Chain 0.000154, **Ethereum
+0.00104**. An Ethereum round trip for its canary (open, buy, sell, pull, at
+the fork's gas price) cost about 0.0108 ETH; the BNB canary's messages
+0.0013 BNB each.
+
+**Deploy and hand-over:** launch.sh ≈ 3.5 min and finish.sh ≈ 0.7 min on the
+forks; every one of the 30 messages of the canaries executed.
 
 ## What is proven and what is not
 
-⟨PROVEN⟩
+**Proven on forks of the five chains (`npm run rehearse`, 2026-11-14):**
+the two owner commands end to end as the real deployer (impersonated):
+preflight, deploy ×5, the v7.2 wiring, our verifier set on both ends of all
+eight pathway directions (pinned libraries, read back, cross-checked), the
+prices, every canary — the hub's local one with the `*Min` proof, a round
+trip from each of the four spokes on ONE token over the real endpoints (BNB
+in USDT with a claim moved to Base in USDC; Ethereum skipped by its launch
+ceiling and opened from Ethereum) —, status, the hand-over to a 48h timelock
+on every chain (admins, operators, guardians, LayerZero delegates read back),
+the per-chain launch caps, the manifest. In process (`test/tooling.test.js`):
+the same five-chain, two-dollar shape over the mock endpoint, the request
+rule enforced and its violations refused (a ceiling above what requests
+prepay, an open that prepays nothing, the USDT vault as a CCTP peer), an
+unaffordable Ethereum canary that sends nothing.
+
+**Not proven anywhere yet:**
+
+- DVNs actually signing any packet of ours (the relay calls `verify` as the
+  receive library); the executor's own delivery of the value (simulated with
+  its exact gas and value);
+- anything live on BNB Chain or Ethereum under v7.2; the first `launch.sh` is
+  the first live transaction (canary caps, the deployer's own few dollars);
+- a CCTP rebalance arriving (`relay-cctp.js` has never run against a real
+  burn); LayerZero's retry of a delivery that failed;
+- the contract round 2: cross-chain `*Min` (detected and used by the canary
+  when present), `setGasForOp` (the seam, assumed name), and its gas figures —
+  the rehearsal must be re-run on it (§3) before the hold is lifted;
+- prices under stress: the ceilings follow tune-fees runs, not the market —
+  between two runs an L1 spike changes what launches reach Ethereum (the pad
+  checks live), but not what a request prepays.

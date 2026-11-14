@@ -433,10 +433,8 @@ async function floorSweep({ relay, url, item, PAD, hub, endpoint, expectSends, l
   const syncFailedTopic = PAD.getEvent('SyncFailed').topicHash
   const padAddr = hub.pad.toLowerCase()
   const adapterAddr = hub.adapter.toLowerCase()
-  const sendSel = PAD.getFunction ? null : null
   const LZM_SEND = ethers.id('send(uint32,bytes32,bytes,uint256)').slice(0, 10)
   const LZM_QUOTE = ethers.id('quote(uint32,bytes32,bytes,uint256)').slice(0, 10)
-  void sendSel
 
   const analyse = (t) => {
     const frames = flatten(t)
@@ -499,7 +497,8 @@ async function floorSweep({ relay, url, item, PAD, hub, endpoint, expectSends, l
   let maxLeft = 0n
   let maxLeftAt
   let runs = 0
-  for (let gas = gMin - span > 200_000n ? gMin - span : 200_000n; gas <= gMin + 50_000n; gas += step) {
+  const from = gMin - span > 200_000n ? gMin - span : 200_000n
+  for (let gas = from; gas <= gMin + 50_000n; gas += step) {
     runs += 1
     const a = analyse(await trace(gas))
     const failedKids = [...a.sends, ...a.quotes].filter((f) => f.error)
@@ -521,7 +520,7 @@ async function floorSweep({ relay, url, item, PAD, hub, endpoint, expectSends, l
   }
   const margin = maxLeft > 0n ? Number(100_000n * 1000n / maxLeft) / 1000 : Infinity
   console.log(
-    `  ${label}: ${runs} deliveries traced from ${gMin - span} to ${gMin + 50_000n} gas, step ${step}: ${starved} starved a send/quote ` +
+    `  ${label}: ${runs} deliveries traced from ${from} to ${gMin + 50_000n} gas, step ${step}: ${starved} starved a send/quote ` +
       `(all reverted), ${holes} hole(s). Most gas left behind a starved call ≈ ${maxLeft} — the floor is 100,000: margin ×${margin}`,
   )
   return { sendGas, quoteGas, depth, gMin: String(gMin), runs, starved, holes, maxLeft: String(maxLeft), maxLeftAt, margin, analytical: { sixtyFourthsBound: String((BigInt(Math.max(...sendGas)) * BigInt(depth)) / 64n) } }

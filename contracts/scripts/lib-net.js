@@ -627,7 +627,15 @@ async function setMoveRoutes(ctx, gateway, adapter, tradeLegs) {
     if (net === netKey || !all[net]?.gateway) continue
     let legs = Math.max(1, tradeLegs)
     if (c.role === 'spoke' && pad && unit > 0n) {
-      const cap = BigInt(await pad.requestCap(c.label))
+      let cap
+      try {
+        cap = BigInt(await pad.requestCap(c.label))
+      } catch (e) {
+        // the hub cannot be read: the route stays CLOSED (a move there would
+        // be refused at the gateway) — the next run, or tune-fees.js, opens it
+        ctx.log(`  (moves toward ${net} left closed: the hub's requestCap could not be read — ${e.shortMessage ?? e.message})`)
+        continue
+      }
       legs = Math.max(legs, Number(ceilDiv(cap, unit)))
     }
     legs = Math.min(legs, 4096)
@@ -652,9 +660,17 @@ async function setRequestCaps(ctx, pad) {
     return
   }
   const ready = Object.keys(nets).filter((n) => n === profile.hub || (all[n]?.gateway && all[n]?.ready))
-  const solv = await requestSolvency({
-    profile, all, providers: { ...ctx.providers, [netKey]: signer.provider }, quotes: false, only: ready,
-  })
+  let solv
+  try {
+    solv = await requestSolvency({
+      profile, all, providers: { ...ctx.providers, [netKey]: signer.provider }, quotes: false, only: ready,
+    })
+  } catch (e) {
+    // a chain whose gateway cannot be read: no ceiling is set (0 = closed to
+    // requests — the safe side); tune-fees.js sets them once every chain answers
+    ctx.log(`  (request ceilings not set: a chain could not be read — ${e.shortMessage ?? e.message}; tune-fees.js sets them)`)
+    return
+  }
   for (const r of solv.rows) {
     if (r.min === 0n) continue
     await ensure(ctx, {

@@ -95,7 +95,7 @@ function opGasPlan(profile, netKey, dstNet, spawnGas) {
  * chain D, `requestCap[D]` = the smallest prepay of any open from D or move
  * toward D, read from every chain — the rule status.js verifies.
  *
- * opts: { profile, netKey, signer, apply?, marginPct?, tolerancePct?, providers?, stateFile?, log? }
+ * opts: { profile, netKey, signer, apply?, marginPct?, tolerancePct?, providers?, stateFile?, requestCaps?, log? }
  */
 async function tuneFees(opts) {
   const { profile, netKey, signer, log = console.log } = opts
@@ -332,7 +332,9 @@ async function tuneFees(opts) {
 
   // ── the hub, LAST: requestCap[D] = the smallest prepay toward D, read from
   // every chain after this run's own changes ──
-  if (isHub) {
+  // (`requestCaps: false` skips this phase — the single-fork suites, whose
+  // spokes are stand-ins with no contract to read)
+  if (isHub && opts.requestCaps !== false) {
     const P = { ...opts.providers, [netKey]: signer.provider }
     const legs = await readLegs({ profile, all, providers: P })
     if (!out.applied && legs[netKey]) {

@@ -64,7 +64,9 @@ run('Optimism mainnet fork — a spoke over the real endpoint and real USDC', fu
     report.deployTxs = first.gas.txs
     const again = await deployNet({ profile, netKey: 'optimism', signer: deployer, dry: false, log: h.quiet })
     expect(again.gas.txs).to.equal(0)
-    expect(again.check.soft).to.deep.equal([])
+    // the hub and the sibling are stand-ins with no contract: the move routes
+    // toward the sibling (which read the hub's requestCap) stay closed here
+    expect(again.check.soft.filter((r) => !/moveLegs/.test(r.what))).to.deep.equal([])
 
     S = state().optimism
     expect(S.ready).to.equal(true) // only now may the hub wire this spoke

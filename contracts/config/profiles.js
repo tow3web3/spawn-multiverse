@@ -245,6 +245,18 @@ const mainnet = {
   // see hubGasFor) and the spoke-bound default (a SYNC deploys a replica).
   gasToHub: 5_200_000n,
   gasToSpoke: 1_200_000n,
+  /**
+   * SEAM (contract round 2): executor gas per destination AND op, set by
+   * tune-fees.js only if the adapter has `setGasForOp` (scripts/lib-ops.js).
+   * Measured on the five forks (exec gas where the op lands, max seen) with
+   * ~30%+ on top. Hub-bound SPAWN (op 1) uses hubGasFor.
+   *   hub:   BUY 0.59M · SELL 0.54M · CLAIM 0.49M · PULL_FEES 0.61M · OPEN 0.55M
+   *   spoke: SYNC 0.773M (worst strings) · DELIVER 0.16M · PAYOUT 0.11M · FEE_DROP 0.114M
+   */
+  opGas: {
+    toHub: { 1: 0, 2: 800_000, 3: 750_000, 4: 700_000, 5: 800_000, 6: 750_000, 7: 750_000 },
+    toSpoke: { 10: 1_000_000, 11: 250_000, 12: 200_000, 13: 200_000 },
+  },
   // the hub tank is a buffer between prepaid reply budgets and reply fees;
   // spokes need none (their users pay each send in full)
   tank: { mode: 'fixed', hub: eth('0.003'), spoke: 0n },
@@ -412,19 +424,21 @@ function activeNets(profile) {
 /**
  * The executor gas a spoke buys for a hub-bound message — sized for the
  * worst SPAWN the gateway admits (64/16/1024-byte strings, a dev buy),
- * which sends one SYNC to every remote chain, quotes first every chain that
- * has a launch ceiling, and delivers the dev bag.
+ * which deploys the token and the hub chain's own replica, sends one SYNC
+ * to every remote chain, quotes first every chain that has a launch
+ * ceiling, and delivers the dev bag.
  *
  * Measured against the REAL EndpointV2 on forks of the five mainnet chains
- * (scripts/fork-rehearsal.js, the "gas" phase; docs/RUNBOOK.md):
- *   worst spawn ≈ 2.40M + 0.40M per remote chain + 0.06M per ceiling quote
- * (the real send with our DVN set, the executor and the fee walk measured
- * 0.33–0.40M on Base). +20% on top, and never below the profile's
+ * (scripts/fork-rehearsal.js, "measurements", 2026-11-14 — our verifier set):
+ *   worst spawn, 4 remote chains:  no ceiling 4.17M · a ceiling on Ethereum
+ *   (under it) 4.25M · ceilings on all four 4.52M · Ethereum skipped 4.04M
+ *   ⇒ ≈ 3.34M + 0.209M per remote chain + 0.089M per ceiling quote
+ * Rounded up (3.40M + 0.22M + 0.10M) and +20%, never below the profile's
  * `gasToHub`. A spawn that runs out of gas on the hub is a stuck message —
  * adding a chain must raise this on EVERY spoke adapter (tune-fees.js does).
  */
 function hubGasFor(profile, remoteSpokes, ceilings = 0) {
-  const worst = 2_400_000n + 400_000n * BigInt(Math.max(0, remoteSpokes)) + 60_000n * BigInt(Math.max(0, ceilings))
+  const worst = 3_400_000n + 220_000n * BigInt(Math.max(0, remoteSpokes)) + 100_000n * BigInt(Math.max(0, ceilings))
   const need = (worst * 120n) / 100n
   return need > profile.gasToHub ? need : profile.gasToHub
 }
