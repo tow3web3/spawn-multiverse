@@ -362,7 +362,7 @@ impl<'info> ClaimRewards<'info> {
             recipient_usdc: &recipient_usdc,
             token_program: &token_program,
         };
-        let paid = util::pay_usdc(store, &accounts, &user_key, Some(&mut ctx.accounts.user_account), owed)?;
+        let paid = util::pay_usdc(store, &accounts, &user_key, &mut ctx.accounts.user_account, owed)?;
         let (usdc, claim) = match paid {
             Paid::Usdc(n) => (n, 0),
             Paid::Claim(n) => (0, n),

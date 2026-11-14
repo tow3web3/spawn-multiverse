@@ -8,11 +8,15 @@ import { AddressLookupTableAccount, PublicKey, TransactionInstruction, Versioned
 import { LOCAL_COMPUTE_UNITS, PROGRAM_ID, SEND_COMPUTE_UNITS } from './constants'
 import { readUintLE } from './bytes'
 import {
+  CctpPeer,
+  MoveRoute,
   Position,
   Replica,
   Store,
   UserAccount,
+  decodeCctpPeer,
   decodeLzReceiveTypesAccounts,
+  decodeMoveRoute,
   decodePeerConfig,
   decodePosition,
   decodeReplica,
@@ -23,6 +27,7 @@ import {
 import { SendPath, resolveSendPath } from './layerzero'
 import {
   BuyParams,
+  MoveParams,
   SENDS,
   SellParams,
   SendContext,
@@ -39,9 +44,14 @@ import {
   unstakeIx,
 } from './instructions'
 import { GatewayPdas, ata } from './pda'
-import { GatewayRpc, getLookupTable } from './rpc'
+import { AccountData, GatewayRpc, getLookupTable } from './rpc'
 import { assembleV0, txSize } from './transaction'
 import { SpawnMsg, outboundMessage } from './wire'
+
+/** Sizes of the two accounts a SYNC creates (state.rs `Replica::SIZE`, an
+ * SPL mint). */
+export const REPLICA_BYTES = 201
+export const MINT_BYTES = 82
 
 export interface ClientOptions {
   programId?: PublicKey
@@ -61,6 +71,10 @@ export interface BuiltSend {
   quotedFee: bigint
   /** The ceiling written into the instruction (`max_native_fee`). */
   maxNativeFee: bigint
+  /** Reply legs the send prepays, and what they amount to in hub-native
+   * wei — the value in the executor option and in the envelope. */
+  legs: number
+  value: bigint
   /** The enveloped message the program will put on the wire. */
   message: Uint8Array
   payload: SpawnMsg
@@ -122,16 +136,24 @@ export class GatewayClient {
 
   /* --------------------------------- reads -------------------------------- */
 
+  /** A program account at `key`, or null: an address that only holds
+   * lamports is not one yet (an opened token's replica address holds its
+   * rent until the hub's SYNC arrives; anyone can pre-fund any address). */
+  private async own(key: PublicKey): Promise<AccountData | null> {
+    const [a] = await this.rpc.getAccounts([key])
+    return a && a.owner.equals(this.pdas.programId) && a.data.length > 0 ? a : null
+  }
+
   async replica(hubToken: Uint8Array): Promise<Replica | null> {
-    const [a] = await this.rpc.getAccounts([this.pdas.replica(hubToken)])
+    const a = await this.own(this.pdas.replica(hubToken))
     return a ? decodeReplica(a.data) : null
   }
   async userAccount(owner: PublicKey): Promise<UserAccount | null> {
-    const [a] = await this.rpc.getAccounts([this.pdas.user(owner)])
+    const a = await this.own(this.pdas.user(owner))
     return a ? decodeUserAccount(a.data) : null
   }
   async position(hubToken: Uint8Array, owner: PublicKey): Promise<Position | null> {
-    const [a] = await this.rpc.getAccounts([this.pdas.position(hubToken, owner)])
+    const a = await this.own(this.pdas.position(hubToken, owner))
     return a ? decodePosition(a.data) : null
   }
   /** Balance of `owner`'s ATA for `mint` (0 if it does not exist). */
@@ -143,6 +165,21 @@ export class GatewayClient {
     const [a] = await this.rpc.getAccounts([this.store.vault])
     return a ? decodeTokenAccount(a.data).amount : 0n
   }
+  /** The price of moves toward `dstChain`, or null when the operator never
+   * set one (the route is closed). */
+  async moveRoute(dstChain: number): Promise<MoveRoute | null> {
+    const a = await this.own(this.pdas.moveRoute(dstChain))
+    return a ? decodeMoveRoute(a.data) : null
+  }
+  async cctpPeer(label: number): Promise<CctpPeer | null> {
+    const a = await this.own(this.pdas.cctpPeer(label))
+    return a ? decodeCctpPeer(a.data) : null
+  }
+  /** Lamports in the tank (it pays the rent of what a hub message creates). */
+  async tankBalance(): Promise<bigint> {
+    const [a] = await this.rpc.getAccounts([this.pdas.gasTank])
+    return BigInt(a?.lamports ?? 0)
+  }
 
   /* --------------------------------- quote -------------------------------- */
 
@@ -150,7 +187,8 @@ export class GatewayClient {
    * same send list. `payer` must be an existing account on the cluster (it
    * pays the simulation; nothing is charged). */
   async quote<P>(spec: SendSpec<P>, params: P, payer: PublicKey): Promise<bigint> {
-    const ix = quoteSendIx(this.context, spec.quote(params), payer)
+    const route = spec.routeOf ? await this.routeFor(spec, params) : null
+    const ix = quoteSendIx(this.context, spec.quote(params), payer, route ? spec.routeOf!(this.context, params) : null)
     const tx = assembleV0({
       payer,
       instructions: [ix],
@@ -165,11 +203,21 @@ export class GatewayClient {
     return readUintLE(r.returnData, 0, 8)
   }
 
+  /** The move route a spec is priced by, if it exists on chain. */
+  private async routeFor<P>(spec: SendSpec<P>, params: P): Promise<MoveRoute | null> {
+    if (!spec.routeOf) return null
+    const a = await this.own(spec.routeOf(this.context, params))
+    return a ? decodeMoveRoute(a.data) : null
+  }
+
   /* --------------------------------- build -------------------------------- */
 
   /** Any send, by spec: quote → ceiling → v0 transaction. */
   async buildSend<P>(spec: SendSpec<P>, user: PublicKey, params: P, o: SendOptions = {}): Promise<BuiltSend> {
     spec.check?.(params)
+    const legs = spec.legs(this.store, params, await this.routeFor(spec, params))
+    if (spec.routeOf && legs === 0) throw new Error('this destination has no price: the route is closed (the program refuses RouteClosed)')
+    const value = this.store.returnUnit * BigInt(legs)
     let quotedFee = 0n
     let maxNativeFee = o.maxNativeFee
     if (maxNativeFee === undefined) {
@@ -190,8 +238,10 @@ export class GatewayClient {
       tx,
       quotedFee,
       maxNativeFee,
+      legs,
+      value,
       payload,
-      message: outboundMessage(this.pdas.store, this.store.hubPad, payload),
+      message: outboundMessage(this.pdas.store, this.store.hubPad, payload, value),
       size: txSize(tx),
     }
   }
@@ -210,6 +260,27 @@ export class GatewayClient {
   }
   pullFees(user: PublicKey, p: TokenParams, o?: SendOptions) {
     return this.buildSend(SENDS.pull_fees, user, p, o)
+  }
+  /** v7.2: ask the hub for this chain's replica of a token it never got.
+   * The caller also pays the replica's rent (see `openRent`). */
+  openToken(user: PublicKey, p: TokenParams, o?: SendOptions) {
+    return this.buildSend(SENDS.open_token, user, p, o)
+  }
+  /** v7.2: send `units` of the caller's claim to `to` on another chain. */
+  moveClaim(user: PublicKey, p: MoveParams, o?: SendOptions) {
+    return this.buildSend(SENDS.move_claim, user, p, o)
+  }
+  /** Lamports an open still has to leave at the replica's two addresses
+   * (0 once someone did): the rent of the entry and of its mint, at the
+   * cluster's rate. The opener pays it on top of the message. */
+  async openRent(hubToken: Uint8Array): Promise<bigint> {
+    const [r, m] = await this.rpc.getAccounts([this.pdas.replica(hubToken), this.pdas.mint(hubToken)])
+    const need = async (have: number | undefined, bytes: number) => {
+      const min = await this.rpc.rent(bytes)
+      const h = BigInt(have ?? 0)
+      return h >= min ? 0n : min - h
+    }
+    return (await need(r?.lamports, REPLICA_BYTES)) + (await need(m?.lamports, MINT_BYTES))
   }
 
   /** A local (non-send) transaction. */

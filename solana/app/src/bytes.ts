@@ -101,6 +101,9 @@ export class BorshWriter {
   bool(v: boolean): this {
     return this.u8(v ? 1 : 0)
   }
+  u16(v: number): this {
+    return this.raw(uintLE(BigInt(v), 2))
+  }
   u32(v: number | bigint): this {
     return this.raw(uintLE(BigInt(v), 4))
   }

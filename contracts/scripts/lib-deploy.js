@@ -93,6 +93,18 @@ async function setV72Legs(gateway, { local, labels = [], self, moveLegsFor = () 
   }
 }
 
+/**
+ * v7.2 — the hub's ceiling for a message someone asked for toward `label`,
+ * the same for both kinds the pad reads: the SYNC of an open (op 10) and the
+ * PAYOUT a move forwards (op 12). A deployment that buys executor gas per
+ * kind of message prices the two apart; a test world charges one fee for any
+ * message.
+ */
+async function setRequestCaps(pad, label, cap) {
+  await (await pad.setRequestCap(label, 10, cap)).wait()
+  await (await pad.setRequestCap(label, 12, cap)).wait()
+}
+
 /** Every contract of a deployed world that answers to the three Roles. */
 function roleContracts(world) {
   const list = [world.pad, world.hubUsd, world.messenger ?? world.hubMessenger]
@@ -170,7 +182,7 @@ async function deployWorld({ autoDrop = true, venueName = 'InternalCurveVenue', 
       // each; and the hub hands on any request toward this chain that costs
       // no more than a whole coin (the simulated fee is 0, or a test's)
       await setV72Legs(gateway, { local: false, labels: CHAINS.map((x) => x.label), self: c.label })
-      await (await pad.setRequestCap(c.label, ethers.parseEther('1'))).wait()
+      await setRequestCaps(pad, c.label, ethers.parseEther('1'))
     }
     chains.push({ ...c, usdc, cctp, usd, gateway, dist })
   }
@@ -284,7 +296,7 @@ async function deployWorldAsync({ sponsored = true, requests = false } = {}) {
     // ceiling for a request toward a remote chain is what it prepaid (the
     // hub chain's own gateway needs none: its leg is free).
     await setV72Legs(gateway, { local, labels: requests ? CHAINS.map((x) => x.label) : [], self: c.label })
-    if (requests && !local) await (await pad.setRequestCap(c.label, RETURN_UNIT)).wait()
+    if (requests && !local) await setRequestCaps(pad, c.label, RETURN_UNIT)
     chains.push({ ...c, usdc, cctp, usd, gateway, messenger, dist, local })
   }
 
@@ -300,6 +312,7 @@ module.exports = {
   deployWorldAsync,
   deployDistributor,
   setV72Legs,
+  setRequestCaps,
   assignRoles,
   roleContracts,
   CHAINS,

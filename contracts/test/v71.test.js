@@ -33,9 +33,13 @@ async function as(address) {
 /* Wire payloads, as the pad and the gateways build them. */
 const op = (code, types, values) => coder.encode(['uint8', 'bytes'], [code, coder.encode(types, values)])
 const payout = (to, amount) => op(12, ['bytes32', 'uint256'], [b32(to), amount])
-const buy = (token, buyer, usdIn) => op(2, ['bytes32', 'bytes32', 'uint256'], [token, buyer, usdIn])
-/** The inter-adapter envelope: (source contract, local target, payload). */
-const envelope = (srcSender, dst, payload) => coder.encode(['bytes32', 'bytes32', 'bytes'], [srcSender, b32(dst), payload])
+const buy = (token, buyer, usdIn) => op(2, ['bytes32', 'bytes32', 'uint256', 'uint256'], [token, buyer, usdIn, 0n])
+/** The inter-adapter envelope: (source contract, local target, payload, the
+ * reply budget it must arrive with — v7.2). */
+const envelope = (srcSender, dst, payload, value = 0n) =>
+  coder.encode(['bytes32', 'bytes32', 'bytes', 'uint256'], [srcSender, b32(dst), payload, value])
+/** The same before v7.2 — what the frozen v7.0 adapter reads. */
+const envelopeV70 = (srcSender, dst, payload) => coder.encode(['bytes32', 'bytes32', 'bytes'], [srcSender, b32(dst), payload])
 
 /**
  * A SINGLE-CHAIN universe built from the real contracts: the hub (pad, curve,
@@ -201,7 +205,8 @@ describe('Protocol v7.1', () => {
       await (await usdc.mint(user.address, U(1_000))).wait()
       await (await usdc.connect(user).approve(usd.target, ethers.MaxUint256)).wait()
       await (await usd.connect(user).wrap(U(1_000))).wait()
-      const forged = envelope(b32(PAD), gateway.target, payout(stranger.address, E(1_000)))
+      const make = adapterName === 'LayerZeroOmniMessengerV70' ? envelopeV70 : envelope
+      const forged = make(b32(PAD), gateway.target, payout(stranger.address, E(1_000)))
       return { endpoint, adapter, usdc, usd, gateway, forged }
     }
 
@@ -697,9 +702,13 @@ describe('Protocol v7.1', () => {
     })
   })
 
-  describe('*Min on a REMOTE chain: the reply comes minutes later, so the call can only revert — atomically', () => {
+  // v7.1 could only protect a trade where the hub answers in the same transaction: on a remote
+  // chain these three calls always reverted. Since v7.2 the minimum rides the wire and the hub
+  // enforces it (test/v72-wire.test.js has the whole story); what is pinned here is the change
+  // of behaviour itself, on the six-label world this file has always used.
+  describe('*Min on a REMOTE chain (v7.2): the call goes through, and the HUB fills at the minimum or sends everything home', () => {
     for (const sponsored of [false, true]) {
-      it(`nothing is pulled, burned, queued or paid (${sponsored ? 'sponsored gateway' : 'user-paid messages'})`, async () => {
+      it(`an impossible minimum bounces whole, the exact one fills (${sponsored ? 'sponsored gateway' : 'user-paid messages'})`, async () => {
         const w = await deployWorldAsync({ sponsored })
         const opc = w.chains[5] // optimism: a remote chain
         const value = async (q) => (sponsored ? 0n : await q)
@@ -720,24 +729,53 @@ describe('Protocol v7.1', () => {
         expect(bag).to.be.gt(0n)
 
         const snapshot = async () => ({
-          usdc: await opc.usdc.balanceOf(user.address),
-          ousd: await opc.usd.balanceOf(user.address),
+          worth: await worth(opc, user),
           bag: await rep.balanceOf(user.address),
-          vault: await opc.usdc.balanceOf(opc.usd.target),
           books: await w.hubUsd.totalSupply(),
-          sent: await w.endpoint.packetsSent(),
+          vBase: (await w.pad.curves(token)).vBase,
           queued: await w.endpoint.pending(),
-          spokeTank: await bal(opc.messenger),
-          hubTank: await bal(w.hubMessenger),
         })
         const before = await snapshot()
+        const whole = E(1_000_000_000) // more than any trade can give
         const fee = await value(opc.gateway.quoteBuy())
-        await expect(opc.gateway.connect(user).buyTokenUsdcMin(token, U(100), 1, { value: fee })).to.be.revertedWith('GW: min out')
-        await expect(opc.gateway.connect(user).buyTokenMin(token, E(100), 1, { value: fee })).to.be.revertedWith('GW: min out')
-        await expect(
-          opc.gateway.connect(user).sellTokenMin(token, bag, 1, { value: await value(opc.gateway.quoteSell()) }),
-        ).to.be.revertedWith('GW: min out')
+
+        // the calls no longer revert here: the message leaves with the minimum in it…
+        await (await opc.gateway.connect(user).buyTokenUsdcMin(token, U(100), whole, { value: fee })).wait()
+        expect((await worth(opc, user)) - before.worth).to.equal(-E(100)) // …and the dollars with it
+        // …and the hub refuses the trade whole (reason 6: the market would not fill it)
+        await expect(w.endpoint.deliverNext())
+          .to.emit(w.pad, 'Refused')
+          .withArgs(2, 6, b32(token), b32(user.address), E(100), 6)
+        await w.deliverAll()
+        expect(await snapshot()).to.deep.equal(before) // every dollar is home
+
+        await (await opc.gateway.connect(user).buyTokenMin(token, E(100), whole, { value: fee })).wait()
+        await w.deliverAll()
         expect(await snapshot()).to.deep.equal(before)
+
+        await (
+          await opc.gateway.connect(user).sellTokenMin(token, bag, whole, { value: await value(opc.gateway.quoteSell()) })
+        ).wait()
+        expect(await rep.balanceOf(user.address)).to.equal(0n) // burned here…
+        await expect(w.endpoint.deliverNext())
+          .to.emit(w.pad, 'Refused')
+          .withArgs(3, 6, b32(token), b32(user.address), bag, 6)
+        await w.deliverAll()
+        expect(await snapshot()).to.deep.equal(before) // …and delivered back
+
+        // a minimum the curve does meet: filled, to the wei
+        const out = await peek(async () => {
+          await (await opc.gateway.connect(user).buyTokenUsdc(token, U(100), { value: fee })).wait()
+          await w.deliverAll()
+          return (await rep.balanceOf(user.address)) - bag
+        })
+        await (await opc.gateway.connect(user).buyTokenUsdcMin(token, U(100), out, { value: fee })).wait()
+        await w.deliverAll()
+        expect((await rep.balanceOf(user.address)) - bag).to.equal(out)
+        // zero is still not a minimum, and nothing leaves for a token this chain does not have
+        await expect(opc.gateway.connect(user).buyTokenUsdcMin(token, U(100), 0, { value: fee })).to.be.revertedWith('GW: zero min')
+        await expect(opc.gateway.connect(user).sellTokenMin(token, bag, 0, { value: fee })).to.be.revertedWith('GW: zero min')
+        await expect(opc.gateway.connect(user).buyTokenUsdcMin(stranger.address, U(100), 1, { value: fee })).to.be.revertedWith('GW: unknown token')
         const b = await backing(w)
         expect(b.supply).to.equal(b.usdc)
       })

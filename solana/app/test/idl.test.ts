@@ -21,6 +21,8 @@ import {
   bytesToHex,
   claimParkedIx,
   claimRewardsIx,
+  decodeCctpPeer,
+  decodeMoveRoute,
   decodePosition,
   decodeReplica,
   decodeStore,
@@ -30,9 +32,13 @@ import {
   initVaultIx,
   openUserAccountIx,
   quoteSendIx,
+  rebalanceIx,
   recoverTankIx,
   redeemClaimIx,
+  setCctpPeerIx,
+  setMoveLegsIx,
   setPeerConfigIx,
+  setReceiveTableIx,
   stakeIx,
   toBytes32,
   unstakeIx,
@@ -76,7 +82,7 @@ describe('builders = the IDL (Anchor’s own coder as the reference)', () => {
     }
   })
 
-  it('the five sends: named accounts, then the 38-account LayerZero list', () => {
+  it('the seven sends: named accounts, then the 38-account LayerZero list', () => {
     const path = {
       oapp: pdas.store,
       dstEid: 30184,
@@ -95,14 +101,19 @@ describe('builders = the IDL (Anchor’s own coder as the reference)', () => {
       check('spawn_token', buildSendIx(SENDS.spawn_token, sc, user, { name: 'Né', symbol: 'S', metaUri: 'ipfs://x', devBuyUsdc: 5n, feeMode: 2 }, fee), {
         params: { name: 'Né', symbol: 'S', meta_uri: 'ipfs://x', dev_buy_usdc: new BN(5), fee_mode: 2, max_native_fee: new BN(123) },
       }),
-      check('buy_token', buildSendIx(SENDS.buy_token, sc, user, { hubToken: tok, usdcIn: 9n }, fee), {
-        params: { hub_token: arr(tok), usdc_in: new BN(9), max_native_fee: new BN(123) },
+      check('buy_token', buildSendIx(SENDS.buy_token, sc, user, { hubToken: tok, usdcIn: 9n, minTokensOut: 4n }, fee), {
+        params: { hub_token: arr(tok), usdc_in: new BN(9), min_tokens_out: new BN(4), max_native_fee: new BN(123) },
       }),
-      check('sell_token', buildSendIx(SENDS.sell_token, sc, user, { hubToken: tok, amount: 7n }, fee), {
-        params: { hub_token: arr(tok), amount: new BN(7), max_native_fee: new BN(123) },
+      check('sell_token', buildSendIx(SENDS.sell_token, sc, user, { hubToken: tok, amount: 7n, minUsdcOut: 3n }, fee), {
+        params: { hub_token: arr(tok), amount: new BN(7), min_usdc_out: new BN(3), max_native_fee: new BN(123) },
       }),
       check('claim_fees', buildSendIx(SENDS.claim_fees, sc, user, { hubToken: tok }, fee), { params: { hub_token: arr(tok), max_native_fee: new BN(123) } }),
       check('pull_fees', buildSendIx(SENDS.pull_fees, sc, user, { hubToken: tok }, fee), { params: { hub_token: arr(tok), max_native_fee: new BN(123) } }),
+      check('open_token', buildSendIx(SENDS.open_token, sc, user, { hubToken: tok }, fee), { params: { hub_token: arr(tok), max_native_fee: new BN(123) } }),
+      // a 20-byte recipient is an EVM address: it rides left-padded
+      check('move_claim', buildSendIx(SENDS.move_claim, sc, user, { dstChain: 4, to: tok.slice(12), units: 11n }, fee), {
+        params: { dst_chain: 4, to: arr(tok), units: new BN(11), max_native_fee: new BN(123) },
+      }),
     ]
     for (const l of lists) {
       expect(l.length).to.equal(18 + 4 * 5)
@@ -110,10 +121,21 @@ describe('builders = the IDL (Anchor’s own coder as the reference)', () => {
       expect(l[13].pubkey.equals(user) && l[13].isSigner && l[13].isWritable).to.equal(true, 'the user pays at index 13')
       expect(l[5].isWritable).to.equal(false, 'send_library_info must stay read-only')
     }
-    const q = check('quote_send', quoteSendIx(sc, { op: 1, name: 'a', symbol: 'b', metaUri: 'c', withDevBuy: true }, user), {
-      params: { op: 1, name: 'a', symbol: 'b', meta_uri: 'c', with_dev_buy: true },
+    const q = check('quote_send', quoteSendIx(sc, { op: 1, name: 'a', symbol: 'b', metaUri: 'c', withDevBuy: true, dstChain: 0 }, user), {
+      params: { op: 1, name: 'a', symbol: 'b', meta_uri: 'c', with_dev_buy: true, dst_chain: 0 },
     })
     expect(q[13].isSigner).to.equal(false, 'nothing signs a quote')
+    // a move is quoted with its destination and that destination's route
+    const qm = quoteSendIx(sc, { op: 7, name: '', symbol: '', metaUri: '', withDevBuy: false, dstChain: 4 }, user, pdas.moveRoute(4))
+    check('quote_send', qm, { params: { op: 7, name: '', symbol: '', meta_uri: '', with_dev_buy: false, dst_chain: 4 } })
+    expect(qm.keys[2].pubkey.equals(pdas.moveRoute(4))).to.equal(true)
+    expect(quoteSendIx(sc, { op: 2, name: '', symbol: '', metaUri: '', withDevBuy: false, dstChain: 0 }, user).keys[2].pubkey.equals(pdas.programId)).to.equal(
+      true,
+      'no route: the program id stands for None',
+    )
+    // the move's route account is the one of ITS destination
+    const mv = buildSendIx(SENDS.move_claim, sc, user, { dstChain: 6, to: tok, units: 1n }, fee)
+    expect(mv.keys[5].pubkey.equals(pdas.moveRoute(6))).to.equal(true)
   })
 
   it('the six user instructions', () => {
@@ -148,6 +170,26 @@ describe('builders = the IDL (Anchor’s own coder as the reference)', () => {
     check('recover_tank', recoverTankIx(pdas, a, user, 5n), { lamports: new BN(5) })
   })
 
+  it('the v7.2 settings: open legs, move legs, the executor table, CCTP peers, rebalance', () => {
+    const a = Keypair.generate().publicKey
+    check('set_open_legs', governIx.setOpenLegs(pdas, a, 2), { legs: 2 })
+    expect(() => governIx.setOpenLegs(pdas, a, 9)).to.throw(/out of bounds/)
+    check('set_move_legs', setMoveLegsIx(pdas, a, 4, 4096), { dst_chain: 4, legs: 4096 })
+    expect(() => setMoveLegsIx(pdas, a, 4, 4097)).to.throw(/out of bounds/)
+    const table = Keypair.generate().publicKey
+    const set = setReceiveTableIx(pdas, a, table)
+    check('set_receive_table', set, {})
+    expect(set.keys[3].pubkey.equals(table)).to.equal(true)
+    expect(setReceiveTableIx(pdas, a, null).keys[3].pubkey.equals(pdas.programId)).to.equal(true, 'None clears it')
+    const vault = toBytes32('0x' + 'c3'.repeat(20))
+    check('set_cctp_peer', setCctpPeerIx(pdas, a, 3, 6, vault.slice(12)), { label: 3, domain: 6, vault: arr(vault) })
+    const ev = Keypair.generate().publicKey
+    const rb = rebalanceIx(ctx, a, 3, 6, 77n, ev)
+    expect(check('rebalance', rb, { label: 3, usdc: new BN(77) }).length).to.equal(0)
+    expect(rb.keys.filter((k) => k.isSigner).map((k) => k.pubkey.toBase58())).to.deep.equal([a.toBase58(), ev.toBase58()])
+    expect(() => rebalanceIx(ctx, a, 3, 6, 0n, ev)).to.throw(/ZeroAmount/)
+  })
+
   it('the decoders read what Anchor encodes', async () => {
     const k = Keypair.generate().publicKey
     const enc = async (name: string, v: any) => new Uint8Array(await coder.accounts.encode(name, v))
@@ -156,10 +198,14 @@ describe('builders = the IDL (Anchor’s own coder as the reference)', () => {
         admin: k, pending_admin: user, operator: k, guardian: user, bump: 254, paused: true, sponsored: false,
         endpoint_program: LZ_ENDPOINT, hub_eid: 40245, hub_pad: arr(tok), usdc_mint: k, vault: user,
         deposit_cap: new BN(9), claims_total: new BN(8), pool_total: new BN(7), usd_dust_e18: new BN('123456789012345678901'),
-        gas_to_hub: new BN(4_600_000), return_unit: new BN('350000000000000'), trade_legs: 1, spawn_legs: 6,
+        gas_to_hub: new BN(4_600_000), return_unit: new BN('350000000000000'), trade_legs: 1, spawn_legs: 6, open_legs: 2,
       }),
     )
-    expect([store.hubEid, store.paused, store.depositCap, store.usdDustE18, store.returnUnit, store.spawnLegs]).to.deep.equal([40245, true, 9n, 123456789012345678901n, 350000000000000n, 6])
+    expect([store.hubEid, store.paused, store.depositCap, store.usdDustE18, store.returnUnit, store.spawnLegs, store.openLegs]).to.deep.equal([40245, true, 9n, 123456789012345678901n, 350000000000000n, 6, 2])
+    const route = decodeMoveRoute(await enc('MoveRoute', { dst_chain: 4, legs: 4096, bump: 9 }))
+    expect([route.dstChain, route.legs, route.bump]).to.deep.equal([4, 4096, 9])
+    const peer = decodeCctpPeer(await enc('CctpPeer', { label: 3, domain: 6, vault: arr(tok), bump: 7 }))
+    expect([peer.label, peer.domain, bytesToHex(peer.vault), peer.bump]).to.deep.equal([3, 6, bytesToHex(tok), 7])
     expect(store.pendingAdmin.equals(user)).to.equal(true)
     const r = decodeReplica(
       await enc('Replica', { hub_token: arr(tok), mint: k, bump: 1, name: 'NAME', symbol: 'SYM', dust_carry: new BN(5), staked_total: new BN(6), acc_per_share: new BN('77777777777777777777'), pending_fees: new BN(8) }),

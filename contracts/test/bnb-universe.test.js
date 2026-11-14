@@ -940,7 +940,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     /** A PAYOUT "from the pad" to `to`, enveloped the way the adapters do. */
     const forgedPayout = (u, to, amount) => {
       const payload = coder.encode(['uint8', 'bytes'], [12, coder.encode(['bytes32', 'uint256'], [b32(to), amount])])
-      const message = coder.encode(['bytes32', 'bytes32', 'bytes'], [b32(u.pad.target), b32(u.gateway.target), payload])
+      const message = coder.encode(['bytes32', 'bytes32', 'bytes', 'uint256'], [b32(u.pad.target), b32(u.gateway.target), payload, 0n])
       return { payload, message }
     }
     async function asEndpoint(u) {
@@ -1022,7 +1022,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       await (await u.messenger.register(stranger.address, LABEL)).wait()
       const buy = coder.encode(
         ['uint8', 'bytes'],
-        [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [ethers.ZeroHash, b32(stranger.address), E(1_000_000)])],
+        [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [ethers.ZeroHash, b32(stranger.address), E(1_000_000), 0n])],
       )
       await expect(u.messenger.connect(stranger).send(0, b32(u.pad.target), buy, 0)).to.be.revertedWith('PAD: not a gateway')
       expect(await u.dollar.balanceOf(u.usd.target)).to.equal(u.T(1_000))

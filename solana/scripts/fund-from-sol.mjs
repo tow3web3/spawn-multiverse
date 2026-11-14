@@ -72,7 +72,9 @@ const ORDERS = [
   // 'ETH' means the chain's gas coin and 'USDC' its dollar (see CHAINS.bnb)
   { chain: 'bnb', asset: 'ETH', target: 0.006 },
   { chain: 'bnb', asset: 'USDC', target: 5 },
-  { chain: 'ethereum', asset: 'ETH', target: 0.02 },
+  // 0.03: the fork rehearsal measured ~0.011 ETH for Ethereum's canary round
+  // trip (open, buy, sell, pull) on top of the deployment itself
+  { chain: 'ethereum', asset: 'ETH', target: 0.03 },
   { chain: 'ethereum', asset: 'USDC', target: 5 },
 ]
 /** What an order's asset is called on its chain. */

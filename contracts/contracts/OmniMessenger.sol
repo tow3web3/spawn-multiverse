@@ -29,6 +29,13 @@ interface IOmniMessenger {
         external
         view
         returns (uint256 nativeFee);
+
+    /// True when a message to `chain` is delivered INSIDE the sending
+    /// transaction (v7.2): the destination lives on this very chain, so
+    /// whatever it answers has already happened when `send` returns. A
+    /// gateway uses it to know whether it can check a trade's outcome
+    /// itself, or must leave that to the hub.
+    function isLocal(uint32 chain) external view returns (bool);
 }
 
 interface IOmniReceiver {
@@ -83,6 +90,12 @@ contract LocalOmniMessenger is IOmniMessenger, Roles {
 
     function quote(uint32, bytes32, bytes calldata, uint256 returnLegs) public view returns (uint256) {
         return flatFee * (1 + returnLegs);
+    }
+
+    /// Every logical chain lives on this one node: every delivery is
+    /// synchronous.
+    function isLocal(uint32) external pure returns (bool) {
+        return true;
     }
 
     function send(uint32 dstChain, bytes32 dstAddr, bytes calldata payload, uint256 returnLegs)

@@ -117,6 +117,16 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
         quoteWork = gas_;
     }
 
+    /// Price of one unit of executor gas (0 unless a test sets it). The real
+    /// fee grows with the gas the option buys; with this set, so does the
+    /// mock's — which is what makes a per-message gas limit visible in a
+    /// quote.
+    uint256 public gasPrice;
+
+    function setGasPrice(uint256 weiPerGas) external {
+        gasPrice = weiPerGas;
+    }
+
     function setSendBlocked(uint32 dstEid, bool on) external {
         sendBlocked[dstEid] = on;
     }
@@ -131,7 +141,7 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
         uint128 v;
         (gas, v) = _lzReceiveOption(p.options);
         value = v;
-        fee = mockFee + dstFee[p.dstEid] + byteFee * p.message.length + value;
+        fee = mockFee + dstFee[p.dstEid] + byteFee * p.message.length + gasPrice * gas + value;
     }
 
     function quote(MessagingParams calldata p, address) external view returns (MessagingFee memory) {
@@ -216,12 +226,26 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
     /// the executor's option is what was paid for, not what must be used.
     function deliverAtWithGas(uint256 at, uint256 gasLimit) public {
         require(at < queue.length, "ENDPOINT: empty");
+        _deliver(at, gasLimit, queue[at].value);
+    }
+
+    /// Same again for the VALUE: the real endpoint's `lzReceive` is payable
+    /// and open to all, so a packet can be delivered with any `msg.value` —
+    /// none at all, for instance, whatever its sender paid the executor to
+    /// bring. `value` comes out of what this endpoint collected in fees, or
+    /// out of what the caller attaches.
+    function deliverAtWithValue(uint256 at, uint256 value) public payable {
+        require(at < queue.length, "ENDPOINT: empty");
+        _deliver(at, queue[at].gas, value);
+    }
+
+    function _deliver(uint256 at, uint256 gasLimit, uint256 value) internal {
         Packet memory p = queue[at];
         for (uint256 i = at; i + 1 < queue.length; i++) queue[i] = queue[i + 1];
         queue.pop();
         address dst = address(uint160(uint256(p.receiver)));
         uint256 g = gasleft();
-        ILayerZeroReceiver(dst).lzReceive{gas: gasLimit, value: p.value}(
+        ILayerZeroReceiver(dst).lzReceive{gas: gasLimit, value: value}(
             Origin(p.srcEid, p.sender, p.nonce),
             keccak256(abi.encode(p.srcEid, p.dstEid, p.nonce)),
             p.message,

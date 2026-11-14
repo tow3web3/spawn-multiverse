@@ -5,7 +5,7 @@
  * retired deployment and are parameters anyway).
  */
 import { Keypair, PublicKey } from '@solana/web3.js'
-import { CLUSTERS, EID, WiringParams, hexToBytes, runWiring, toBytes32 } from '../src'
+import { CCTP_DOMAIN, CHAIN_LABEL, CLUSTERS, EID, WiringParams, hexToBytes, runWiring, toBytes32 } from '../src'
 import { World, fixtureDvn } from './harness'
 
 export const HUB_EID = EID.BASE
@@ -17,6 +17,16 @@ export const GAS_TO_HUB = 4_600_000n
 export const RETURN_UNIT = 200_000_000_000_000n
 export const SPAWN_LEGS = 3
 export const ONE = 1_000_000n
+/** What a claim moved toward each chain prepays, in reply legs (a made-up
+ * price list: an L1 is dear, the hub's own chain is one reply away). */
+export const MOVE_LEGS = [
+  { dstChain: CHAIN_LABEL.ethereum, legs: 40 },
+  { dstChain: CHAIN_LABEL.base, legs: 1 },
+  { dstChain: CHAIN_LABEL.bnb, legs: 6 },
+  { dstChain: CHAIN_LABEL.arbitrum, legs: 2 },
+]
+/** A fictitious Base `OmniUSD` as CCTP peer of the Solana vault. */
+export const BASE_VAULT = toBytes32('0x' + 'c3'.repeat(20))
 
 export function ourVerifiers() {
   return {
@@ -40,6 +50,8 @@ export function wiringParams(admin: PublicKey, o: Partial<WiringParams> = {}): W
     operator: Keypair.generate().publicKey,
     guardian: Keypair.generate().publicKey,
     fee: { gasToHub: GAS_TO_HUB, returnUnit: RETURN_UNIT, tradeLegs: 1, spawnLegs: SPAWN_LEGS },
+    moveLegs: MOVE_LEGS,
+    cctpPeers: [{ label: CHAIN_LABEL.base, domain: CCTP_DOMAIN.base, vault: BASE_VAULT }],
     depositCap: 25_000n * ONE,
     leavePaused: true,
     tankLamports: 1_000_000_000n,

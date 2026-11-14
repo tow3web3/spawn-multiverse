@@ -29,15 +29,27 @@ interface ICurveVenue {
     /// Opens the market for a freshly spawned token.
     function openMarket(address token) external;
 
+    /// ALL OR NOTHING (v7.2). Both trades take a minimum and REVERT under
+    /// it — before touching any state — so the pad's refusal path does the
+    /// rest: a buy rides home whole, a sold bag is re-delivered. The
+    /// minimum is on what THIS call returns (tokens out, gross dollars
+    /// out); 0 = none. A cross-chain order is public on its source chain
+    /// minutes before it executes here, and anyone may deliver it: without
+    /// a minimum enforced where the price is, it can be sandwiched inside
+    /// one hub-chain transaction. Every venue must enforce it.
+
     /// Executes a buy of up to `usdIn`. Returns the tokens bought, the USD
     /// actually spent (the pad refunds the remainder) and whether this buy
-    /// completed the curve — ascension.
-    function execBuy(address token, uint256 usdIn)
+    /// completed the curve — ascension. Reverts if fewer than `minOut`
+    /// tokens would be bought (a buy cut short by the end of the curve
+    /// included).
+    function execBuy(address token, uint256 usdIn, uint256 minOut)
         external
         returns (uint256 tokensOut, uint256 usdSpent, bool ascendedNow);
 
-    /// Executes a sell. Returns the USD owed to the seller.
-    function execSell(address token, uint256 tokensIn) external returns (uint256 usdOut);
+    /// Executes a sell. Returns the USD owed for it, before the pad's fee.
+    /// Reverts if that is less than `minOut`.
+    function execSell(address token, uint256 tokensIn, uint256 minOut) external returns (uint256 usdOut);
 
     function spotPrice(address token) external view returns (uint256);
 

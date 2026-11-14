@@ -1,5 +1,14 @@
 import { PublicKey } from '@solana/web3.js'
-import { ATA_PROGRAM, LZ_ENDPOINT, LZ_ULN, PROGRAM_ID, SEED, TOKEN_PROGRAM } from './constants'
+import {
+  ATA_PROGRAM,
+  CCTP_MESSAGE_TRANSMITTER_V2,
+  CCTP_TOKEN_MESSENGER_MINTER_V2,
+  LZ_ENDPOINT,
+  LZ_ULN,
+  PROGRAM_ID,
+  SEED,
+  TOKEN_PROGRAM,
+} from './constants'
 import { uintBE } from './bytes'
 
 const pda = (seeds: Uint8Array[], program: PublicKey) => PublicKey.findProgramAddressSync(seeds, program)[0]
@@ -42,6 +51,14 @@ export class GatewayPdas {
   position(hubToken: Uint8Array, owner: PublicKey): PublicKey {
     return pda([SEED.POSITION, asBytes32(hubToken), owner.toBytes()], this.programId)
   }
+  /** What a claim moved to `dstChain` prepays (`set_move_legs`). */
+  moveRoute(dstChain: number): PublicKey {
+    return pda([SEED.MOVE_ROUTE, eidBE(dstChain)], this.programId)
+  }
+  /** The peer vault of chain `label` for CCTP rebalancing (`set_cctp_peer`). */
+  cctpPeer(label: number): PublicKey {
+    return pda([SEED.CCTP_PEER, eidBE(label)], this.programId)
+  }
 }
 
 /** The classic SPL associated token account (no Token-2022 here: USDC and
@@ -60,6 +77,7 @@ export const lzPda = {
   defaultSendLibraryConfig: (eid: number) => pda([enc('SendLibraryConfig'), eidBE(eid)], LZ_ENDPOINT),
   receiveLibraryConfig: (oapp: PublicKey, eid: number) =>
     pda([enc('ReceiveLibraryConfig'), oapp.toBytes(), eidBE(eid)], LZ_ENDPOINT),
+  defaultReceiveLibraryConfig: (eid: number) => pda([enc('ReceiveLibraryConfig'), eidBE(eid)], LZ_ENDPOINT),
   messageLibInfo: (msglib: PublicKey) => pda([enc('MessageLib'), msglib.toBytes()], LZ_ENDPOINT),
   nonce: (oapp: PublicKey, eid: number, remote: Uint8Array) =>
     pda([enc('Nonce'), oapp.toBytes(), eidBE(eid), asBytes32(remote)], LZ_ENDPOINT),
@@ -77,4 +95,21 @@ export const lzPda = {
     pda([enc('ReceiveConfig'), eidBE(eid), oapp.toBytes()], uln),
   defaultReceiveConfig: (eid: number, uln: PublicKey = LZ_ULN) => pda([enc('ReceiveConfig'), eidBE(eid)], uln),
   eventAuthority: (program: PublicKey) => pda([enc('__event_authority')], program),
+}
+
+/* ------------------------------ CCTP PDAs ------------------------------ */
+
+/** Circle CCTP V2 addresses a `deposit_for_burn` needs (the seeds of
+ * circlefin/solana-cctp-contracts, checked against mainnet by
+ * tests/fetch-cctp.cjs). */
+export const cctpPda = {
+  messageTransmitter: () => pda([enc('message_transmitter')], CCTP_MESSAGE_TRANSMITTER_V2),
+  tokenMessenger: () => pda([enc('token_messenger')], CCTP_TOKEN_MESSENGER_MINTER_V2),
+  tokenMinter: () => pda([enc('token_minter')], CCTP_TOKEN_MESSENGER_MINTER_V2),
+  senderAuthority: () => pda([enc('sender_authority')], CCTP_TOKEN_MESSENGER_MINTER_V2),
+  eventAuthority: () => pda([enc('__event_authority')], CCTP_TOKEN_MESSENGER_MINTER_V2),
+  remoteTokenMessenger: (domain: number) => pda([enc('remote_token_messenger'), enc(String(domain))], CCTP_TOKEN_MESSENGER_MINTER_V2),
+  localToken: (mint: PublicKey) => pda([enc('local_token'), mint.toBytes()], CCTP_TOKEN_MESSENGER_MINTER_V2),
+  /** Exists only if Circle denylisted `owner`. */
+  denylist: (owner: PublicKey) => pda([enc('denylist_account'), owner.toBytes()], CCTP_TOKEN_MESSENGER_MINTER_V2),
 }

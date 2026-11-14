@@ -139,6 +139,7 @@ export class World {
       },
       latestBlockhash: async () => this.svm.latestBlockhash(),
       slot: async () => Number(this.slot()),
+      rent: async (bytes) => this.svm.minimumBalanceForRentExemption(BigInt(bytes)),
     }
   }
 
@@ -265,12 +266,36 @@ export class World {
     this.svm.setAccount(nk, { ...n, data: new Uint8Array(nd) })
   }
 
+  /** Circle's REAL CCTP V2 programs and mainnet state
+   * (tests/fetch-cctp.cjs), for the vault's outbound leg. */
+  loadCctp() {
+    const f = JSON.parse(fs.readFileSync(path.join(FIX, 'cctp.json'), 'utf8'))
+    for (const p of f.programs) this.svm.addProgram(new PublicKey(p.id), fs.readFileSync(path.join(FIX, p.file)))
+    for (const a of f.accounts) {
+      this.svm.setAccount(new PublicKey(a.pubkey), {
+        lamports: a.lamports,
+        data: new Uint8Array(Buffer.from(a.data_b64, 'base64')),
+        owner: new PublicKey(a.owner),
+        executable: false,
+      })
+    }
+  }
+
   /** A hub message delivered the way mainnet does it: LayerZero's REAL
    * executor program `execute` → our `lz_receive` → the real `clear`, with
    * the account list our `lz_receive_types_v2` returns, resolved by the
-   * client. `value` is what the packet bought (the hub always buys 0). */
-  async execute(hubEid: number, hubPad: Uint8Array, hubAdapter: Uint8Array, nonce: bigint, msg: SpawnMsg, value = 0n): Promise<Sent> {
-    const message = encodeEnvelope(hubPad, this.pdas.store.toBytes(), encodeMsg(msg))
+   * client. `value` is what the packet bought and `named` what its
+   * envelope says it bought (the hub always buys, and says, 0). */
+  async execute(
+    hubEid: number,
+    hubPad: Uint8Array,
+    hubAdapter: Uint8Array,
+    nonce: bigint,
+    msg: SpawnMsg,
+    value = 0n,
+    named = 0n,
+  ): Promise<Sent> {
+    const message = encodeEnvelope(hubPad, this.pdas.store.toBytes(), encodeMsg(msg), named)
     const { keccak_256 } = require('@noble/hashes/sha3')
     const guid: Uint8Array = keccak_256(concat(Buffer.from('guid'), uintBE(nonce, 8)))
     this.plantVerified(hubEid, hubAdapter, nonce, guid, message)

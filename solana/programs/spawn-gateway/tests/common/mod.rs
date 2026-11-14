@@ -23,7 +23,7 @@ use {
         signature::{Keypair, Signer},
         transaction::VersionedTransaction,
     },
-    spawn_gateway::msg_codec::{Envelope, SpawnMsg, WireAddr},
+    spawn_gateway::msg_codec::{Envelope, SpawnMsg, WireAddr, U256},
     std::path::Path,
 };
 
@@ -179,6 +179,12 @@ impl Ids {
     }
     pub fn position(&self, hub_token: &[u8; 32], owner: &Pubkey) -> Pubkey {
         pda(&[b"Pos", hub_token, owner.as_ref()], &self.program)
+    }
+    pub fn move_route(&self, dst_chain: u32) -> Pubkey {
+        pda(&[b"Move", &dst_chain.to_be_bytes()], &self.program)
+    }
+    pub fn cctp_peer(&self, label: u32) -> Pubkey {
+        pda(&[b"CctpPeer", &label.to_be_bytes()], &self.program)
     }
 }
 
@@ -350,6 +356,31 @@ impl World {
         self.govern(spawn_gateway::instruction::SetDepositCap { cap }.data(), &admin).unwrap();
     }
 
+    pub fn unpause(&mut self) {
+        let admin = self.admin.insecure_clone();
+        self.govern(spawn_gateway::instruction::Unpause {}.data(), &admin).unwrap();
+    }
+
+    pub fn set_move_legs_ix(&self, who: &Pubkey, dst_chain: u32, legs: u16) -> Instruction {
+        Instruction::new_with_bytes(
+            self.ids.program,
+            &spawn_gateway::instruction::SetMoveLegs { dst_chain, legs }.data(),
+            spawn_gateway::accounts::SetMoveLegs {
+                authority: *who,
+                store: self.ids.store,
+                route: self.ids.move_route(dst_chain),
+                system_program: SYSTEM,
+            }
+            .to_account_metas(None),
+        )
+    }
+
+    /// The operator's price for moves toward `dst_chain` (0 closes it).
+    pub fn set_move_legs(&mut self, dst_chain: u32, legs: u16) {
+        let ix = self.set_move_legs_ix(&self.admin.pubkey(), dst_chain, legs);
+        self.send(&[ix], &[]).unwrap();
+    }
+
     pub fn open_user_account(&mut self, owner: &Pubkey) {
         let ix = Instruction::new_with_bytes(
             self.ids.program,
@@ -367,28 +398,46 @@ impl World {
 
     /* ---- the wire ---- */
 
-    /// A hub message as the hub adapter sends it: the op inside the v5
-    /// envelope, the pad as protocol sender, this store as target.
+    /// A hub message as the hub adapter sends it: the op inside the
+    /// envelope, the pad as protocol sender, this store as target — and no
+    /// value: the pad prepays no reply.
     pub fn wire(&self, msg: &SpawnMsg) -> Vec<u8> {
-        Envelope { src_sender: WireAddr(hub_pad()), dst_addr: WireAddr(self.ids.store.to_bytes()), payload: msg.encode() }
-            .encode()
+        self.wire_with_value(msg, 0)
+    }
+
+    /// The same, had the hub adapter asked the executor to deliver `value`
+    /// lamports with it (what v7.2's hub never does).
+    pub fn wire_with_value(&self, msg: &SpawnMsg, value: u64) -> Vec<u8> {
+        Envelope {
+            src_sender: WireAddr(hub_pad()),
+            dst_addr: WireAddr(self.ids.store.to_bytes()),
+            payload: msg.encode(),
+            value: U256::from_u128(value as u128),
+        }
+        .encode()
     }
 
     /* ---- op account lists, exactly as lz_receive.rs documents them ---- */
 
+    /// The two accounts every hub message gets: the tank, the system program.
+    fn common_accounts(&self) -> Vec<AccountMeta> {
+        vec![AccountMeta::new(self.ids.tank, false), AccountMeta::new_readonly(SYSTEM, false)]
+    }
+
     pub fn sync_accounts(&self, hub_token: &[u8; 32]) -> Vec<AccountMeta> {
-        vec![
+        let mut v = self.common_accounts();
+        v.extend([
             AccountMeta::new(self.ids.replica(hub_token), false),
             AccountMeta::new(self.ids.mint(hub_token), false),
-            AccountMeta::new(self.ids.tank, false),
-            AccountMeta::new_readonly(SYSTEM, false),
             AccountMeta::new_readonly(TOKEN_PROGRAM, false),
-        ]
+        ]);
+        v
     }
 
     pub fn deliver_accounts(&self, hub_token: &[u8; 32], to: &Pubkey) -> Vec<AccountMeta> {
         let mint = self.ids.mint(hub_token);
-        vec![
+        let mut v = self.common_accounts();
+        v.extend([
             AccountMeta::new(self.ids.replica(hub_token), false),
             AccountMeta::new(mint, false),
             AccountMeta::new_readonly(*to, false),
@@ -398,22 +447,27 @@ impl World {
             AccountMeta::new(self.ids.vault, false),
             AccountMeta::new(ata_of(to, &USDC), false),
             AccountMeta::new_readonly(TOKEN_PROGRAM, false),
-        ]
+        ]);
+        v
     }
 
     pub fn payout_accounts(&self, to: &Pubkey) -> Vec<AccountMeta> {
-        vec![
+        let mut v = self.common_accounts();
+        v.extend([
             AccountMeta::new_readonly(*to, false),
             AccountMeta::new(self.ids.user(to), false),
             AccountMeta::new_readonly(USDC, false),
             AccountMeta::new(self.ids.vault, false),
             AccountMeta::new(ata_of(to, &USDC), false),
             AccountMeta::new_readonly(TOKEN_PROGRAM, false),
-        ]
+        ]);
+        v
     }
 
     pub fn fee_drop_accounts(&self, hub_token: &[u8; 32]) -> Vec<AccountMeta> {
-        vec![AccountMeta::new(self.ids.replica(hub_token), false)]
+        let mut v = self.common_accounts();
+        v.push(AccountMeta::new(self.ids.replica(hub_token), false));
+        v
     }
 }
 
@@ -438,8 +492,10 @@ pub fn base_world() -> World {
     World { svm, admin, exec, ids, lz: None }
 }
 
-/// peer + vault — what both worlds do right after `init_store`.
+/// peer + vault — what both worlds do right after `init_store` — and the
+/// operator's unpause: a store is born paused.
 pub fn wire_store(w: &mut World) {
+    assert!(w.store().paused, "a store must be born paused");
     let ix = Instruction::new_with_bytes(
         w.ids.program,
         &spawn_gateway::instruction::SetPeerConfig {
@@ -469,6 +525,7 @@ pub fn wire_store(w: &mut World) {
         .to_account_metas(None),
     );
     w.send(&[ix], &[]).expect("init_vault over the real USDC mint");
+    w.unpause();
 }
 
 pub fn init_store_ix(w: &World, endpoint: Pubkey, extra: Vec<AccountMeta>) -> Instruction {
