@@ -37,13 +37,20 @@ import {
   Cluster,
   LZ_ENDPOINT,
   LZ_EXECUTOR,
+  DEFAULT_ORDER_TTL,
+  MAX_GAS_TO_HUB,
   MAX_MOVE_LEGS,
   MAX_OPEN_LEGS,
+  MAX_ORDER_TTL,
   MAX_RETURN_UNIT,
+  MIN_SENSIBLE_ORDER_TTL,
   MAX_SPAWN_LEGS,
   MAX_TRADE_LEGS,
+  MINT_BYTES,
   PROGRAM_ID,
+  REPLICA_BYTES,
   SOLANA_LABEL,
+  USER_ACCOUNT_BYTES,
   SYSTEM_PROGRAM,
   TOKEN_PROGRAM,
 } from './constants'
@@ -84,6 +91,7 @@ import {
   setPeerConfigIx,
   setReceiveTableIx,
 } from './instructions'
+import { suggestedHubUnit } from './client'
 import { GatewayPdas, lzPda } from './pda'
 import { GatewayRpc, getAccount, getLookupTable } from './rpc'
 import { createLookupTableIx, extendLookupTableIxs } from './transaction'
@@ -113,8 +121,13 @@ export interface WiringParams {
   operator?: PublicKey
   guardian?: PublicKey
   fee: { gasToHub: bigint; returnUnit: bigint; tradeLegs: number; spawnLegs: number }
-  /** Legs an `open_token` prepays (v7.2; default 1 — the program's own). */
+  /** Legs an `open_token` prepays (v7.2; default 1 — the program's own).
+   * The hub's SYNC carries lamports toward this chain, which costs the hub
+   * more than a trade's reply: 2 may be what it takes. */
   openLegs?: number
+  /** Seconds an order lives (v7.2; default one hour — the program's own):
+   * the deadline of every BUY and SELL is the cluster clock plus this. */
+  orderTtl?: number
   /** The price of a claim moved toward each chain (v7.2): what the hub
    * pays to carry the PAYOUT there, in this chain's reply units. A chain
    * that is not listed stays closed. */
@@ -420,8 +433,21 @@ export const STEPS: Step[] = [
     title: 'operator, guardian, fee config, deposit cap, pause',
     async run(c) {
       const f = c.p.fee
-      if (f.tradeLegs > MAX_TRADE_LEGS || f.spawnLegs > MAX_SPAWN_LEGS || f.returnUnit > MAX_RETURN_UNIT || f.gasToHub <= 0n) {
+      if (
+        f.tradeLegs > MAX_TRADE_LEGS ||
+        f.spawnLegs > MAX_SPAWN_LEGS ||
+        f.returnUnit > MAX_RETURN_UNIT ||
+        f.gasToHub <= 0n ||
+        f.gasToHub > MAX_GAS_TO_HUB
+      ) {
         throw new Error('fee config out of the program bounds (set_fee_config would refuse it)')
+      }
+      // The program takes two minutes to a day. Under ten minutes an
+      // ordinary delay of the pathway — or of this chain's clock — bounces
+      // every order: the tooling does not set that.
+      const orderTtl = c.p.orderTtl ?? DEFAULT_ORDER_TTL
+      if (!Number.isInteger(orderTtl) || orderTtl < MIN_SENSIBLE_ORDER_TTL || orderTtl > MAX_ORDER_TTL) {
+        throw new Error(`order lifetime ${orderTtl}s refused: between ${MIN_SENSIBLE_ORDER_TTL}s and ${MAX_ORDER_TTL}s (orders would bounce under it)`)
       }
       const openLegs = c.p.openLegs ?? 1
       if (openLegs < 0 || openLegs > MAX_OPEN_LEGS) throw new Error(`open legs out of the program bounds (≤ ${MAX_OPEN_LEGS})`)
@@ -438,8 +464,10 @@ export const STEPS: Step[] = [
         s && s.gasToHub === f.gasToHub && s.returnUnit === f.returnUnit && s.tradeLegs === f.tradeLegs && s.spawnLegs === f.spawnLegs
       if (!feeSet) ixs.push(governIx.setFeeConfig(c.pdas, a, f))
       if (!(s && s.depositCap === c.p.depositCap)) ixs.push(governIx.setDepositCap(c.pdas, a, c.p.depositCap))
-      // (a fresh store has open_legs = 1: nothing to send for the default)
+      // (a fresh store has open_legs = 1 and an hour of order lifetime:
+      // nothing to send for the defaults)
       if ((s ? s.openLegs : 1) !== openLegs) ixs.push(governIx.setOpenLegs(c.pdas, a, openLegs))
+      if ((s ? s.orderTtl : DEFAULT_ORDER_TTL) !== orderTtl) ixs.push(governIx.setOrderTtl(c.pdas, a, orderTtl))
       const routes = c.p.moveLegs ?? []
       const have = await c.rpc.getAccounts(routes.map((m) => c.pdas.moveRoute(m.dstChain)))
       routes.forEach((m, i) => {
@@ -483,6 +511,22 @@ export const STEPS: Step[] = [
       if (have >= c.p.tankLamports) return c.log(`tank holds ${have} lamports`)
       const ix = SystemProgram.transfer({ fromPubkey: c.p.admin, toPubkey: c.pdas.gasTank, lamports: c.p.tankLamports - have })
       await c.sender.send(`fund tank ${c.pdas.gasTank.toBase58()} with ${c.p.tankLamports - have} lamports`, [ix])
+    },
+  },
+  {
+    id: '9b-hub-unit',
+    title: 'what the HUB adapter must be told (nothing is sent from here)',
+    async run(c) {
+      // A SYNC and a moved PAYOUT arrive with one `returnUnit` of lamports,
+      // set on the hub adapter for this chain's label: it must cover what
+      // such a message may have to create here, at THIS cluster's rent.
+      const replica = (await c.rpc.rent(REPLICA_BYTES)) + (await c.rpc.rent(MINT_BYTES))
+      const user = await c.rpc.rent(USER_ACCOUNT_BYTES)
+      c.log(
+        `on the hub adapter (operator): setDestination(${SOLANA_LABEL}, <compute units>, ${suggestedHubUnit(replica)}) — returnUnit in LAMPORTS.\n` +
+          `  It must be at least ${replica} (the rent of a replica's two accounts on this cluster; a recipient's account is ${user}).\n` +
+          `  Set lower, each SYNC draws the difference from the tank above and, once that is empty, waits undelivered until it is topped up.`,
+      )
     },
   },
   {

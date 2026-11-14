@@ -1,9 +1,9 @@
 {
-  "about": "Protocol v7.2 wire shapes that tests/codec-vectors.json (generated before v7.2) does not hold: BUY and SELL with their minimum, OPEN (op 6), MOVE (op 7), and the four-field envelope. WRITTEN BY HAND, word by word, from the Solidity shapes (abi.encode head/tail rules) - not produced by either codec under test. Each vector is the list of its 32-byte words with what each one is. To be replaced by contracts/scripts/gen-codec-vectors.js output once the v7.2 contracts are final.",
+  "about": "The wire shapes protocol v7.2 (final) changed or added, WRITTEN BY HAND, word by word, from the Solidity tuples (abi.encode head/tail rules): BUY and SELL with their minimum and their deadline, OPEN (op 6), MOVE (op 7), and the four-field envelope. Each vector is the list of its 32-byte words with what each one is - the annotated layout, for a reader and as a second witness: contracts/scripts/gen-codec-vectors.js holds every vector here to the contracts' coder and exits 1 on a difference, and both codec suites (msg_codec.rs, app/test/codec.test.ts) hold their codec to it. The vectors the suites run on first are the generated ones, tests/codec-vectors-v72.gen.json.",
   "shapes": {
     "payload": "abi.encode(uint8 op, bytes data)",
-    "BUY": "abi.encode(bytes32 token, bytes32 buyer, uint256 usdIn, uint256 minTokensOut)",
-    "SELL": "abi.encode(bytes32 token, bytes32 seller, uint256 tokensIn, uint256 minUsdOut)",
+    "BUY": "abi.encode(bytes32 token, bytes32 buyer, uint256 usdIn, uint256 minTokensOut, uint256 deadline)",
+    "SELL": "abi.encode(bytes32 token, bytes32 seller, uint256 tokensIn, uint256 minUsdOut, uint256 deadline)",
     "OPEN": "abi.encode(bytes32 token)",
     "MOVE": "abi.encode(bytes32 from, bytes32 to, uint256 amount, uint32 dstChain)",
     "envelope": "abi.encode(bytes32 sender, bytes32 dstAddr, bytes payload, uint256 value)"
@@ -12,61 +12,67 @@
     {
       "name": "BUY",
       "op": 2,
-      "note": "250 dollars for at least 1,000,000 tokens; the buyer is a Solana key (all 32 bytes used)",
+      "note": "250 dollars for at least 1,000,000 tokens, good until 2026-11-14 05:50:00 UTC; the buyer is a Solana key (all 32 bytes used)",
       "fields": {
         "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
         "buyer": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
         "usdIn": "250000000000000000000",
-        "minTokensOut": "1000000000000000000000000"
+        "minTokensOut": "1000000000000000000000000",
+        "deadline": "1794635400"
       },
       "words": [
         ["0000000000000000000000000000000000000000000000000000000000000002", "op = 2"],
         ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
-        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["00000000000000000000000000000000000000000000000000000000000000a0", "length of data: 5 words"],
         ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "token"],
         ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "buyer"],
         ["00000000000000000000000000000000000000000000000d8d726b7177a80000", "usdIn = 250e18"],
-        ["00000000000000000000000000000000000000000000d3c21bcecceda1000000", "minTokensOut = 1,000,000e18"]
+        ["00000000000000000000000000000000000000000000d3c21bcecceda1000000", "minTokensOut = 1,000,000e18"],
+        ["000000000000000000000000000000000000000000000000000000006af7f688", "deadline = 1794635400 (unix seconds)"]
       ]
     },
     {
       "name": "BUY",
       "op": 2,
-      "note": "the smallest buy with the smallest minimum a Solana gateway can name: one unit of each (1e12 wei)",
+      "note": "the smallest buy with the smallest minimum a Solana gateway can name: one unit of each (1e12 wei) - stamped by a cluster whose clock reads 0, with a lifetime of one hour",
       "fields": {
         "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
         "buyer": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
         "usdIn": "1000000000000",
-        "minTokensOut": "1000000000000"
+        "minTokensOut": "1000000000000",
+        "deadline": "3600"
       },
       "words": [
         ["0000000000000000000000000000000000000000000000000000000000000002", "op = 2"],
         ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
-        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["00000000000000000000000000000000000000000000000000000000000000a0", "length of data: 5 words"],
         ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "token"],
         ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "buyer"],
         ["000000000000000000000000000000000000000000000000000000e8d4a51000", "usdIn = 1e12"],
-        ["000000000000000000000000000000000000000000000000000000e8d4a51000", "minTokensOut = 1e12"]
+        ["000000000000000000000000000000000000000000000000000000e8d4a51000", "minTokensOut = 1e12"],
+        ["0000000000000000000000000000000000000000000000000000000000000e10", "deadline = 3600"]
       ]
     },
     {
       "name": "SELL",
       "op": 3,
-      "note": "400,000 tokens for at least 87.5 dollars net",
+      "note": "400,000 tokens for at least 87.5 dollars net, good until 2026-11-14 05:20:00 UTC",
       "fields": {
         "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
         "seller": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
         "tokensIn": "400000000000000000000000",
-        "minUsdOut": "87500000000000000000"
+        "minUsdOut": "87500000000000000000",
+        "deadline": "1794633600"
       },
       "words": [
         ["0000000000000000000000000000000000000000000000000000000000000003", "op = 3"],
         ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
-        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["00000000000000000000000000000000000000000000000000000000000000a0", "length of data: 5 words"],
         ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "token"],
         ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "seller"],
         ["0000000000000000000000000000000000000000000054b40b1f852bda000000", "tokensIn = 400,000e18"],
-        ["000000000000000000000000000000000000000000000004be4e7267b6ae0000", "minUsdOut = 87.5e18"]
+        ["000000000000000000000000000000000000000000000004be4e7267b6ae0000", "minUsdOut = 87.5e18"],
+        ["000000000000000000000000000000000000000000000000000000006af7ef80", "deadline = 1794633600 (unix seconds)"]
       ]
     },
     {
@@ -136,14 +142,15 @@
         ["000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "dstAddr: the hub pad"],
         ["0000000000000000000000000000000000000000000000000000000000000080", "offset of payload: after the 4 head words"],
         ["0000000000000000000000000000000000000000000000000000b5e620f48000", "value = 0.0002e18"],
-        ["00000000000000000000000000000000000000000000000000000000000000e0", "length of payload: 7 words"],
+        ["0000000000000000000000000000000000000000000000000000000000000100", "length of payload: 8 words"],
         ["0000000000000000000000000000000000000000000000000000000000000002", "payload: op = 2"],
         ["0000000000000000000000000000000000000000000000000000000000000040", "payload: offset of data"],
-        ["0000000000000000000000000000000000000000000000000000000000000080", "payload: length of data"],
+        ["00000000000000000000000000000000000000000000000000000000000000a0", "payload: length of data"],
         ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "payload: token"],
         ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "payload: buyer"],
         ["00000000000000000000000000000000000000000000000d8d726b7177a80000", "payload: usdIn"],
-        ["00000000000000000000000000000000000000000000d3c21bcecceda1000000", "payload: minTokensOut"]
+        ["00000000000000000000000000000000000000000000d3c21bcecceda1000000", "payload: minTokensOut"],
+        ["000000000000000000000000000000000000000000000000000000006af7f688", "payload: deadline"]
       ]
     },
     {
@@ -168,7 +175,7 @@
       ]
     },
     {
-      "name": "hub -> solana: PAYOUT, no value (the hub prepays no reply)",
+      "name": "hub -> solana: PAYOUT of a sale, no value (a reply brings none)",
       "src": "0x000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
       "dst": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
       "value": "0",
@@ -191,10 +198,10 @@
       ]
     },
     {
-      "name": "hub -> solana: SYNC of CANARY, no value",
+      "name": "hub -> solana: SYNC of CANARY, bringing 3,000,000 lamports for the replica it creates",
       "src": "0x000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
       "dst": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
-      "value": "0",
+      "value": "3000000",
       "payload": {
         "op": "SYNC_TOKEN",
         "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
@@ -205,7 +212,7 @@
         ["000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "sender: the hub pad"],
         ["e27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa", "dstAddr: the Solana store"],
         ["0000000000000000000000000000000000000000000000000000000000000080", "offset of payload"],
-        ["0000000000000000000000000000000000000000000000000000000000000000", "value = 0"],
+        ["00000000000000000000000000000000000000000000000000000000002dc6c0", "value = 3,000,000 (lamports: one returnUnit of label 1)"],
         ["0000000000000000000000000000000000000000000000000000000000000140", "length of payload: 10 words"],
         ["000000000000000000000000000000000000000000000000000000000000000a", "payload: op = 10"],
         ["0000000000000000000000000000000000000000000000000000000000000040", "payload: offset of data"],

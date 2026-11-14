@@ -80,30 +80,6 @@ pub fn check_tank(tank: &AccountInfo) -> Result<u8> {
     Ok(bump)
 }
 
-/// Creates a program account for a hub message that has nobody to charge:
-/// out of the tank when it holds the rent, otherwise out of the
-/// transaction's payer (LayerZero's executor declines that unless the
-/// message brought the lamports; anyone else may accept it). Returns true
-/// when the tank paid.
-pub fn create_from_tank<'info>(
-    payer: &AccountInfo<'info>,
-    tank: &AccountInfo<'info>,
-    system_program: &AccountInfo<'info>,
-    new_account: &AccountInfo<'info>,
-    new_seeds: &[&[u8]],
-    space: usize,
-    owner: &Pubkey,
-) -> Result<bool> {
-    require!(*system_program.key == anchor_lang::system_program::ID, GatewayError::AccountMismatch);
-    let tank_bump = check_tank(tank)?;
-    let need = Rent::get()?.minimum_balance(space).saturating_sub(new_account.lamports());
-    let from_tank = tank_spendable(tank)? >= need;
-    let tank_seeds: &[&[u8]] = &[GAS_TANK_SEED, &[tank_bump]];
-    let (funder, funder_seeds) = if from_tank { (tank, Some(tank_seeds)) } else { (payer, None) };
-    create_pda_account(funder, funder_seeds, new_account, new_seeds, space, owner, system_program)?;
-    Ok(from_tank)
-}
-
 /// Creates a PDA-addressed account of `space` bytes owned by `owner`,
 /// funded by `funder`. Works even if someone pre-funded the address (a
 /// plain `create_account` would fail on it forever): top up, allocate,

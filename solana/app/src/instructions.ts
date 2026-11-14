@@ -22,6 +22,8 @@ import {
   MAX_MOVE_LEGS,
   MAX_NAME_BYTES,
   MAX_OPEN_LEGS,
+  MAX_ORDER_TTL,
+  MIN_ORDER_TTL,
   MAX_SYMBOL_BYTES,
   SOLANA_LABEL,
   SYSTEM_PROGRAM,
@@ -76,8 +78,12 @@ export interface SendSpec<P> {
   args(p: P, maxNativeFee: bigint): Uint8Array
   /** The `quote_send` params that price this send. */
   quote(p: P): QuoteSendParams
-  /** The payload the program will put on the wire (for display / checks). */
-  message(user: PublicKey, p: P): SpawnMsg
+  /** The payload the program will put on the wire (for display / checks).
+   * `deadline` is what a trade will be stamped with — the cluster clock at
+   * execution plus the store's lifetime: the client can only predict it. */
+  message(user: PublicKey, p: P, deadline: bigint): SpawnMsg
+  /** True for a BUY or a SELL: the program stamps a deadline on it. */
+  trade?: boolean
   /** Reply legs the program prepays for it (× `store.returnUnit` = the
    * value in the executor option and in the envelope). `route` is the move
    * route of `routeOf`, when the send has one. */
@@ -103,7 +109,8 @@ export interface BuyParams {
   /** The least replica units (6 decimals) the buyer accepts — REQUIRED
    * (v7.2): the hub fills for at least this or sends every dollar home.
    * `ANY_FILL` (one unit) accepts anything; a UI derives it from the
-   * hub's price and a slippage tolerance. */
+   * hub's price and a slippage tolerance. (The order's DEADLINE is not a
+   * parameter: the program stamps it — cluster clock + `store.orderTtl`.) */
   minTokensOut: bigint
   /** The USDC account to pay from (default: the user's ATA). */
   userUsdc?: PublicKey
@@ -206,13 +213,15 @@ export const SENDS = {
     },
     args: (p, fee) => new BorshWriter().fixed(asBytes32(p.hubToken), 32).u64(p.usdcIn).u64(p.minTokensOut).u64(fee).done(),
     quote: () => ({ op: OP.BUY, ...noStrings }),
-    message: (user, p) => ({
+    message: (user, p, deadline) => ({
       op: 'BUY',
       hubToken: p.hubToken,
       buyer: user.toBytes(),
       usdIn: splToE18(p.usdcIn),
       minTokensOut: splToE18(p.minTokensOut),
+      deadline,
     }),
+    trade: true,
     legs: (s) => s.tradeLegs,
     check: (p) => {
       positive(p.usdcIn, 'usdcIn')
@@ -239,13 +248,15 @@ export const SENDS = {
     },
     args: (p, fee) => new BorshWriter().fixed(asBytes32(p.hubToken), 32).u64(p.amount).u64(p.minUsdcOut).u64(fee).done(),
     quote: () => ({ op: OP.SELL, ...noStrings }),
-    message: (user, p) => ({
+    message: (user, p, deadline) => ({
       op: 'SELL',
       hubToken: p.hubToken,
       seller: user.toBytes(),
       tokensIn: splToE18(p.amount),
       minUsdOut: splToE18(p.minUsdcOut),
+      deadline,
     }),
+    trade: true,
     legs: (s) => s.tradeLegs,
     check: (p) => {
       positive(p.amount, 'amount')
@@ -281,16 +292,11 @@ export const SENDS = {
   } as SendSpec<TokenParams>,
 
   /** v7.2: asks the hub for this chain's replica of a token it never got.
-   * The caller also leaves the replica's rent at its two addresses (the
-   * SYNC that answers arrives with no lamports). */
+   * The caller pays the message and the hub's SYNC; the replica's rent
+   * comes WITH that SYNC (the hub attaches it), not from the caller. */
   open_token: {
     name: 'open_token',
-    accounts: (c, user, p) => [
-      ...head(c, user),
-      rw(c.pdas.replica(p.hubToken)),
-      rw(c.pdas.mint(p.hubToken)),
-      ro(SYSTEM_PROGRAM),
-    ],
+    accounts: (c, user, p) => [...head(c, user), ro(c.pdas.replica(p.hubToken)), ro(SYSTEM_PROGRAM)],
     args: (p, fee) => new BorshWriter().fixed(asBytes32(p.hubToken), 32).u64(fee).done(),
     quote: () => ({ op: OP.OPEN, ...noStrings }),
     message: (_user, p) => ({ op: 'OPEN', hubToken: p.hubToken }),
@@ -570,6 +576,13 @@ export const governIx = {
     ),
   setDepositCap: (pdas: GatewayPdas, who: PublicKey, cap: bigint) =>
     ix(pdas.programId, IX.set_deposit_cap, govern(pdas, who), new BorshWriter().u64(cap).done()),
+  /** How long an order lives, in seconds (operator; 2 minutes to a day). */
+  setOrderTtl: (pdas: GatewayPdas, who: PublicKey, ttl: number) => {
+    if (!Number.isInteger(ttl) || ttl < MIN_ORDER_TTL || ttl > MAX_ORDER_TTL) {
+      throw new Error(`order lifetime ${ttl}s out of bounds (${MIN_ORDER_TTL}–${MAX_ORDER_TTL}s: there is always a deadline)`)
+    }
+    return ix(pdas.programId, IX.set_order_ttl, govern(pdas, who), new BorshWriter().u32(ttl).done())
+  },
   /** What an open prepays (operator; ≤ 8). */
   setOpenLegs: (pdas: GatewayPdas, who: PublicKey, legs: number) => {
     if (legs < 0 || legs > MAX_OPEN_LEGS) throw new Error(`open legs ${legs} out of bounds (≤ ${MAX_OPEN_LEGS})`)

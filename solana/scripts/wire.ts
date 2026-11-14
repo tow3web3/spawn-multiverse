@@ -6,7 +6,7 @@
  *
  *   npm run wire -- --cluster devnet --hub-eid 40245 \
  *     --hub-pad 0x… --hub-adapter 0x… --admin-keypair <file> \
- *     --verifiers default --spawn-legs 3 --tank-sol 0.3 [--dry-run]
+ *     --verifiers default --spawn-legs 4 [--dry-run]
  *
  * Hub addresses are always parameters (the ones in V7.md belong to a
  * retired deployment). Mainnet-beta without --dry-run also needs
@@ -20,13 +20,25 @@
  *   --verifiers ours|default|<req,req>/<opt,opt>/<threshold>  [ours on mainnet-beta; required elsewhere]
  *   --send-confirmations [32] --receive-confirmations [10]
  *   --operator <key> --guardian <key>
- *   --gas-to-hub [4600000] --return-unit-wei [350000000000000] --trade-legs [1] --spawn-legs (required)
- *   --open-legs [1]                                   legs an open prepays (v7.2)
+ *   --gas-to-hub [6000000]                            executor gas bought on Base for EVERY message from here, so
+ *                                                     sized for the worst spawn: `hubGasFor` of
+ *                                                     contracts/config/profiles.js — (3.4M + 0.22M per remote chain
+ *                                                     + 0.1M per chain with a launch ceiling) × 1.2, never under
+ *                                                     5.2M. The default is five remote chains, a ceiling on each
+ *   --return-unit-wei [350000000000000] --trade-legs [1] --spawn-legs (required)
+ *   --open-legs [2]                                   legs an open prepays (v7.2). The hub's SYNC toward Solana
+ *                                                     carries the replica's rent: about twice a plain reply
+ *                                                     (measured on Base, V7.md §5) — one leg would not cover it
+ *   --order-ttl [3600]                                seconds a buy or a sell lives (its deadline = cluster
+ *                                                     clock + this); 600 to 86400
  *   --move-legs bnb:6,base:1,ethereum:40,…            the price of a claim moved toward each chain, in
  *                                                     reply legs (name or label); a chain not listed stays closed
  *   --cctp-peer base:0x…,arbitrum:0x…                 peer vaults (the OmniUSD of each chain) for rebalancing —
  *                                                     each is set ONCE and can never be re-aimed
- *   --deposit-cap-usdc [0] --no-pause --tank-sol [0.3]
+ *   --deposit-cap-usdc [0] --no-pause
+ *   --tank-sol [0.05]                                 the tank's float. The hub's messages bring the rent of what
+ *                                                     they create (V7.md §9): the tank only covers a hub unit
+ *                                                     that has fallen behind Solana's rent
  *   --no-pin-libraries     leave the gateway on LayerZero's default libraries (default: pin both)
  *   --no-freeze-table      keep the lookup table extensible — and closable — by the admin key (default: freeze)
  *   --new-admin <key> [--new-admin-keypair <file>]  --table <key>  --only <step-ids,…>
@@ -156,19 +168,20 @@ async function main() {
     operator: key('operator'),
     guardian: key('guardian'),
     fee: {
-      gasToHub: BigInt(a.get('gas-to-hub') ?? 4_600_000),
+      gasToHub: BigInt(a.get('gas-to-hub') ?? 6_000_000),
       returnUnit: BigInt(a.get('return-unit-wei') ?? 350_000_000_000_000n),
       tradeLegs: Number(a.get('trade-legs') ?? 1),
       spawnLegs: Number(need('spawn-legs')),
     },
-    openLegs: Number(a.get('open-legs') ?? 1),
+    openLegs: Number(a.get('open-legs') ?? 2),
+    orderTtl: Number(a.get('order-ttl') ?? 3600),
     moveLegs: moveLegs(a.get('move-legs')),
     cctpPeers: cctpPeers(a.get('cctp-peer')),
     pinLibraries: !a.has('no-pin-libraries'),
     freezeTable: !a.has('no-freeze-table'),
     depositCap: parseUnits(a.get('deposit-cap-usdc') ?? '0'),
     leavePaused: !a.has('no-pause'),
-    tankLamports: parseUnits(a.get('tank-sol') ?? '0.3', 9),
+    tankLamports: parseUnits(a.get('tank-sol') ?? '0.05', 9),
     newAdmin: key('new-admin') ?? newAdminKey?.publicKey,
     table: key('table'),
   }

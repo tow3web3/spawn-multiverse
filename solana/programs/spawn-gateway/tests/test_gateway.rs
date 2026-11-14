@@ -541,22 +541,28 @@ fn a_dry_tank_never_strands_a_payout() {
 }
 
 /// The envelope's last word (v7.2) is what the executor was asked to
-/// deliver with the message. The hub sends 0. If a message ever names a
-/// value, the delivery must bring it — into the tank — exactly as the hub
-/// adapter requires of deliveries from here.
+/// deliver with the message: nothing on a reply, one `returnUnit` of
+/// lamports on a message that may have to create an account here. The
+/// delivery must bring it — exactly as the hub adapter requires of
+/// deliveries from here — and what the message does not need goes to the
+/// tank.
 #[test]
-fn a_value_the_envelope_names_is_taken_into_the_tank() {
+fn what_a_message_brings_is_taken_and_what_it_does_not_need_goes_to_the_tank() {
     let mut w = setup();
     let u = user_with_accounts(&mut w);
     let vault = w.ids.vault;
     w.set_token_amount(&vault, 10 * ONE_USDC);
+    let floor = w.svm.minimum_balance_for_rent_exemption(0);
+    let tank = w.ids.tank;
+    w.set_lamports(&tank, floor);
     let msg = SpawnMsg::Payout { to: WireAddr::from_pubkey(&u.pubkey()), usd_out: U256::from_u128(E18) };
-    let (exec_before, tank_before) = (w.lamports(&w.exec.pubkey()), w.lamports(&w.ids.tank));
+    let (exec_before, tank_before) = (w.lamports(&w.exec.pubkey()), w.lamports(&tank));
     let bytes = w.wire_with_value(&msg, 3_000_000);
     let accounts = w.payout_accounts(&u.pubkey());
     deliver_raw(&mut w, hub_peer(), HUB_EID, bytes, accounts).unwrap();
+    // this recipient has everything: the whole value is the tank's
     assert_eq!(exec_before - w.lamports(&w.exec.pubkey()), 3_000_000);
-    assert_eq!(w.lamports(&w.ids.tank) - tank_before, 3_000_000);
+    assert_eq!(w.lamports(&tank) - tank_before, 3_000_000);
     assert_eq!(w.token_amount(&ata_of(&u.pubkey(), &USDC)), ONE_USDC);
     // a payer that cannot bring it is turned away; nothing moved
     let poor = Keypair::new();
@@ -569,6 +575,86 @@ fn a_value_the_envelope_names_is_taken_into_the_tank() {
     let ix = Instruction::new_with_bytes(w.ids.program, &spawn_gateway::instruction::LzReceive { params }.data(), metas);
     assert!(w.send(&[ix], &[&poor]).is_err());
     assert_eq!(w.token_amount(&ata_of(&u.pubkey(), &USDC)), ONE_USDC);
+}
+
+/// WHO PAYS FOR WHAT A MESSAGE CREATES (v7.2, final): the lamports the
+/// message brought, then the tank, then — only then — whoever executes it.
+/// The cases a hub operator can produce by setting `returnUnit` for this
+/// chain right, too high, too low, or not at all.
+#[test]
+fn an_account_is_funded_by_the_message_then_the_tank_then_the_caller() {
+    let mut w = setup();
+    let tank = w.ids.tank;
+    let exec = w.exec.pubkey();
+    let floor = w.svm.minimum_balance_for_rent_exemption(0);
+    let rent_user = w.svm.minimum_balance_for_rent_exemption(UserAccount::SIZE);
+    let rent_replica = w.svm.minimum_balance_for_rent_exemption(Replica::SIZE) + w.svm.minimum_balance_for_rent_exemption(82);
+    let unit = w.hub_unit();
+    assert!(unit > rent_replica && rent_replica > rent_user, "the unit is sized on the dearer of the two");
+    assert_eq!(unit, 4_100_000, "at this cluster's rent (6,960 lamports a byte); 3,000,000 at mainnet's 5,080");
+    let sync = |tag: u8| SpawnMsg::SyncToken { hub_token: WireAddr(token_id(tag)), name: "N".into(), symbol: "S".into() };
+    let pay = |to: &Pubkey| SpawnMsg::Payout { to: WireAddr::from_pubkey(to), usd_out: U256::from_u128(E18) };
+    // delivers `msg` naming `value`; returns (what the executor paid, what the tank gained or lost)
+    let run = |w: &mut World, msg: &SpawnMsg, value: u64, accounts: Vec<AccountMeta>| -> (i128, i128) {
+        let (e0, t0) = (w.lamports(&exec) as i128, w.lamports(&tank) as i128);
+        let bytes = w.wire_with_value(msg, value);
+        deliver_raw(w, hub_peer(), HUB_EID, bytes, accounts).unwrap_or_else(|e| panic!("{e}"));
+        (e0 - w.lamports(&exec) as i128, w.lamports(&tank) as i128 - t0)
+    };
+
+    // ---- the unit as it should be, and a tank that holds its own rent
+    // floor and not a lamport more: the message funds what it creates and
+    // the tank is not needed
+    w.set_lamports(&tank, floor);
+    let accounts = w.sync_accounts(&token_id(1));
+    let (paid, tank_delta) = run(&mut w, &sync(1), unit, accounts);
+    let replica: Replica = w.read(&w.ids.replica(&token_id(1)));
+    assert_eq!(replica.symbol, "S");
+    assert_eq!(paid, unit as i128, "the delivery cost its executor what the packet bought, to the lamport");
+    assert_eq!(tank_delta, (unit - rent_replica) as i128, "the rest is the tank's");
+
+    // a moved claim for a stranger: the same unit covers the smaller rent
+    let a = Keypair::new().pubkey();
+    let accounts = w.payout_accounts(&a);
+    let (paid, tank_delta) = run(&mut w, &pay(&a), unit, accounts);
+    assert_eq!((paid, tank_delta), (unit as i128, (unit - rent_user) as i128));
+    let ua: UserAccount = w.read(&w.ids.user(&a));
+    assert_eq!((ua.owner, ua.usd_claim), (a, ONE_USDC));
+    // a second SYNC of the same token creates nothing: all of it is the tank's
+    let accounts = w.sync_accounts(&token_id(1));
+    assert_eq!(run(&mut w, &sync(1), unit, accounts), (unit as i128, unit as i128));
+
+    // ---- the unit set TOO LOW (here: a third of a replica's rent): the
+    // tank makes up the difference for as long as it can…
+    let low = rent_replica / 3;
+    w.set_lamports(&tank, floor + rent_replica);
+    let accounts = w.sync_accounts(&token_id(2));
+    let (paid, tank_delta) = run(&mut w, &sync(2), low, accounts);
+    assert_eq!(paid, low as i128, "the executor still pays no more than the packet bought");
+    assert_eq!(tank_delta, low as i128 - rent_replica as i128, "the tank paid the shortfall");
+    // …and when it cannot, the rent falls on whoever executes: a volunteer
+    // here; LayerZero's executor declines (test_live_endpoint) and the
+    // packet waits — it is never lost
+    w.set_lamports(&tank, floor);
+    let accounts = w.sync_accounts(&token_id(3));
+    let (paid, _) = run(&mut w, &sync(3), low, accounts);
+    assert_eq!(paid, (low + rent_replica) as i128, "what it named, and the rent on top");
+
+    // ---- the unit NOT SET (0), as on an EVM label: the tank, as before
+    w.set_lamports(&tank, floor + rent_user);
+    let b = Keypair::new().pubkey();
+    let accounts = w.payout_accounts(&b);
+    assert_eq!(run(&mut w, &pay(&b), 0, accounts), (0, -(rent_user as i128)));
+
+    // ---- a tank drained to nothing cannot take less than its own rent
+    // floor: a small remainder then stays with whoever delivers, and
+    // nothing fails for it
+    w.set_lamports(&tank, 0);
+    let c = Keypair::new().pubkey();
+    let accounts = w.payout_accounts(&c);
+    let (paid, tank_delta) = run(&mut w, &pay(&c), rent_user + 1_000, accounts);
+    assert_eq!((paid, tank_delta), (rent_user as i128, 0));
+    assert_eq!(w.lamports(&tank), 0);
 }
 
 /* ------------------------- FEE_DROP and the pool --------------------- */
@@ -769,6 +855,7 @@ fn only_the_hub_pad_through_the_hub_adapter_is_heard() {
         buyer: WireAddr([1; 32]),
         usd_in: U256::from_u128(1),
         min_tokens_out: U256::from_u128(1),
+        deadline: U256::from_u128(1_794_635_400),
     };
     let bytes = w.wire(&buy);
     assert!(deliver_raw(&mut w, hub_peer(), HUB_EID, bytes, accounts.clone()).unwrap_err().contains("UnknownOp"));
@@ -841,7 +928,35 @@ fn three_keys_admin_operator_guardian() {
     assert_eq!((s.deposit_cap, s.gas_to_hub, s.return_unit, s.trade_legs, s.spawn_legs), (25_000 * ONE_USDC, 4_600_000, 200_000_000_000_000, 1, 3));
     assert!(w.govern(fee(50_000_000_000_000_001, 1, 3), &operator).unwrap_err().contains("OutOfBounds"));
     assert!(w.govern(fee(1, 5, 3), &operator).unwrap_err().contains("OutOfBounds"));
-    assert!(w.govern(fee(1, 1, 33), &operator).unwrap_err().contains("OutOfBounds"));
+    // (128 spawn legs since the last round of v7.2: a launch that reaches an L1)
+    w.govern(fee(1, 1, 128), &operator).unwrap();
+    assert!(w.govern(fee(1, 1, 129), &operator).unwrap_err().contains("OutOfBounds"));
+    w.govern(fee(200_000_000_000_000, 1, 3), &operator).unwrap();
+    // executor gas is bounded like the EVM adapters': what a slip would
+    // over-charge goes to LayerZero's executor and cannot be given back
+    let gas = |gas_to_hub: u128| {
+        ix::SetFeeConfig {
+            params: spawn_gateway::instructions::FeeConfigParams { gas_to_hub, return_unit: 1, trade_legs: 1, spawn_legs: 3 },
+        }
+        .data()
+    };
+    assert!(w.govern(gas(15_000_001), &operator).unwrap_err().contains("OutOfBounds"));
+    assert!(w.govern(gas(0), &operator).unwrap_err().contains("OutOfBounds"));
+    w.govern(gas(15_000_000), &operator).unwrap();
+    w.govern(fee(200_000_000_000_000, 1, 3), &operator).unwrap();
+
+    // how long an order lives: an hour from birth, the operator's between
+    // two minutes and a day — there is always a deadline
+    assert_eq!(w.store().order_ttl, 3_600);
+    assert!(w.govern(ix::SetOrderTtl { ttl: 1_800 }.data(), &nobody).unwrap_err().contains("NotOperator"));
+    assert!(w.govern(ix::SetOrderTtl { ttl: 1_800 }.data(), &guardian).unwrap_err().contains("NotOperator"));
+    for bad in [0u32, 119, 86_401, u32::MAX] {
+        assert!(w.govern(ix::SetOrderTtl { ttl: bad }.data(), &operator).unwrap_err().contains("BadOrderTtl"), "{bad}");
+    }
+    for ok in [120u32, 86_400, 1_800] {
+        w.govern(ix::SetOrderTtl { ttl: ok }.data(), &operator).unwrap();
+        assert_eq!(w.store().order_ttl, ok);
+    }
     assert!(w.govern(ix::SetSponsored { on: true }.data(), &operator).unwrap_err().contains("NotAdmin"));
     assert!(w.govern(ix::SetGuardian { guardian: operator.pubkey() }.data(), &operator).unwrap_err().contains("NotAdmin"));
     assert!(w.govern(ix::TransferAdmin { nominee: operator.pubkey() }.data(), &operator).unwrap_err().contains("NotAdmin"));

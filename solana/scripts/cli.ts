@@ -19,9 +19,11 @@
  *   spawn      --name N --symbol S [--meta URI] [--dev-buy USDC] [--fee-mode 0..3]
  *   buy        --token 0x… --usdc A --min-tokens M     (M is required: "any" = one unit)
  *   sell       --token 0x… --tokens A --min-usdc M     (same)
+ *                                                      (both leave with a deadline the program stamps:
+ *                                                       cluster clock + the store's order lifetime)
  *   claim-fees --token 0x…
  *   pull-fees  --token 0x…
- *   open       --token 0x…                             (also pays the replica's rent)
+ *   open       --token 0x…                             (the hub's SYNC brings the replica's rent)
  *   move       --to-chain ethereum|base|bnb|arbitrum|optimism|<label> --to 0x… --usdc A
  *
  * Local
@@ -72,6 +74,9 @@ import {
 export interface CliIo {
   rpc: GatewayRpc
   out(line: string): void
+  /** This machine's clock, in milliseconds (default `Date.now`): what the
+   * cluster clock is compared with in `status`. */
+  now?(): number
   /** Signs with `signer`, sends, confirms; returns the signature and the
    * transaction's logs. Absent = this run cannot send. */
   send?(tx: VersionedTransaction, signer: Keypair): Promise<{ signature: string; logs: string[] }>
@@ -131,6 +136,11 @@ function recipient(x: string): Uint8Array {
 }
 
 const sol = (lamports: bigint) => `${formatUnits(lamports, 9)} SOL`
+/** A unix time, readable. */
+const utc = (unix: bigint) => new Date(Number(unix) * 1000).toISOString().replace('.000Z', ' UTC').replace('T', ' ')
+/** A duration in seconds, readable. */
+const span = (seconds: number) =>
+  seconds % 3600 === 0 ? `${seconds / 3600} h` : seconds % 60 === 0 ? `${seconds / 60} min` : `${seconds} s`
 const usd = (units: bigint) => `${formatUnits(units)} USDC`
 const eth = (wei: bigint) => `${formatUnits(wei, 18)} ETH`
 
@@ -139,6 +149,7 @@ const eth = (wei: bigint) => `${formatUnits(wei, 18)} ETH`
 export async function runCli(argv: string[], io: CliIo): Promise<void> {
   const { command, opt } = parseArgs(argv)
   const say = io.out
+  const now = io.now ?? Date.now
   if (!command || opt.has('help')) throw new Error('usage: cli <status|balances|pending|quote|spawn|buy|sell|claim-fees|pull-fees|open|move|redeem|claim-parked|open-account> [options] — see the header of scripts/cli.ts')
   const need = (k: string) => {
     const v = opt.get(k)
@@ -212,9 +223,20 @@ export async function runCli(argv: string[], io: CliIo): Promise<void> {
     say(`  hub          eid ${s.hubEid}, pad ${bytesToHex(s.hubPad)}, adapter ${bytesToHex(client.peerAddress)}`)
     say(`  verifiers    ${client.path.uln.requiredDvnCount} required + ${client.path.uln.optionalDvnThreshold} of ${client.path.uln.optionalDvnCount} optional, ${client.path.uln.confirmations} confirmations`)
     say(`  prices       gas to hub ${s.gasToHub}, reply unit ${eth(s.returnUnit)}; legs: trade ${s.tradeLegs}, spawn ${s.spawnLegs}, open ${s.openLegs}`)
+    const clock = await client.clusterTime()
+    const lag = BigInt(Math.floor(now() / 1000)) - clock
+    say(
+      `  orders       live ${span(s.orderTtl)}: a buy or a sell sent now is good until ${utc(clock + BigInt(s.orderTtl))} on the cluster clock, which is ${
+        lag === 0n ? 'level with' : `${lag > 0n ? lag : -lag} s ${lag > 0n ? 'BEHIND' : 'ahead of'}`
+      } this machine's${lag > BigInt(s.orderTtl) / 2n ? '  ← the hub reads the deadline against real time: orders will bounce; lengthen the lifetime' : ''}`,
+    )
     const vault = await client.vaultBalance()
     say(`  vault        ${usd(vault)} of a ${usd(s.depositCap)} cap; owed: claims ${usd(s.claimsTotal)}, fee pool ${usd(s.poolTotal)}${vault >= s.claimsTotal + s.poolTotal ? '' : '  ← SHORT: payouts become claims'}`)
-    say(`  tank         ${sol(await client.tankBalance())}  (rent of what a hub message creates: a replica ${sol((await io.rpc.rent(201)) + (await io.rpc.rent(82)))}, a stranger's account ${sol(await io.rpc.rent(245))})`)
+    const unit = await client.hubUnit()
+    say(`  tank         ${sol(await client.tankBalance())}  (it covers what a hub message creates when the message did not bring enough)`)
+    say(
+      `  hub unit     a SYNC creates a replica (${unit.replicaRent} lamports of rent), a moved claim may open an account (${unit.userAccountRent}): on the HUB adapter, returnUnit of label 1 must be at least ${unit.replicaRent} lamports — set ${unit.suggested}`,
+    )
     say(`  lookup table ${client.table ? `${client.table.key.toBase58()} (${client.table.state.addresses.length} addresses, ${client.table.state.authority ? `authority ${client.table.state.authority.toBase58()}` : 'frozen'})` : 'NONE — sends will not fit a transaction'}`)
     for (const [label, name] of NAME_OF_LABEL) {
       if (label === CHAIN_LABEL.hub || label === CHAIN_LABEL.solana) continue
@@ -254,8 +276,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<void> {
       const replica = await client.replica(t)
       const parked = ua?.parked.find((p) => bytesToHex(p.hubToken) === bytesToHex(t))
       if (!replica) {
-        const rent = await client.openRent(t)
-        say(`  ${short(t)}  not open on this chain${parked ? ` — ${formatUnits(parked.amountE18, 18)} tokens parked behind it` : ''}:  cli open --token ${short(t)}   (rent still due: ${sol(rent)})`)
+        say(`  ${short(t)}  not open on this chain${parked ? ` — ${formatUnits(parked.amountE18, 18)} tokens parked behind it` : ''}:  cli open --token ${short(t)}`)
         if (parked) waiting++
         continue
       }
@@ -294,6 +315,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<void> {
     say(`  sent: ${signature}`)
     const ev = built ? findSentToHub(logs) : null
     if (ev) say(`  LayerZero charged ${sol(ev.nativeFee)}${ev.sponsored ? ' (refunded by the tank)' : ''}; ${ev.legs} repl${ev.legs === 1 ? 'y' : 'ies'} prepaid`)
+    if (ev && ev.deadline > 0n) say(`  the order is good until ${utc(ev.deadline)} (on the hub's clock)`)
     if (built) say(`  follow it: https://${cluster === 'mainnet-beta' ? '' : 'testnet.'}layerzeroscan.com/tx/${signature}`)
   }
 
@@ -304,6 +326,9 @@ export async function runCli(argv: string[], io: CliIo): Promise<void> {
     lines.forEach((l) => say(`  ${l}`))
     say(`  fee          ${max === undefined ? `${sol(built.quotedFee)} quoted, ceiling ${sol(built.maxNativeFee)}` : `ceiling ${sol(built.maxNativeFee)} (not quoted)`}`)
     say(`  reply budget ${built.legs} leg${built.legs === 1 ? '' : 's'} × ${eth(s.returnUnit)} = ${eth(built.value)}, in the executor option and in the envelope`)
+    if (built.deadline > 0n) {
+      say(`  deadline     ${utc(built.deadline)} — the cluster clock plus ${span(s.orderTtl)}, stamped by the program when this executes; an order that reaches the hub later comes back whole`)
+    }
     say(`  message      ${bytesToHex(built.message)}`)
     say(`  transaction  ${built.size} bytes (limit 1232)`)
     if (s.paused && (spec.name === 'spawn_token' || spec.name === 'buy_token' || spec.name === 'open_token')) say('  NOTE: the store is paused — this will be refused')
@@ -352,8 +377,8 @@ export async function runCli(argv: string[], io: CliIo): Promise<void> {
       const t = token(need('token'))
       if (await client.replica(t)) throw new Error(`${short(t)} is already open on this chain`)
       return message(`open ${short(t)} on this chain`, SENDS.open_token, { hubToken: t }, [
-        `rent         ${sol(await client.openRent(t))} left at the replica's two addresses for the hub's SYNC (on top of the fee)`,
-        'the hub answers only for a token it spawned, and only if the SYNC costs it no more than its ceiling for this chain',
+        "the hub answers with a SYNC that brings the replica's rent: the opener pays this message and nothing else",
+        'it answers only for a token it spawned, and only if that SYNC costs it no more than its ceiling for this chain',
       ])
     }
     case 'move': {

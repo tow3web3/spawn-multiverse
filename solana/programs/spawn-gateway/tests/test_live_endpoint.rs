@@ -21,12 +21,13 @@
 //!     spend its lamports (a SYNC with a dry tank), which then stays
 //!     executable;
 //!   - a send fits one v0 transaction with an address lookup table;
-//!   - v7.2: a token is opened from here (the opener pays the replica's
-//!     rent, the SYNC then costs nobody anything); a claim leaves for
-//!     another chain at that chain's price and comes home; the real
-//!     executor delivers a claim moved HERE to a recipient it never saw;
-//!     the vault burns USDC toward a peer vault through Circle's REAL CCTP
-//!     V2 programs.
+//!   - v7.2: every buy and sell leaves with five words — its minimum and a
+//!     deadline stamped from the cluster clock; a token is opened from here
+//!     and the hub's SYNC brings the replica's rent with it; a claim leaves
+//!     for another chain at that chain's price and comes home; the real
+//!     executor delivers a claim moved HERE, with the lamports it brings,
+//!     to a recipient it never saw; the vault burns USDC toward a peer
+//!     vault through Circle's REAL CCTP V2 programs.
 //!
 //! What only a live chain can still prove: the deploy itself, the real
 //! DVNs signing a packet both ways, and the executor's off-chain half.
@@ -70,8 +71,15 @@ const TOK: u8 = 0x8b;
 
 /* ------------------------------- the world ---------------------------- */
 
+/// The cluster clock the live world starts at (LiteSVM's own starts at 0):
+/// 2026-11-14 04:50:00 UTC. Orders are stamped from it.
+const NOW: i64 = 1_794_631_800;
+/// The lifetime a store is born with.
+const TTL: u128 = 3_600;
+
 fn live() -> World {
     let mut w = base_world();
+    w.set_now(NOW);
     let programs: Vec<serde_json::Value> = serde_json::from_slice(&fixture("programs.json")).unwrap();
     for p in &programs {
         let id: Pubkey = p["id"].as_str().unwrap().parse().unwrap();
@@ -249,8 +257,8 @@ fn sent_event(meta: &litesvm::types::TransactionMetadata) -> (u8, u64, u16, bool
     for l in &meta.logs {
         if let Some(b64) = l.strip_prefix("Program data: ") {
             let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else { continue };
-            // op u8, user 32, native_fee u64, legs u16, sponsored bool
-            if raw.len() >= 52 && &raw[..8] == disc {
+            // op u8, user 32, native_fee u64, legs u16, sponsored bool, deadline u64
+            if raw.len() >= 60 && &raw[..8] == disc {
                 return (
                     raw[8],
                     u64::from_le_bytes(raw[41..49].try_into().unwrap()),
@@ -284,6 +292,29 @@ fn enveloped(w: &World, msg: &SpawnMsg, legs: u128) -> Vec<u8> {
 
 /// "Any fill": the smallest minimum a trade can name (one unit, 0.000001).
 const ANY: u64 = 1;
+
+/// The deadline an order sent now leaves with: the cluster clock plus the
+/// store's lifetime.
+fn deadline(w: &World) -> U256 {
+    U256::from_u128(w.now() as u128 + w.store().order_ttl as u128)
+}
+
+/// The deadline in a send's `SentToHub` event (0 for a message that is not
+/// a trade).
+fn sent_deadline(meta: &litesvm::types::TransactionMetadata) -> u64 {
+    use base64::Engine;
+    let disc = &solana_sdk::hash::hash(b"event:SentToHub").to_bytes()[..8];
+    for l in &meta.logs {
+        if let Some(b64) = l.strip_prefix("Program data: ") {
+            let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b64) else { continue };
+            // op u8, user 32, native_fee u64, legs u16, sponsored bool, deadline u64
+            if raw.len() >= 60 && &raw[..8] == disc {
+                return u64::from_le_bytes(raw[52..60].try_into().unwrap());
+            }
+        }
+    }
+    panic!("no SentToHub event");
+}
 
 /* --------------------------- send instructions ------------------------ */
 
@@ -696,8 +727,13 @@ fn users_pay_for_their_messages_and_for_the_replies() {
         buyer: WireAddr::from_pubkey(&user),
         usd_in: U256::from_spl_amount(250 * ONE_USDC),
         min_tokens_out: U256::from_spl_amount(1_000_000 * ONE_TOKEN),
+        deadline: U256::from_u128(NOW as u128 + TTL),
     };
-    assert!(packet_carries(&meta, &enveloped(&w, &expected, 1)), "the packet embeds the enveloped BUY, its minimum and its reply budget");
+    assert!(
+        packet_carries(&meta, &enveloped(&w, &expected, 1)),
+        "the packet embeds the enveloped BUY: five words — its minimum, its deadline — and its reply budget"
+    );
+    assert_eq!(sent_deadline(&meta) as u128, NOW as u128 + TTL);
     // the executor option the packet rides on: gas for the hub + the reply budget
     assert!(packet_carries(&meta, &msg_codec::lz_receive_options(GAS_TO_HUB, RETURN_UNIT)));
     // the buyer's own accounts now exist — the DELIVER will need no rent
@@ -732,6 +768,7 @@ fn users_pay_for_their_messages_and_for_the_replies() {
         seller: WireAddr::from_pubkey(&user),
         tokens_in: U256::from_spl_amount(400_000 * ONE_TOKEN),
         min_usd_out: U256::from_spl_amount(87_500_000), // 87.5 dollars, net
+        deadline: deadline(&w),
     };
     assert!(packet_carries(&meta, &enveloped(&w, &expected, 1)));
 
@@ -741,6 +778,7 @@ fn users_pay_for_their_messages_and_for_the_replies() {
     println!("CU claim_fees: {}", meta.compute_units_consumed);
     let expected = SpawnMsg::Claim { hub_token: WireAddr(t), claimer: WireAddr::from_pubkey(&user) };
     assert!(packet_carries(&meta, &enveloped(&w, &expected, 1)));
+    assert_eq!(sent_deadline(&meta), 0, "only a trade has a deadline");
     let quoted = quote(&mut w, msg_codec::OP_PULL_FEES, "", "", "", false);
     let ix = pull_ix(&w, &user, TOK);
     let meta = w.send(&[ix], &[&u]).unwrap();
@@ -904,17 +942,21 @@ fn entry_checks_refuse_before_any_money_moves() {
     assert_eq!(outbound_nonce(&w), 3);
 }
 
+/// A reply brings no lamports and needs none. (A SYNC does bring some since
+/// the last round of v7.2 — `a_token_is_opened…` — and this test keeps the
+/// case of a hub whose unit for this chain was never set: value 0.)
 #[test]
-fn the_real_executor_delivers_every_hub_message_with_zero_value() {
+fn the_real_executor_delivers_every_reply_with_zero_value() {
     let mut w = live();
     enlist_executor(&mut w);
     let tank = w.ids.tank;
     let t = token_id(TOK);
     let exec = w.exec.pubkey();
 
-    // ---- SYNC with a DRY tank: lz_receive would have to spend the
-    // executor's SOL on rent. The hub's options buy value = 0, so the real
-    // executor refuses — and the packet stays verified, executable later.
+    // ---- a SYNC that brings NOTHING (the hub's unit for this chain not
+    // set) with a DRY tank: lz_receive would have to spend the executor's
+    // SOL on rent. The packet bought value = 0, so the real executor
+    // refuses — and the packet stays verified, executable later.
     let err = execute(&mut w, 1, &sync_msg(TOK), 0).unwrap_err();
     assert!(err.contains("InsufficientBalance"), "expected the executor's own balance check, got: {err}");
     assert!(err.contains(&format!("Program {EXECUTOR} failed")), "the refusal must come from the executor program");
@@ -1347,7 +1389,6 @@ fn open_ix(w: &World, user: &Pubkey, t: [u8; 32], max_fee: u64) -> Instruction {
         peer: w.ids.peer,
         gas_tank: w.ids.tank,
         replica: w.ids.replica(&t),
-        mint: w.ids.mint(&t),
         system_program: SYSTEM,
     }
     .to_account_metas(None);
@@ -1391,24 +1432,28 @@ fn rent_of(w: &World, space: usize) -> u64 {
 /// A chain the hub left out of a launch (its SYNC was above the ceiling,
 /// failed, or the token is older than the gateway) has no replica: buys are
 /// refused at entry. Anyone opens the token from here — OP_OPEN — and pays
-/// the whole round trip, the replica's rent included: the SYNC that answers
-/// arrives with no lamports and must cost nobody anything.
+/// the round trip: the message and the SYNC the hub answers with. That
+/// SYNC brings the replica's rent itself (one `returnUnit` of lamports, on
+/// the hub adapter), so the opener is charged no rent here and the answer
+/// costs neither the tank nor whoever executes it.
 #[test]
-fn a_token_is_opened_from_here_and_its_sync_costs_nobody() {
+fn a_token_is_opened_from_here_and_the_hubs_sync_brings_its_rent() {
     let mut w = live();
     enlist_executor(&mut w);
     let t = token_id(TOK2);
     let u = w.new_user();
     let user = u.pubkey();
     w.give_usdc(&user, 100 * ONE_USDC);
-    assert_eq!(w.lamports(&w.ids.tank), 0, "the tank is dry on purpose");
+    // the tank holds its own rent floor and not a lamport more, on purpose
+    let floor = rent_of(&w, 0);
+    let tank = w.ids.tank;
+    w.set_lamports(&tank, floor);
 
     // no replica: nothing can be bought, sold, claimed or pulled
     let ix = buy_ix(&w, &user, TOK2, ONE_USDC, 0);
     assert!(w.send(&[ix], &[&u]).unwrap_err().contains("AccountNotInitialized"));
 
-    // ---- the open: OP_OPEN out, `open_legs` (1) prepaid, the rent left
-    // at the two addresses the SYNC will fill
+    // ---- the open: OP_OPEN out, `open_legs` (1) prepaid — and nothing else
     let quoted = quote(&mut w, msg_codec::OP_OPEN, "", "", "", false);
     let before = w.lamports(&user);
     let ix = open_ix(&w, &user, t, 0);
@@ -1417,36 +1462,40 @@ fn a_token_is_opened_from_here_and_its_sync_costs_nobody() {
     let (op, fee, legs, sponsored) = sent_event(&meta);
     assert_eq!((op, legs, sponsored), (msg_codec::OP_OPEN, 1, false));
     assert_eq!(fee, quoted, "quote_send(6) is what an open costs");
-    let rent = rent_of(&w, Replica::SIZE) + rent_of(&w, 82);
-    println!("fee of an open (1 reply leg): {fee} lamports; rent of the replica it prepays: {rent} lamports");
-    assert_eq!(before - w.lamports(&user), fee + rent, "the opener paid the message and the replica's rent");
+    println!("fee of an open (1 reply leg): {fee} lamports");
+    assert_eq!(before - w.lamports(&user), fee, "the opener paid the message, and no rent");
     let expected = SpawnMsg::Open { hub_token: WireAddr(t) };
     assert!(packet_carries(&meta, &enveloped(&w, &expected, 1)), "op 6 on the wire, with its reply budget");
     assert!(packet_carries(&meta, &msg_codec::lz_receive_options(GAS_TO_HUB, RETURN_UNIT)));
-    assert_eq!(w.lamports(&w.ids.replica(&t)), rent_of(&w, Replica::SIZE));
-    assert_eq!(w.lamports(&w.ids.mint(&t)), rent_of(&w, 82));
-    assert!(!w.exists(&w.ids.replica(&t)), "an open creates nothing: only the hub's SYNC does");
+    assert_eq!(w.lamports(&w.ids.replica(&t)), 0, "an open leaves nothing behind: only the hub's SYNC creates");
+    assert_eq!(w.lamports(&w.ids.mint(&t)), 0);
 
-    // two opens in flight: the second finds the rent there and pays only
-    // its message (the hub answers both; a gateway ignores a second SYNC)
-    let u2 = w.new_user();
-    let before = w.lamports(&u2.pubkey());
-    let ix = open_ix(&w, &u2.pubkey(), t, 0);
-    let fee2 = sent_event(&w.send(&[ix], &[&u2]).unwrap()).1;
-    assert_eq!(before - w.lamports(&u2.pubkey()), fee2);
-
-    // ---- the hub answers with an ordinary SYNC: zero value, a dry tank —
-    // and LayerZero's real executor delivers it without losing a lamport
+    // ---- the hub answers with a SYNC that BRINGS one unit of lamports:
+    // LayerZero's real executor delivers it with exactly that value, the
+    // replica is paid for by the message, and the tank — empty — is not
+    // needed; what the message did not need is the tank's
     let exec = w.exec.pubkey();
+    let unit = w.hub_unit();
+    let rent = rent_of(&w, Replica::SIZE) + rent_of(&w, 82);
+    println!("rent of a replica at this cluster's rate: {rent} lamports; the hub's unit here: {unit}");
     let exec_before = w.lamports(&exec);
     let msg = SpawnMsg::SyncToken { hub_token: WireAddr(t), name: "LATECOMER".into(), symbol: "LATE".into() };
-    let meta = execute(&mut w, 1, &msg, 0).expect("the SYNC of an open needs nobody's lamports");
-    println!("CU executor→lz_receive SYNC of an opened token: {}", meta.compute_units_consumed);
-    assert_eq!(w.lamports(&exec), exec_before);
-    assert_eq!(w.lamports(&w.ids.tank), 0);
+    let meta = execute_naming(&mut w, 1, &msg, unit, unit).expect("a SYNC that brings its rent needs nobody's help");
+    println!("CU executor→lz_receive SYNC that brings its rent (real clear): {}", meta.compute_units_consumed);
+    assert_eq!(exec_before - w.lamports(&exec), unit, "the executor spent what the packet bought, to the lamport");
+    assert_eq!(w.lamports(&tank), floor + unit - rent, "the message paid for the replica; the rest is the tank's");
     let replica: Replica = w.read(&w.ids.replica(&t));
     assert_eq!((replica.name.as_str(), replica.mint), ("LATECOMER", w.ids.mint(&t)));
-    execute(&mut w, 2, &msg, 0).expect("the second open's SYNC is ignored, not failed");
+    // two opens were in flight: the second SYNC creates nothing — all of
+    // what it brought goes to the tank
+    let tank_before = w.lamports(&w.ids.tank);
+    execute_naming(&mut w, 2, &msg, unit, unit).expect("a second SYNC is ignored, not failed");
+    assert_eq!(w.lamports(&w.ids.tank) - tank_before, unit);
+    // a delivery that brings less than the envelope names is turned away
+    let other = SpawnMsg::SyncToken { hub_token: WireAddr(token_id(0x44)), name: "X".into(), symbol: "X".into() };
+    let err = execute_naming(&mut w, 3, &other, unit, unit - 1).unwrap_err();
+    assert!(err.contains("InsufficientBalance"), "{err}");
+    assert!(payload_hash_exists(&w, 3), "the packet waits for a delivery that brings it");
 
     // the token trades here now
     let ix = buy_ix(&w, &user, TOK2, ONE_USDC, 0);
@@ -1466,14 +1515,14 @@ fn a_token_is_opened_from_here_and_its_sync_costs_nobody() {
     refused(&mut w, ix, "BadTokenId");
     let ix = open_ix(&w, &user, token_id(0x33), 1);
     refused(&mut w, ix, "InsufficientFee");
-    assert_eq!(w.lamports(&w.ids.replica(&token_id(0x33))), 0, "a refused open leaves no rent behind");
     // a replica is new exposure: a paused gateway refuses opens
     let admin = w.admin.insecure_clone();
     w.govern(spawn_gateway::instruction::Pause {}.data(), &admin).unwrap();
     let ix = open_ix(&w, &user, token_id(0x33), 0);
     refused(&mut w, ix, "Paused");
     w.unpause();
-    // the operator's price: two legs cost more than one
+    // the operator's price: a SYNC that carries lamports costs the hub more
+    // than a trade's reply, so an open may have to prepay two legs
     w.govern(spawn_gateway::instruction::SetOpenLegs { legs: 2 }.data(), &admin).unwrap();
     let dearer = quote(&mut w, msg_codec::OP_OPEN, "", "", "", false);
     assert!(dearer > quoted);
@@ -1481,6 +1530,98 @@ fn a_token_is_opened_from_here_and_its_sync_costs_nobody() {
     let meta = w.send(&[ix], &[&u]).unwrap();
     assert_eq!(sent_event(&meta).2, 2);
     assert!(packet_carries(&meta, &msg_codec::lz_receive_options(GAS_TO_HUB, RETURN_UNIT * 2)));
+}
+
+/// THE DEADLINE (v7.2, final). The hub decodes FIVE words for a trade; the
+/// fifth is the order's deadline in unix seconds, read against the hub's
+/// clock, and an order that lands after it comes back whole. This gateway
+/// stamps it itself — the cluster clock plus the store's lifetime — on
+/// every buy and every sell; no caller chooses it, and it is never 0.
+#[test]
+fn every_order_leaves_with_a_deadline_stamped_from_the_cluster_clock() {
+    let (mut w, u) = world_with_token_and_user(1_000 * ONE_USDC);
+    let user = u.pubkey();
+    let t = token_id(TOK);
+    let admin = w.admin.insecure_clone();
+    let buy = |_: &World, deadline: u128| SpawnMsg::Buy {
+        hub_token: WireAddr(t),
+        buyer: WireAddr::from_pubkey(&user),
+        usd_in: U256::from_spl_amount(ONE_USDC),
+        min_tokens_out: U256::from_spl_amount(ANY),
+        deadline: U256::from_u128(deadline),
+    };
+    assert_eq!(enveloped(&w, &buy(&w, 1), 1).len(), 13 * 32, "an enveloped trade: 4 head words, a length, 8 words of payload");
+
+    // born with one hour: the EVM gateways' thirty minutes, and thirty for
+    // this chain's clock
+    assert_eq!((w.store().order_ttl, w.now()), (3_600, NOW));
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    assert!(packet_carries(&meta, &enveloped(&w, &buy(&w, NOW as u128 + 3_600), 1)));
+    assert_eq!(sent_deadline(&meta), NOW as u64 + 3_600);
+
+    // the clock moves: so does the stamp
+    w.set_now(NOW + 777);
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    assert!(packet_carries(&meta, &enveloped(&w, &buy(&w, NOW as u128 + 777 + 3_600), 1)));
+    assert!(!packet_carries(&meta, &enveloped(&w, &buy(&w, NOW as u128 + 3_600), 1)));
+
+    // the operator lengthens it (a clock that lags, a slow pathway): orders
+    // sent from now on live a day; the bounds are the EVM gateways'
+    w.govern(spawn_gateway::instruction::SetOrderTtl { ttl: 86_400 }.data(), &admin).unwrap();
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    assert_eq!(sent_deadline(&meta), NOW as u64 + 777 + 86_400);
+    assert!(packet_carries(&meta, &enveloped(&w, &buy(&w, NOW as u128 + 777 + 86_400), 1)));
+    w.govern(spawn_gateway::instruction::SetOrderTtl { ttl: 120 }.data(), &admin).unwrap();
+
+    // a sell carries it too — an exit is an order like any other
+    execute(
+        &mut w,
+        2,
+        &SpawnMsg::Deliver { hub_token: WireAddr(t), to: WireAddr::from_pubkey(&user), tokens: U256::from_u128(1_000 * E18), refund: U256::from_u128(0) },
+        0,
+    )
+    .unwrap();
+    let ix = sell_ix_min(&w, &user, TOK, 10 * ONE_TOKEN, 3);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    let expected = SpawnMsg::Sell {
+        hub_token: WireAddr(t),
+        seller: WireAddr::from_pubkey(&user),
+        tokens_in: U256::from_spl_amount(10 * ONE_TOKEN),
+        min_usd_out: U256::from_spl_amount(3),
+        deadline: U256::from_u128(NOW as u128 + 777 + 120),
+    };
+    assert!(packet_carries(&meta, &enveloped(&w, &expected, 1)));
+    assert_eq!(sent_deadline(&meta), NOW as u64 + 777 + 120);
+
+    // a cluster whose clock reads nothing still stamps a deadline: never 0,
+    // which on the wire would mean "no deadline"
+    w.set_now(0);
+    let ix = buy_ix(&w, &user, TOK, ONE_USDC, 0);
+    let meta = w.send(&[ix], &[&u]).unwrap();
+    assert_eq!(sent_deadline(&meta), 120);
+    assert!(packet_carries(&meta, &enveloped(&w, &buy(&w, 120), 1)));
+
+    // the quote of a trade is still exact: the two extra words are always there
+    let quoted = quote(&mut w, msg_codec::OP_SELL, "", "", "", false);
+    let ix = sell_ix(&w, &user, TOK, ONE_TOKEN);
+    assert_eq!(sent_event(&w.send(&[ix], &[&u]).unwrap()).1, quoted);
+
+    // WHAT THE HUB DOES WITH IT: an order that lands after its deadline is
+    // refused whole and comes home like one under its minimum — the dollars
+    // of a buy in a DELIVER's refund, a sold bag re-delivered. Both are
+    // messages this program already settles; the buy's refund, here:
+    let usdc = w.token_amount(&ata_of(&user, &USDC));
+    execute(
+        &mut w,
+        3,
+        &SpawnMsg::Deliver { hub_token: WireAddr(t), to: WireAddr::from_pubkey(&user), tokens: U256::from_u128(0), refund: U256::from_u128(E18) },
+        0,
+    )
+    .unwrap();
+    assert_eq!(w.token_amount(&ata_of(&user, &USDC)), usdc + ONE_USDC);
 }
 
 /// A dev buy on a chain the hub left out of the launch is delivered and
@@ -1514,9 +1655,10 @@ fn a_bag_parked_behind_a_missing_replica_is_claimed_once_the_token_is_opened() {
     let stranger = w.new_user();
     let ix = open_ix(&w, &stranger.pubkey(), t, 0);
     w.send(&[ix], &[&stranger]).unwrap();
-    let tank_before = w.lamports(&tank);
-    execute(&mut w, 2, &SpawnMsg::SyncToken { hub_token: WireAddr(t), name: "LEFT OUT".into(), symbol: "OUT".into() }, 0).unwrap();
-    assert_eq!(w.lamports(&tank), tank_before, "the opener's rent, not the tank's");
+    let (tank_before, unit) = (w.lamports(&tank), w.hub_unit());
+    let sync = SpawnMsg::SyncToken { hub_token: WireAddr(t), name: "LEFT OUT".into(), symbol: "OUT".into() };
+    execute_naming(&mut w, 2, &sync, unit, unit).unwrap();
+    assert!(w.lamports(&tank) > tank_before, "the SYNC paid for the replica and left the tank a little");
     let mint = w.ids.mint(&t);
     let i = Instruction::new_with_bytes(
         w.ids.program,
@@ -1681,97 +1823,102 @@ fn a_claim_leaves_for_another_chain_at_that_chains_price_and_can_come_home() {
 }
 
 /// The other end of a move: `moveClaim` on ANOTHER chain names a recipient
-/// here, and the hub forwards it. LayerZero's real executor delivers it,
-/// with the zero value every hub message has, to a recipient that never
-/// touched this chain: the claim is booked in a user account opened out of
-/// the tank. With a dry tank the executor declines (its own balance check)
-/// and the packet waits — for a refill, for anyone who opens that account,
-/// or for a delivery that brings the rent.
+/// here, and the hub forwards it — only for a key whose top twelve bytes
+/// are not all zero, and WITH one `returnUnit` of lamports. LayerZero's real
+/// executor delivers it to a recipient that never touched this chain: the
+/// claim is booked in a user account the message itself pays for. What the
+/// hub operator can get wrong — a unit set too low, or not at all — costs
+/// the tank, then makes the delivery wait; it never loses the claim.
 #[test]
 fn the_real_executor_delivers_a_moved_claim_to_a_recipient_it_never_saw() {
     let mut w = live();
     enlist_executor(&mut w);
     let tank = w.ids.tank;
     let exec = w.exec.pubkey();
+    let floor = rent_of(&w, 0);
     let rent = rent_of(&w, UserAccount::SIZE);
-    w.fund(&tank, 100_000_000);
+    let unit = w.hub_unit();
     let pay = |to: &Pubkey| SpawnMsg::Payout { to: WireAddr::from_pubkey(to), usd_out: U256::from_u128(25 * E18) };
 
-    // ---- a funded tank: delivered, the executor's balance untouched
+    // ---- the unit as it should be, an EMPTY tank: delivered, the account
+    // paid for by the message, the rest left in the tank
+    assert_eq!(w.lamports(&tank), 0);
     let a = Keypair::new().pubkey();
-    let (exec_before, tank_before) = (w.lamports(&exec), w.lamports(&tank));
-    let meta = execute(&mut w, 1, &pay(&a), 0).expect("PAYOUT to a stranger through the real executor");
-    println!("CU executor→lz_receive PAYOUT to a recipient with no account (real clear): {}", meta.compute_units_consumed);
-    assert_eq!(w.lamports(&exec), exec_before);
-    assert_eq!(tank_before - w.lamports(&tank), rent);
-    println!("rent of the user account a moved claim opens, from the tank: {rent} lamports");
+    let exec_before = w.lamports(&exec);
+    let meta = execute_naming(&mut w, 1, &pay(&a), unit, unit).expect("a moved PAYOUT that brings its rent, to a stranger");
+    println!("CU executor→lz_receive moved PAYOUT that opens the recipient's account (real clear): {}", meta.compute_units_consumed);
+    assert_eq!(exec_before - w.lamports(&exec), unit, "the executor spent what the packet bought, to the lamport");
+    assert_eq!(w.lamports(&tank), unit - rent);
+    println!("rent of the user account a moved claim opens: {rent} lamports, out of the {unit} the message brought");
     let ua: UserAccount = w.read(&w.ids.user(&a));
     assert_eq!((ua.owner, ua.usd_claim), (a, 25 * ONE_USDC));
-    // an off-curve recipient, the all-zero key: the executor resolves and
-    // delivers them the same way
-    for (n, to) in [(2u64, pda(&[b"vault"], &ATA_PROGRAM)), (3, Pubkey::default()), (4, w.ids.store)] {
-        execute(&mut w, n, &pay(&to), 0).unwrap_or_else(|e| panic!("PAYOUT to {to}: {e}"));
+    // another program's address, a key the hub would never forward (it
+    // sends an address-shaped recipient home — but nothing here relies on
+    // that), the store itself: resolved and delivered the same way
+    for (n, to) in [(2u64, pda(&[b"vault"], &ATA_PROGRAM)), (3, Pubkey::new_from_array(pad32(&[0xd0; 20]))), (4, w.ids.store)] {
+        execute_naming(&mut w, n, &pay(&to), unit, unit).unwrap_or_else(|e| panic!("PAYOUT to {to}: {e}"));
         let ua: UserAccount = w.read(&w.ids.user(&to));
         assert_eq!(ua.usd_claim, 25 * ONE_USDC);
     }
-    // a recipient who holds USDC is simply paid
+    // a recipient who holds USDC is simply paid; the lamports it did not
+    // need are the tank's
     let vault = w.ids.vault;
     w.set_token_amount(&vault, 100 * ONE_USDC);
     let holder = Keypair::new().pubkey();
     w.give_usdc(&holder, 0);
-    execute(&mut w, 5, &pay(&holder), 0).unwrap();
+    let tank_before = w.lamports(&tank);
+    execute_naming(&mut w, 5, &pay(&holder), unit, unit).unwrap();
     assert_eq!(w.token_amount(&ata_of(&holder, &USDC)), 25 * ONE_USDC);
+    assert_eq!(w.lamports(&tank) - tank_before, unit);
+    assert!(!w.exists(&w.ids.user(&holder)));
 
-    // ---- a DRY tank: the executor will not pay the rent — and the packet
-    // is not lost
-    w.set_lamports(&tank, 0);
+    // ---- THE UNIT SET TOO LOW on the hub adapter (half the rent). While
+    // the tank holds a float, it makes up the difference and the executor
+    // still spends only what the packet bought…
+    let low = rent / 2;
+    w.set_lamports(&tank, floor + rent);
     let b = Keypair::new().pubkey();
-    let err = execute(&mut w, 6, &pay(&b), 0).unwrap_err();
-    assert!(err.contains("InsufficientBalance"), "expected the executor's own balance check, got: {err}");
-    assert!(payload_hash_exists(&w, 6), "the message was not consumed");
-    // (1) anyone opens the recipient's account: the same packet lands for free
-    w.open_user_account(&b);
     let exec_before = w.lamports(&exec);
-    execute(&mut w, 6, &pay(&b), 0).expect("the same packet, once the account exists");
-    assert_eq!(w.lamports(&exec), exec_before);
-    // (2) or the tank is refilled
-    let c = Keypair::new().pubkey();
-    assert!(execute(&mut w, 7, &pay(&c), 0).is_err());
-    w.fund(&tank, 10_000_000);
-    execute(&mut w, 7, &pay(&c), 0).expect("the same packet, once the tank is refilled");
-    w.set_lamports(&tank, 0);
-
-    // ---- WHAT A VALUE ON THE HUB'S MESSAGE WOULD CHANGE (it has none in
-    // v7.2). Bought by the packet's option, the rent is the executor's to
-    // spend: delivered with a dry tank, nobody's help needed…
-    let d = Keypair::new().pubkey();
-    let exec_before = w.lamports(&exec);
-    execute(&mut w, 8, &pay(&d), rent).expect("a delivery that brings the rent");
-    assert_eq!(exec_before - w.lamports(&exec), rent);
-    // …and, named in the envelope, it goes through the tank: the message
-    // funds the account it opens and the tank — empty: at the rent floor
-    // every account keeps — ends where it started
-    let floor = rent_of(&w, 0);
+    execute_naming(&mut w, 6, &pay(&b), low, low).expect("a short unit is covered by the tank's float");
+    assert_eq!(exec_before - w.lamports(&exec), low);
+    assert_eq!(w.lamports(&tank), floor + low);
+    // …and once the float is gone, LayerZero's executor declines — its own
+    // balance check — and the packet waits. It is not lost:
     w.set_lamports(&tank, floor);
+    let c = Keypair::new().pubkey();
+    let err = execute_naming(&mut w, 7, &pay(&c), low, low).unwrap_err();
+    assert!(err.contains("InsufficientBalance"), "expected the executor's own balance check, got: {err}");
+    assert!(payload_hash_exists(&w, 7), "the message was not consumed");
+    // (1) anyone opens the recipient's account: the same packet lands
+    w.open_user_account(&c);
+    execute_naming(&mut w, 7, &pay(&c), low, low).expect("the same packet, once the account exists");
+    // (what that delivery brought and did not need went to the tank: two
+    // short units make one rent — the float rebuilds itself)
+    assert_eq!(w.lamports(&tank), floor + low);
+    // (2) or the tank is topped up (a plain transfer, by anyone)
+    w.set_lamports(&tank, floor);
+    let d = Keypair::new().pubkey();
+    assert!(execute_naming(&mut w, 8, &pay(&d), low, low).is_err());
+    w.fund(&tank, 10_000_000);
+    execute_naming(&mut w, 8, &pay(&d), low, low).expect("the same packet, once the tank is topped up");
+
+    // ---- THE UNIT NOT SET (0): the message is a reply's twin and the tank
+    // pays the whole rent — the v7.2 hub before its last round
     let e = Keypair::new().pubkey();
-    let exec_before = w.lamports(&exec);
-    execute_naming(&mut w, 9, &pay(&e), rent, rent).expect("a message that names and brings its rent");
-    assert_eq!(exec_before - w.lamports(&exec), rent);
-    assert_eq!(w.lamports(&tank), floor);
-    let ua: UserAccount = w.read(&w.ids.user(&e));
-    assert_eq!(ua.usd_claim, 25 * ONE_USDC);
-    // a delivery that names a value and brings less is turned away
-    let f = Keypair::new().pubkey();
-    let err = execute_naming(&mut w, 10, &pay(&f), rent, rent - 1).unwrap_err();
-    assert!(err.contains("InsufficientBalance"), "{err}");
-    // a tank drained to nothing cannot take less than its own rent floor:
-    // the value then stays with whoever delivers, and nothing fails for it
+    let (exec_before, tank_before) = (w.lamports(&exec), w.lamports(&tank));
+    execute(&mut w, 9, &pay(&e), 0).expect("a PAYOUT with no value, from the tank");
+    assert_eq!(w.lamports(&exec), exec_before);
+    assert_eq!(tank_before - w.lamports(&tank), rent);
     w.set_lamports(&tank, 0);
+    let f = Keypair::new().pubkey();
+    let err = execute(&mut w, 10, &pay(&f), 0).unwrap_err();
+    assert!(err.contains("InsufficientBalance"), "{err}");
+
+    // ---- a delivery that names a value and brings less is turned away
     let g = Keypair::new().pubkey();
-    w.open_user_account(&g);
-    let exec_before = w.lamports(&exec);
-    execute_naming(&mut w, 11, &pay(&g), 1_000, 1_000).expect("a value too small for an empty tank is left alone");
-    assert_eq!((w.lamports(&exec), w.lamports(&tank)), (exec_before, 0));
+    let err = execute_naming(&mut w, 11, &pay(&g), unit, unit - 1).unwrap_err();
+    assert!(err.contains("InsufficientBalance"), "{err}");
+    execute_naming(&mut w, 11, &pay(&g), unit, unit).expect("the same packet, with what it names");
 }
 
 /* ------------------------------ CCTP (real) --------------------------- */

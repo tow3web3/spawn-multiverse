@@ -5,9 +5,11 @@
  * come back through LayerZero's real executor program and the real
  * endpoint `clear`. Run twice: over the verifier set the wiring installs
  * (ours, V7.md §6) and over the pathway's default set (what V7.md §5
- * measured). Protocol v7.2: every trade names its minimum, the reply budget
- * rides the envelope, a token is opened and a claim moved from here, and a
- * claim moved HERE is booked for a recipient this chain never saw.
+ * measured). Protocol v7.2 (final): every trade names its minimum and
+ * leaves with a deadline stamped from the cluster clock, the reply budget
+ * rides the envelope, a token is opened and a claim moved from here, and
+ * the hub's SYNCs and moved PAYOUTs arrive with the lamports that pay for
+ * what they create — for a recipient this chain never saw, too.
  */
 import { expect } from 'chai'
 import { Keypair, PublicKey } from '@solana/web3.js'
@@ -28,6 +30,7 @@ import {
   findPaidOut,
   findSentToHub,
   findUserAccountOpened,
+  findValueReceived,
   governIx,
   hexToBytes,
   indexOfBytes,
@@ -36,12 +39,13 @@ import {
   lzReceiveOptions,
   parkedUnits,
   splToE18,
+  suggestedHubUnit,
   toBytes32,
   txSize,
   ata,
 } from '../src'
-import { Sent, USDC, World, measure, measurements } from './harness'
-import { GAS_TO_HUB, HUB_ADAPTER, HUB_EID, HUB_PAD, ONE, RETURN_UNIT, SPAWN_LEGS, wiredWorld } from './fixtures'
+import { NOW, Sent, USDC, World, measure, measurements } from './harness'
+import { GAS_TO_HUB, HUB_ADAPTER, HUB_EID, HUB_PAD, ONE, ORDER_TTL, RETURN_UNIT, SPAWN_LEGS, wiredWorld } from './fixtures'
 
 const TOK = toBytes32('0x' + '8b'.repeat(20))
 const TOK2 = toBytes32('0x' + '5e'.repeat(20))
@@ -60,6 +64,10 @@ function scenario(label: string, verifiers: VerifierSet | null | undefined) {
     let user: Keypair
     let nonceIn = 0n
     const execute = (msg: Parameters<World['execute']>[4]) => w.execute(HUB_EID, HUB_PAD, HUB_ADAPTER, ++nonceIn, msg)
+    /** A hub message that BRINGS lamports: a SYNC, a moved PAYOUT — its
+     * envelope names them and LayerZero's executor delivers with them. */
+    const executeWith = (msg: Parameters<World['execute']>[4], lamports: bigint) =>
+      w.execute(HUB_EID, HUB_PAD, HUB_ADAPTER, ++nonceIn, msg, lamports, lamports)
     const outbound = () => decodeNonce(w.account(lzPda.nonce(w.pdas.store, HUB_EID, HUB_ADAPTER))!.data).outbound
     const rows: string[] = []
 
@@ -76,6 +84,10 @@ function scenario(label: string, verifiers: VerifierSet | null | undefined) {
       expect(ev.legs).to.equal(legs)
       expect(built.legs).to.equal(legs)
       expect(ev.sponsored).to.equal(false)
+      // a trade leaves with a deadline — the cluster clock plus the store's
+      // lifetime — and nothing else does
+      const deadline = spec.trade ? w.now() + ORDER_TTL : 0n
+      expect([built.deadline, ev.deadline]).to.deep.equal([deadline, deadline])
       expect(ev.nativeFee).to.equal(built.quotedFee, 'quote_send (simulated by the client) = what the send cost')
       expect(built.maxNativeFee).to.equal((built.quotedFee * 11_000n) / 10_000n)
       // the packet carries the client's bytes, and the reply budget
@@ -209,27 +221,68 @@ function scenario(label: string, verifiers: VerifierSet | null | undefined) {
       expect((await client.userAccount(someone))!.owner.equals(someone)).to.equal(true)
     })
 
-    it('v7.2 open: a token the hub left out is asked for from here — the opener pays the replica’s rent, the SYNC costs nobody', async () => {
-      expect(await client.replica(TOK3)).to.equal(null)
-      const rent = (bytes: number) => w.svm.minimumBalanceForRentExemption(BigInt(bytes))
-      const due = await client.openRent(TOK3)
-      expect(due).to.equal(rent(201) + rent(82))
-      const before = w.lamports(user.publicKey)
-      const sent = await send(SENDS.open_token, { hubToken: TOK3 }, 1, true)
-      const ev = findSentToHub(sent.logs)!
-      expect(ev.op).to.equal(OP.OPEN)
-      expect(before - w.lamports(user.publicKey)).to.equal(ev.nativeFee + SIG_FEE + due, 'the message, the signature, the rent')
-      expect(await client.openRent(TOK3)).to.equal(0n, 'a second opener owes no rent')
-      expect(await client.replica(TOK3)).to.equal(null, 'only the hub’s SYNC creates the replica')
-      measure(`[${label}] open_token: rent prepaid ${due} lamports (replica entry + mint)`)
+    it('v7.2 deadline: every buy and sell is five words on the wire, stamped from the cluster clock; the operator sets the lifetime', async () => {
+      expect([w.now(), client.store.orderTtl]).to.deep.equal([NOW, 3600])
+      expect(await client.clusterTime()).to.equal(NOW)
+      const b = await client.buy(user.publicKey, { hubToken: TOK, usdcIn: ONE, minTokensOut: ANY_FILL })
+      expect(b.deadline).to.equal(NOW + 3600n)
+      expect(b.payload).to.include({ op: 'BUY', deadline: NOW + 3600n })
+      // the enveloped trade: 4 head words, a length, 3 + 5 words of payload
+      expect(b.message.length).to.equal(13 * 32)
+      // the clock moves on while the wallet signs: the program stamps what
+      // the clock says when the order EXECUTES, not what the client saw
+      w.setNow(NOW + 90n)
+      const sent = w.sendTx(b.tx, [user])
+      expect(findSentToHub(sent.logs)!.deadline).to.equal(NOW + 90n + 3600n)
+      expect(sent.innerData.some((d) => indexOfBytes(d, b.message) >= 0)).to.equal(false, 'the client’s guess was 90 s short')
+      const now = { ...b.payload, deadline: NOW + 90n + 3600n } as typeof b.payload
+      const { outboundMessage } = require('../src')
+      expect(sent.innerData.some((d) => indexOfBytes(d, outboundMessage(w.pdas.store, client.store.hubPad, now, b.value)) >= 0)).to.equal(true)
 
-      // the hub answers with an ordinary SYNC, zero value: the real
-      // executor delivers it and neither it nor the tank pays a lamport
+      // the operator lengthens it — a clock that lags, a slow pathway
+      w.send(admin, [governIx.setOrderTtl(w.pdas, admin.publicKey, 86_400)])
+      await client.refresh()
+      const s = await client.sell(user.publicKey, { hubToken: TOK, amount: ONE, minUsdcOut: ANY_FILL })
+      expect(s.deadline).to.equal(NOW + 90n + 86_400n)
+      expect(findSentToHub(w.sendTx(s.tx, [user]).logs)!.deadline).to.equal(s.deadline)
+      // never without one: the program refuses a lifetime outside two minutes to a day
+      for (const bad of [0, 119, 86_401]) {
+        const ix = governIx.setOrderTtl(w.pdas, admin.publicKey, 3600)
+        ix.data.writeUInt32LE(bad, 8)
+        expect(() => w.send(admin, [ix]), String(bad)).to.throw(/BadOrderTtl/)
+      }
+      const stranger = w.newUser()
+      expect(() => w.send(stranger, [governIx.setOrderTtl(w.pdas, stranger.publicKey, 3600)])).to.throw(/NotOperator/)
+      w.send(admin, [governIx.setOrderTtl(w.pdas, admin.publicKey, 3600)])
+      w.setNow(NOW)
+      await client.refresh()
+    })
+
+    it('v7.2 open: a token the hub left out is asked for from here; the hub’s SYNC brings the replica’s rent', async () => {
+      expect(await client.replica(TOK3)).to.equal(null)
+      const unit = await client.hubUnit()
+      const rent = (bytes: number) => w.svm.minimumBalanceForRentExemption(BigInt(bytes))
+      expect(unit.replicaRent).to.equal(rent(201) + rent(82))
+      expect(unit.userAccountRent).to.equal(rent(245))
+      expect(unit.suggested).to.equal(4_100_000n, 'the dearer rent plus about a tenth, rounded — at this cluster’s rent')
+      // …and at mainnet's and devnet's (5,080 lamports a byte): 2,738,120 of rent → 3,000,000
+      expect(suggestedHubUnit((128n + 201n + 128n + 82n) * 5_080n)).to.equal(3_000_000n)
+      // the opener pays the message — and no rent: `send` checks the user
+      // paid the LayerZero fee and the signature, nothing else
+      const sent = await send(SENDS.open_token, { hubToken: TOK3 }, 1)
+      expect(findSentToHub(sent.logs)!.op).to.equal(OP.OPEN)
+      expect(w.lamports(w.pdas.replica(TOK3))).to.equal(0n, 'an open leaves nothing behind')
+      expect(await client.replica(TOK3)).to.equal(null, 'only the hub’s SYNC creates the replica')
+
+      // the hub answers with a SYNC that brings one unit of lamports: the
+      // real executor delivers it with exactly that, the message pays for
+      // the replica, and what it did not need is the tank's
       const [exec0, tank0] = [w.lamports(w.exec.publicKey), await client.tankBalance()]
-      const s = await execute({ op: 'SYNC_TOKEN', hubToken: TOK3, name: 'LATECOMER', symbol: 'LATE' })
-      measure(`[${label}] executor→lz_receive SYNC of an opened token: ${s.cu} CU, ${s.size} B`)
-      expect(exec0 - w.lamports(w.exec.publicKey)).to.equal(SIG_FEE, 'the executor paid its signature, nothing else')
-      expect(await client.tankBalance()).to.equal(tank0)
+      const s = await executeWith({ op: 'SYNC_TOKEN', hubToken: TOK3, name: 'LATECOMER', symbol: 'LATE' }, unit.suggested)
+      measure(`[${label}] executor→lz_receive SYNC that brings its rent: ${s.cu} CU, ${s.size} B (unit ${unit.suggested}, rent ${unit.replicaRent} lamports)`)
+      expect(exec0 - w.lamports(w.exec.publicKey)).to.equal(SIG_FEE + unit.suggested, 'the executor spent its signature and what the packet bought')
+      expect((await client.tankBalance()) - tank0).to.equal(unit.suggested - unit.replicaRent)
+      expect(findValueReceived(s.logs)).to.deep.equal([{ lamports: unit.suggested, toTank: unit.suggested - unit.replicaRent }])
       expect((await client.replica(TOK3))!.name).to.equal('LATECOMER')
       // it is open now: asking again is refused before anything is paid
       const again = await client.openToken(user.publicKey, { hubToken: TOK3 }, { maxNativeFee: 0n })
@@ -270,37 +323,51 @@ function scenario(label: string, verifiers: VerifierSet | null | undefined) {
       expect((await client.userAccount(user.publicKey))!.usdClaim).to.equal(all)
 
       // the hub could not hand one on: it comes home as an ordinary PAYOUT
-      await execute({ op: 'PAYOUT', to: user.publicKey.toBytes(), usdOut: splToE18(ONE) })
-      expect((await client.userAccount(user.publicKey))!.usdClaim).to.equal(all + ONE)
+      // (a reply: no lamports) — a claim again while the vault is short
+      const home = (await client.vaultBalance()) + ONE
+      await execute({ op: 'PAYOUT', to: user.publicKey.toBytes(), usdOut: splToE18(home) })
+      expect((await client.userAccount(user.publicKey))!.usdClaim).to.equal(all + home)
     })
 
-    it('v7.2: a claim moved HERE for a recipient this chain never saw is booked for them, not failed', async () => {
-      const stranger = Keypair.generate().publicKey
+    it('v7.2: a claim moved HERE for a recipient this chain never saw is booked for them — and brings what their account costs', async () => {
+      const unit = (await client.hubUnit()).suggested
       const rent = w.svm.minimumBalanceForRentExemption(245n)
+      const stranger = Keypair.generate().publicKey
       const [exec0, tank0] = [w.lamports(w.exec.publicKey), await client.tankBalance()]
-      const p = await execute({ op: 'PAYOUT', to: stranger.toBytes(), usdOut: 25n * E18 })
-      measure(`[${label}] executor→lz_receive PAYOUT to a recipient with no account: ${p.cu} CU, ${p.size} B (rent ${rent} lamports from the tank)`)
+      const p = await executeWith({ op: 'PAYOUT', to: stranger.toBytes(), usdOut: 25n * E18 }, unit)
+      measure(`[${label}] executor→lz_receive moved PAYOUT to a recipient with no account: ${p.cu} CU, ${p.size} B (it brought ${unit} lamports; the account cost ${rent})`)
       const [paid] = findPaidOut(p.logs)
       expect([paid.to.toBase58(), paid.usdc, paid.claim]).to.deep.equal([stranger.toBase58(), 0n, 25n * ONE])
       const [opened] = findUserAccountOpened(p.logs)
-      expect([opened.owner.toBase58(), opened.rentFromTank]).to.deep.equal([stranger.toBase58(), true])
+      expect([opened.owner.toBase58(), opened.rentFrom]).to.deep.equal([stranger.toBase58(), 'message'])
       const ua = (await client.userAccount(stranger))!
       expect([ua.owner.toBase58(), ua.usdClaim]).to.deep.equal([stranger.toBase58(), 25n * ONE])
-      expect(exec0 - w.lamports(w.exec.publicKey)).to.equal(SIG_FEE, 'the executor paid its signature, nothing else')
-      expect(tank0 - (await client.tankBalance())).to.equal(rent)
+      expect(exec0 - w.lamports(w.exec.publicKey)).to.equal(SIG_FEE + unit, 'the executor spent its signature and what the packet bought')
+      expect((await client.tankBalance()) - tank0).to.equal(unit - rent, 'the tank kept what the account did not cost')
       // not a wallet, not even an account: the executor resolves and
       // delivers each the same way
-      for (const to of [w.pdas.store, PublicKey.default, client.store.vault, lzPda.endpointSettings()]) {
-        await execute({ op: 'PAYOUT', to: to.toBytes(), usdOut: 25n * E18 })
+      for (const to of [w.pdas.store, client.store.vault, lzPda.endpointSettings()]) {
+        await executeWith({ op: 'PAYOUT', to: to.toBytes(), usdOut: 25n * E18 }, unit)
         expect((await client.userAccount(to))!.usdClaim).to.equal(25n * ONE)
       }
-      // a recipient who holds a USDC account is simply paid (once the vault can)
+      // a PAYOUT that brings nothing (a reply: a sale, a claim sent back —
+      // or a hub whose unit for this chain was never set) for someone with
+      // no account: the tank pays, as long as it can
+      const other = Keypair.generate().publicKey
+      const tank1 = await client.tankBalance()
+      const q0 = await execute({ op: 'PAYOUT', to: other.toBytes(), usdOut: 25n * E18 })
+      expect(findUserAccountOpened(q0.logs)[0].rentFrom).to.equal('tank')
+      expect(tank1 - (await client.tankBalance())).to.equal(rent)
+      // a recipient who holds a USDC account is simply paid (once the vault
+      // can); the lamports the message brought and did not need are the tank's
       w.setTokenAmount(client.store.vault, 100n * ONE)
       const holder = Keypair.generate().publicKey
       w.giveUsdc(holder, 0n)
-      const q = await execute({ op: 'PAYOUT', to: holder.toBytes(), usdOut: 25n * E18 })
+      const tank2 = await client.tankBalance()
+      const q = await executeWith({ op: 'PAYOUT', to: holder.toBytes(), usdOut: 25n * E18 }, unit)
       expect(findPaidOut(q.logs)[0].usdc).to.equal(25n * ONE)
       expect(await client.userAccount(holder)).to.equal(null)
+      expect((await client.tankBalance()) - tank2).to.equal(unit)
       w.setTokenAmount(client.store.vault, 0n)
     })
 

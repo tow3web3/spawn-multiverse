@@ -361,6 +361,31 @@ impl World {
         self.govern(spawn_gateway::instruction::Unpause {}.data(), &admin).unwrap();
     }
 
+    /// The cluster clock's unix time — what the program stamps orders from.
+    pub fn now(&self) -> i64 {
+        self.svm.get_sysvar::<solana_sdk::clock::Clock>().unix_timestamp
+    }
+
+    /// Sets the cluster clock's unix time (LiteSVM starts it at 0).
+    pub fn set_now(&mut self, unix_timestamp: i64) {
+        let mut clock = self.svm.get_sysvar::<solana_sdk::clock::Clock>();
+        clock.unix_timestamp = unix_timestamp;
+        self.svm.set_sysvar(&clock);
+    }
+
+    /// What the HUB adapter's operator sets as `returnUnit` for this chain,
+    /// by the rule of V7.md §9 (and of the client's `suggestedHubUnit`): the
+    /// dearer of the two things a message the hub is free to skip may have
+    /// to create here — a replica's two accounts — at this cluster's rent,
+    /// plus a tenth, rounded down to 100,000 lamports (never under that
+    /// rent rounded up). 3,000,000 at mainnet's rent; 4,100,000 at LiteSVM's.
+    pub fn hub_unit(&self) -> u64 {
+        let replica = self.svm.minimum_balance_for_rent_exemption(spawn_gateway::state::Replica::SIZE)
+            + self.svm.minimum_balance_for_rent_exemption(82);
+        let step = 100_000;
+        (replica * 11 / 10 / step * step).max(replica.div_ceil(step) * step)
+    }
+
     pub fn set_move_legs_ix(&self, who: &Pubkey, dst_chain: u32, legs: u16) -> Instruction {
         Instruction::new_with_bytes(
             self.ids.program,

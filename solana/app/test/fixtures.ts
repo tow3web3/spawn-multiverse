@@ -16,6 +16,8 @@ export const GAS_TO_HUB = 4_600_000n
 /** 0.0002 ETH, the reply leg the Rust tests price. */
 export const RETURN_UNIT = 200_000_000_000_000n
 export const SPAWN_LEGS = 3
+/** The lifetime a store is born with: an hour. */
+export const ORDER_TTL = 3_600n
 export const ONE = 1_000_000n
 /** What a claim moved toward each chain prepays, in reply legs (a made-up
  * price list: an L1 is dear, the hub's own chain is one reply away). */

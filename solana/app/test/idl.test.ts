@@ -174,6 +174,9 @@ describe('builders = the IDL (Anchor’s own coder as the reference)', () => {
     const a = Keypair.generate().publicKey
     check('set_open_legs', governIx.setOpenLegs(pdas, a, 2), { legs: 2 })
     expect(() => governIx.setOpenLegs(pdas, a, 9)).to.throw(/out of bounds/)
+    // how long an order lives: two minutes to a day, never none
+    check('set_order_ttl', governIx.setOrderTtl(pdas, a, 3600), { ttl: 3600 })
+    for (const bad of [0, 119, 86_401, 1.5]) expect(() => governIx.setOrderTtl(pdas, a, bad), String(bad)).to.throw(/out of bounds/)
     check('set_move_legs', setMoveLegsIx(pdas, a, 4, 4096), { dst_chain: 4, legs: 4096 })
     expect(() => setMoveLegsIx(pdas, a, 4, 4097)).to.throw(/out of bounds/)
     const table = Keypair.generate().publicKey
@@ -199,9 +202,10 @@ describe('builders = the IDL (Anchor’s own coder as the reference)', () => {
         endpoint_program: LZ_ENDPOINT, hub_eid: 40245, hub_pad: arr(tok), usdc_mint: k, vault: user,
         deposit_cap: new BN(9), claims_total: new BN(8), pool_total: new BN(7), usd_dust_e18: new BN('123456789012345678901'),
         gas_to_hub: new BN(4_600_000), return_unit: new BN('350000000000000'), trade_legs: 1, spawn_legs: 6, open_legs: 2,
+        order_ttl: 3600,
       }),
     )
-    expect([store.hubEid, store.paused, store.depositCap, store.usdDustE18, store.returnUnit, store.spawnLegs, store.openLegs]).to.deep.equal([40245, true, 9n, 123456789012345678901n, 350000000000000n, 6, 2])
+    expect([store.hubEid, store.paused, store.depositCap, store.usdDustE18, store.returnUnit, store.spawnLegs, store.openLegs, store.orderTtl]).to.deep.equal([40245, true, 9n, 123456789012345678901n, 350000000000000n, 6, 2, 3600])
     const route = decodeMoveRoute(await enc('MoveRoute', { dst_chain: 4, legs: 4096, bump: 9 }))
     expect([route.dstChain, route.legs, route.bump]).to.deep.equal([4, 4096, 9])
     const peer = decodeCctpPeer(await enc('CctpPeer', { label: 3, domain: 6, vault: arr(tok), bump: 7 }))

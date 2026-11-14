@@ -73,6 +73,10 @@ pub struct Store {
     /// leg is priced on — and 1 from birth, never 0 by default: an open
     /// that prepaid nothing would be the hub tank's to pay.
     pub open_legs: u8,
+    /// Seconds an order lives (v7.2): every BUY and SELL is stamped with
+    /// the cluster clock plus this, and the hub refuses it after. Never 0
+    /// (bounded both ways). See `DEFAULT_ORDER_TTL`.
+    pub order_ttl: u32,
 }
 
 impl Store {

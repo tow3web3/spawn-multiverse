@@ -29,6 +29,8 @@ describe('the rehearsal command line', function () {
       rpc: w.rpc(),
       out: (l) => lines.push(l),
       loadKeypair: () => user,
+      // this machine's clock: 42 seconds ahead of the cluster's
+      now: () => Number(w.now() + 42n) * 1000,
       send:
         o.canSend === false
           ? undefined
@@ -77,6 +79,10 @@ describe('the rehearsal command line', function () {
     expect(out).to.match(/→ base\s+move: 1 legs;\s+CCTP peer: 0x0{24}c3c3/)
     expect(out).to.match(/→ optimism\s+move: closed;\s+CCTP peer: none/)
     expect(out).to.match(/lookup table .* frozen/)
+    // every order has a deadline; the cluster clock is compared with this machine's
+    expect(out).to.match(/orders\s+live 1 h: a buy or a sell sent now is good until 2026-11-14 05:50:00 UTC on the cluster clock, which is 42 s BEHIND this machine's/)
+    // what the hub adapter must be told for this chain
+    expect(out).to.match(/hub unit .* returnUnit of label 1 must be at least 3751440 lamports — set 4100000/)
     expect(out).to.match(/buy \/ sell \/ claim \/ pull\s+0\.\d+ SOL/)
     expect(out).to.match(/move → ethereum\s+0\.\d+ SOL\s+\(40 legs/)
     expect(out).to.match(/move → optimism\s+closed/)
@@ -89,6 +95,7 @@ describe('the rehearsal command line', function () {
     expect(out).to.match(/minimum\s+900000 tokens/)
     expect(out).to.match(/fee\s+0\.\d+ SOL quoted, ceiling 0\.\d+ SOL/)
     expect(out).to.match(/reply budget 1 leg × 0\.0002 ETH = 0\.0002 ETH/)
+    expect(out).to.match(/deadline\s+2026-11-14 05:50:00 UTC — the cluster clock plus 1 h/)
     expect(out).to.match(/simulation: ok, \d+ compute units/)
     expect(out).to.match(/DRY RUN — nothing was sent/)
     expect(outbound()).to.equal(n0)
@@ -118,6 +125,7 @@ describe('the rehearsal command line', function () {
     let out = await cli(`buy --token ${TOK} --usdc 250 --min-tokens 900000 --keypair k.json --send`)
     expect(out).to.match(/sent: local/)
     expect(out).to.match(/LayerZero charged 0\.\d+ SOL; 1 reply prepaid/)
+    expect(out).to.match(/the order is good until 2026-11-14 05:50:00 UTC/)
     expect(await client.vaultBalance()).to.equal(250n * ONE)
     await execute({ op: 'DELIVER', hubToken: toBytes32(TOK), to: user.publicKey.toBytes(), tokens: 1_000_000n * E18, refund: 0n })
     out = await cli(`sell --token ${TOK} --tokens 400000 --min-usdc 87.5 --keypair k.json --send`)
@@ -131,15 +139,19 @@ describe('the rehearsal command line', function () {
     expect(outbound()).to.equal(n0 + 3n)
   })
 
-  it('open: a token that is not on this chain; the rent is announced and paid', async () => {
+  it('open: a token that is not on this chain; the opener pays the message, the hub’s SYNC brings the rent', async () => {
     let out = await cli(`open --token ${LEFT_OUT} --keypair k.json`)
-    expect(out).to.match(/rent\s+0\.00\d+ SOL left at the replica/)
+    expect(out).to.match(/the hub answers with a SYNC that brings the replica's rent/)
+    expect(out).to.not.match(/deadline/)
     expect(out).to.match(/DRY RUN/)
     out = await cli(`pending --token ${LEFT_OUT} --keypair k.json`)
     expect(out).to.match(/not open on this chain:  cli open --token 0x3c3c/)
-    await cli(`open --token ${LEFT_OUT} --keypair k.json --send`)
-    expect(await client.openRent(toBytes32(LEFT_OUT))).to.equal(0n)
-    await execute({ op: 'SYNC_TOKEN', hubToken: toBytes32(LEFT_OUT), name: 'LEFT OUT', symbol: 'OUT' })
+    const before = w.lamports(user.publicKey)
+    out = await cli(`open --token ${LEFT_OUT} --keypair k.json --send`)
+    const fee = BigInt(Math.round(Number(/LayerZero charged (0\.\d+) SOL/.exec(out)![1]) * 1e9))
+    expect(before - w.lamports(user.publicKey)).to.equal(fee + 5_000n, 'the message and the signature: no rent')
+    const unit = (await client.hubUnit()).suggested
+    await w.execute(HUB_EID, HUB_PAD, HUB_ADAPTER, ++nonceIn, { op: 'SYNC_TOKEN', hubToken: toBytes32(LEFT_OUT), name: 'LEFT OUT', symbol: 'OUT' }, unit, unit)
     expect(await fails(`open --token ${LEFT_OUT} --keypair k.json`)).to.match(/already open/)
   })
 

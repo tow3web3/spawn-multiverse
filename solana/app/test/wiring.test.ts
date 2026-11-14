@@ -54,6 +54,10 @@ describe('wiring (V7.md §6, steps 2–10) on a fresh local state', () => {
     expect(store.usdcMint.equals(params.usdcMint)).to.equal(true)
     expect(store.paused).to.equal(true, 'left paused (a store is born paused)')
     expect(store.openLegs).to.equal(1, 'an open prepays one leg unless the operator says otherwise')
+    expect(store.orderTtl).to.equal(3600, 'an order lives an hour unless the operator says otherwise')
+    // the wiring says what the HUB adapter must be told for this chain: the unit in lamports
+    expect(lines.join('\n')).to.match(/setDestination\(1, <compute units>, 4100000\) — returnUnit in LAMPORTS/)
+    expect(lines.join('\n')).to.match(/It must be at least 3751440 /)
     // v7.2: every priced destination has its route; the others have none
     for (const m of MOVE_LEGS) {
       const r = decodeMoveRoute(w.account(w.pdas.moveRoute(m.dstChain))!.data)
@@ -202,5 +206,20 @@ describe('wiring (V7.md §6, steps 2–10) on a fresh local state', () => {
     // BNB's vault holds USDT: Circle has nothing to burn or mint there
     expect(() => parseCctpPeers('bnb:0x' + 'c3'.repeat(20))).to.throw(/no Circle USDC vault/)
     expect(() => parseCctpPeers('solana:0x' + 'c3'.repeat(20))).to.throw(/no Circle USDC vault/)
+  })
+
+  it('the order lifetime: set by the wiring, refused when it would bounce every order', async () => {
+    const { w, admin, params } = await wiredWorld()
+    const sent: string[] = []
+    await runWiring({ ...params, orderTtl: 7200 }, w.rpc(), w.sender(admin, sent), () => {}, { only: ['8-'] })
+    expect(sent).to.deep.equal(['roles / fee config / deposit cap / legs / paused'])
+    expect(decodeStore(w.account(w.pdas.store)!.data).orderTtl).to.equal(7200)
+    // the program takes two minutes; the tooling does not set under ten
+    for (const bad of [120, 599, 86_401]) {
+      let err = ''
+      await runWiring({ ...params, orderTtl: bad }, w.rpc(), w.sender(admin), () => {}, { only: ['8-'] }).catch((e) => (err = String(e)))
+      expect(err, String(bad)).to.match(/order lifetime .* refused/)
+    }
+    expect(decodeStore(w.account(w.pdas.store)!.data).orderTtl).to.equal(7200)
   })
 })

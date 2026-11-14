@@ -16,6 +16,9 @@ export const ATA_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsL
 export const SYSTEM_PROGRAM = new PublicKey('11111111111111111111111111111111')
 export const ALT_PROGRAM = new PublicKey('AddressLookupTab1e1111111111111111111111111')
 export const COMPUTE_BUDGET_PROGRAM = new PublicKey('ComputeBudget111111111111111111111111111111')
+/** The cluster clock (its `unix_timestamp` is what the program stamps an
+ * order's deadline from). */
+export const SYSVAR_CLOCK = new PublicKey('SysvarC1ock11111111111111111111111111111111')
 
 /* Circle CCTP V2 on Solana — the same program ids on mainnet-beta and
  * devnet (developers.circle.com/cctp/solana-programs). */
@@ -113,7 +116,22 @@ export const MAX_NAME_BYTES = 64
 export const MAX_SYMBOL_BYTES = 16
 export const MAX_META_BYTES = 1024
 export const MAX_TRADE_LEGS = 4
-export const MAX_SPAWN_LEGS = 32
+export const MAX_SPAWN_LEGS = 128
+/** Executor gas a send may buy on the hub (the EVM adapters' bound). */
+export const MAX_GAS_TO_HUB = 15_000_000n
+/** How long an order lives, in seconds (constants.rs): the operator's,
+ * between two minutes and a day; one hour from birth. */
+export const MIN_ORDER_TTL = 2 * 60
+export const MAX_ORDER_TTL = 24 * 60 * 60
+export const DEFAULT_ORDER_TTL = 60 * 60
+/** What the tooling refuses to set, though the program would take it: under
+ * ten minutes an ordinary delay of the pathway bounces every order. */
+export const MIN_SENSIBLE_ORDER_TTL = 10 * 60
+/** Sizes of the accounts a hub message may have to create here (state.rs
+ * `Replica::SIZE`, an SPL mint, `UserAccount::SIZE`). */
+export const REPLICA_BYTES = 201
+export const MINT_BYTES = 82
+export const USER_ACCOUNT_BYTES = 245
 export const MAX_OPEN_LEGS = 8
 export const MAX_MOVE_LEGS = 4096
 export const MAX_RETURN_UNIT = 50_000_000_000_000_000n
@@ -148,6 +166,7 @@ export const IX = {
   recover_tank: d('552bb31a13623c25'),
   set_receive_table: d('6efd52cb345bf4a2'),
   set_open_legs: d('81f608ec45d87d00'),
+  set_order_ttl: d('122368538a949a63'),
   set_move_legs: d('8cd9c04eb6403905'),
   set_cctp_peer: d('672ff3c845ffc038'),
   rebalance: d('6c9e4d09d234583e'),
@@ -186,6 +205,7 @@ export const EVENT_DISC = {
   ClaimMoved: d('4e1a5e2ccc7fc862'),
   PaidOut: d('0689d1e1fc35f9fc'),
   UserAccountOpened: d('df83649768e11ae3'),
+  ValueReceived: d('bdcfe72ae1e4f8b4'),
 } as const
 
 /** LayerZero programs' Anchor sighashes (sha256("global:<name>")[..8]). */

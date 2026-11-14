@@ -69,6 +69,7 @@ impl InitStore<'_> {
         store.trade_legs = 1;
         store.spawn_legs = 0;
         store.open_legs = 1; // never 0 by default: see `Store::open_legs`
+        store.order_ttl = DEFAULT_ORDER_TTL; // every order has a deadline, from birth
 
         let t = &mut ctx.accounts.lz_receive_types_accounts;
         t.store = store.key();
@@ -302,7 +303,8 @@ impl<'info> Govern<'info> {
             params.trade_legs <= MAX_TRADE_LEGS
                 && params.spawn_legs <= MAX_SPAWN_LEGS
                 && params.return_unit <= MAX_RETURN_UNIT
-                && params.gas_to_hub > 0,
+                && params.gas_to_hub > 0
+                && params.gas_to_hub <= MAX_GAS_TO_HUB,
             GatewayError::OutOfBounds
         );
         let store = &mut ctx.accounts.store;
@@ -323,6 +325,17 @@ impl<'info> Govern<'info> {
         ctx.accounts.store.require_operator(ctx.accounts.authority.key)?;
         ctx.accounts.store.deposit_cap = cap;
         emit!(DepositCapSet { cap });
+        Ok(())
+    }
+
+    /// How long an order lives (`SpawnGateway.setOrderTtl`): the operator's,
+    /// between two minutes and a day — there is always a deadline. Orders
+    /// already in flight keep the one they left with.
+    pub fn set_order_ttl(ctx: &mut Context<Govern>, ttl: u32) -> Result<()> {
+        ctx.accounts.store.require_operator(ctx.accounts.authority.key)?;
+        require!((MIN_ORDER_TTL..=MAX_ORDER_TTL).contains(&ttl), GatewayError::BadOrderTtl);
+        ctx.accounts.store.order_ttl = ttl;
+        emit!(OrderTtlSet { ttl });
         Ok(())
     }
 
@@ -628,6 +641,10 @@ pub struct DepositCapSet {
 #[event]
 pub struct OpenLegsSet {
     pub legs: u8,
+}
+#[event]
+pub struct OrderTtlSet {
+    pub ttl: u32,
 }
 #[event]
 pub struct MoveLegsSet {

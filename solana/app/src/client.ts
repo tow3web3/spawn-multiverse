@@ -5,7 +5,15 @@
  * for a wallet to sign.
  */
 import { AddressLookupTableAccount, PublicKey, TransactionInstruction, VersionedTransaction } from '@solana/web3.js'
-import { LOCAL_COMPUTE_UNITS, PROGRAM_ID, SEND_COMPUTE_UNITS } from './constants'
+import {
+  LOCAL_COMPUTE_UNITS,
+  MINT_BYTES,
+  PROGRAM_ID,
+  REPLICA_BYTES,
+  SEND_COMPUTE_UNITS,
+  SYSVAR_CLOCK,
+  USER_ACCOUNT_BYTES,
+} from './constants'
 import { readUintLE } from './bytes'
 import {
   CctpPeer,
@@ -15,6 +23,7 @@ import {
   Store,
   UserAccount,
   decodeCctpPeer,
+  decodeClockUnixTime,
   decodeLzReceiveTypesAccounts,
   decodeMoveRoute,
   decodePeerConfig,
@@ -48,10 +57,26 @@ import { AccountData, GatewayRpc, getLookupTable } from './rpc'
 import { assembleV0, txSize } from './transaction'
 import { SpawnMsg, outboundMessage } from './wire'
 
-/** Sizes of the two accounts a SYNC creates (state.rs `Replica::SIZE`, an
- * SPL mint). */
-export const REPLICA_BYTES = 201
-export const MINT_BYTES = 82
+/** What a hub message that creates accounts here costs in rent, and what
+ * the HUB adapter's operator should therefore set as `returnUnit` for this
+ * chain's label (lamports; V7.md §9). */
+export interface HubUnit {
+  /** A replica's two accounts (a SYNC): the unit must be AT LEAST this. */
+  replicaRent: bigint
+  /** The user account of a recipient who never came here (a moved PAYOUT). */
+  userAccountRent: bigint
+  /** The figure to set: the dearer rent plus about a tenth, rounded. */
+  suggested: bigint
+}
+
+/** The rule behind `HubUnit.suggested`: a tenth over the dearer rent,
+ * rounded down to 100,000 lamports — never under that rent rounded up. */
+export function suggestedHubUnit(replicaRent: bigint): bigint {
+  const step = 100_000n
+  const up = ((replicaRent + step - 1n) / step) * step
+  const tenthOver = (((replicaRent * 11n) / 10n) / step) * step
+  return tenthOver > up ? tenthOver : up
+}
 
 export interface ClientOptions {
   programId?: PublicKey
@@ -75,6 +100,11 @@ export interface BuiltSend {
    * wei — the value in the executor option and in the envelope. */
   legs: number
   value: bigint
+  /** A trade's deadline as the client expects it: the cluster clock when
+   * this was built plus the store's lifetime (unix seconds). The program
+   * stamps the real one when the transaction executes — later by however
+   * long signing took. 0n for a message that is not a trade. */
+  deadline: bigint
   /** The enveloped message the program will put on the wire. */
   message: Uint8Array
   payload: SpawnMsg
@@ -175,7 +205,21 @@ export class GatewayClient {
     const a = await this.own(this.pdas.cctpPeer(label))
     return a ? decodeCctpPeer(a.data) : null
   }
-  /** Lamports in the tank (it pays the rent of what a hub message creates). */
+  /** The cluster clock's unix time — what the program stamps a trade's
+   * deadline from, and what the hub compares it with is NOT this clock. */
+  async clusterTime(): Promise<bigint> {
+    const [a] = await this.rpc.getAccounts([SYSVAR_CLOCK])
+    if (!a) throw new Error('the cluster has no Clock sysvar')
+    return decodeClockUnixTime(a.data)
+  }
+  /** What the hub adapter's `returnUnit` for this chain has to cover, at
+   * this cluster's rent. */
+  async hubUnit(): Promise<HubUnit> {
+    const replicaRent = (await this.rpc.rent(REPLICA_BYTES)) + (await this.rpc.rent(MINT_BYTES))
+    return { replicaRent, userAccountRent: await this.rpc.rent(USER_ACCOUNT_BYTES), suggested: suggestedHubUnit(replicaRent) }
+  }
+  /** Lamports in the tank (it covers what a hub message creates when the
+   * message did not bring enough for it). */
   async tankBalance(): Promise<bigint> {
     const [a] = await this.rpc.getAccounts([this.pdas.gasTank])
     return BigInt(a?.lamports ?? 0)
@@ -218,6 +262,7 @@ export class GatewayClient {
     const legs = spec.legs(this.store, params, await this.routeFor(spec, params))
     if (spec.routeOf && legs === 0) throw new Error('this destination has no price: the route is closed (the program refuses RouteClosed)')
     const value = this.store.returnUnit * BigInt(legs)
+    const deadline = spec.trade ? (await this.clusterTime()) + BigInt(this.store.orderTtl) : 0n
     let quotedFee = 0n
     let maxNativeFee = o.maxNativeFee
     if (maxNativeFee === undefined) {
@@ -233,13 +278,14 @@ export class GatewayClient {
       computeUnits: this.opts.sendComputeUnits ?? SEND_COMPUTE_UNITS,
       microLamportsPerCu: this.opts.microLamportsPerCu,
     })
-    const payload = spec.message(user, params)
+    const payload = spec.message(user, params, deadline)
     return {
       tx,
       quotedFee,
       maxNativeFee,
       legs,
       value,
+      deadline,
       payload,
       message: outboundMessage(this.pdas.store, this.store.hubPad, payload, value),
       size: txSize(tx),
@@ -262,7 +308,7 @@ export class GatewayClient {
     return this.buildSend(SENDS.pull_fees, user, p, o)
   }
   /** v7.2: ask the hub for this chain's replica of a token it never got.
-   * The caller also pays the replica's rent (see `openRent`). */
+   * The hub's SYNC brings the replica's rent; the caller pays the message. */
   openToken(user: PublicKey, p: TokenParams, o?: SendOptions) {
     return this.buildSend(SENDS.open_token, user, p, o)
   }
@@ -270,19 +316,6 @@ export class GatewayClient {
   moveClaim(user: PublicKey, p: MoveParams, o?: SendOptions) {
     return this.buildSend(SENDS.move_claim, user, p, o)
   }
-  /** Lamports an open still has to leave at the replica's two addresses
-   * (0 once someone did): the rent of the entry and of its mint, at the
-   * cluster's rate. The opener pays it on top of the message. */
-  async openRent(hubToken: Uint8Array): Promise<bigint> {
-    const [r, m] = await this.rpc.getAccounts([this.pdas.replica(hubToken), this.pdas.mint(hubToken)])
-    const need = async (have: number | undefined, bytes: number) => {
-      const min = await this.rpc.rent(bytes)
-      const h = BigInt(have ?? 0)
-      return h >= min ? 0n : min - h
-    }
-    return (await need(r?.lamports, REPLICA_BYTES)) + (await need(m?.lamports, MINT_BYTES))
-  }
-
   /** A local (non-send) transaction. */
   async buildLocal(payer: PublicKey, instructions: TransactionInstruction[], recentBlockhash?: string): Promise<VersionedTransaction> {
     return assembleV0({

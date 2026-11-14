@@ -38,6 +38,9 @@ export interface Store {
   spawnLegs: number
   /** Legs an `open_token` prepays (v7.2). */
   openLegs: number
+  /** Seconds an order lives (v7.2): its deadline is the cluster clock at
+   * sending plus this. */
+  orderTtl: number
 }
 
 export function decodeStore(data: Uint8Array): Store {
@@ -64,7 +67,18 @@ export function decodeStore(data: Uint8Array): Store {
     tradeLegs: r.u8(),
     spawnLegs: r.u8(),
     openLegs: r.u8(),
+    orderTtl: r.u32(),
   }
+}
+
+/** The Clock sysvar's `unix_timestamp` (slot u64, epoch_start_timestamp
+ * i64, epoch u64, leader_schedule_epoch u64, unix_timestamp i64): the
+ * cluster's own idea of the time — a stake-weighted estimate that is within
+ * a second of real time on an ordinary day and can run behind it. */
+export function decodeClockUnixTime(data: Uint8Array): bigint {
+  if (data.length < 40) throw new Error('not a Clock sysvar')
+  const v = new BorshReader(data, 32).u64()
+  return v >= 1n << 63n ? v - (1n << 64n) : v
 }
 
 /** The price of moves toward one chain (v7.2). No account, or 0 legs: closed. */

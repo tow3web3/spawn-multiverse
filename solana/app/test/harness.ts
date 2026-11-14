@@ -49,6 +49,9 @@ import {
 export const SOLANA_DIR = path.resolve(__dirname, '..', '..')
 const FIX = path.join(SOLANA_DIR, 'tests', 'fixtures', 'mainnet')
 export const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')
+/** The cluster clock every world starts at (LiteSVM's own starts at 0):
+ * 2026-11-14 04:50:00 UTC. */
+export const NOW = 1_794_631_800n
 
 export interface FixtureAccount {
   name: string
@@ -104,16 +107,32 @@ export class World {
       this.svm.setAccount(a.pubkey, { lamports: a.lamports, data: a.data, owner: a.owner, executable: false })
     }
     this.svm.airdrop(this.exec.publicKey, 1_000_000_000n)
+    this.setNow(NOW)
     this.warp(100n)
   }
 
-  /** Advances the clock, and keeps SlotHashes current (LiteSVM's warp
-   * leaves it at slot 0; `createLookupTable` wants a recent slot). */
+  /** Advances the slot, and keeps SlotHashes current (LiteSVM's warp
+   * leaves it at slot 0; `createLookupTable` wants a recent slot). The
+   * cluster's unix time is kept as it was. */
   warp(slot: bigint) {
+    const t = this.now()
     this.svm.warpToSlot(slot)
     const hs = this.svm.getSlotHashes()
     hs[0].slot = slot
     this.svm.setSlotHashes(hs)
+    this.setNow(t)
+  }
+
+  /** The cluster clock's unix time — what the program stamps a trade's
+   * deadline from. */
+  now(): bigint {
+    return this.svm.getClock().unixTimestamp
+  }
+
+  setNow(unix: bigint) {
+    const c = this.svm.getClock()
+    c.unixTimestamp = unix
+    this.svm.setClock(c)
   }
 
   slot(): bigint {

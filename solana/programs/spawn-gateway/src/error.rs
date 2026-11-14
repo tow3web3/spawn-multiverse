@@ -86,4 +86,6 @@ pub enum GatewayError {
     NoCctpPeer,
     #[msg("GW: not the CCTP program")]
     BadCctpProgram,
+    #[msg("GW: bad ttl")]
+    BadOrderTtl,
 }

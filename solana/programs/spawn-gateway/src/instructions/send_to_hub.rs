@@ -22,6 +22,10 @@ use oapp::endpoint::instructions::{QuoteParams, SendParams as EndpointSendParams
 /// so nobody can land a message with nothing and leave its reply to the
 /// hub tank.
 ///
+/// EVERY ORDER HAS A DEADLINE (v7.2). A buy or a sell leaves stamped with
+/// the cluster clock plus `store.order_ttl`; the hub refuses it whole — the
+/// dollars or the bag come home — if it lands later. See `deadline`.
+///
 /// remaining_accounts carry the ENDPOINT SEND LIST, resolved client-side
 /// exactly like the OFT example (the TS SDK's send account resolution). With
 /// the 4–5 workers of a mainnet pathway the list no longer fits a legacy
@@ -68,6 +72,19 @@ fn envelope(store: &Account<Store>, msg: &SpawnMsg, value: u128) -> Vec<u8> {
         value: msg_codec::U256::from_u128(value),
     }
     .encode()
+}
+
+/// The deadline of an order that leaves now (v7.2, `SpawnGateway._deadline`):
+/// this cluster's clock plus the store's lifetime, in unix seconds — the
+/// fifth word of every BUY and SELL. The hub reads it against ITS clock and
+/// refuses, whole, an order that lands later: a buy's dollars come home in
+/// a DELIVER's refund, a sold bag is delivered back. No caller chooses it.
+/// Never 0 ("no deadline" on the wire): the lifetime is bounded away from
+/// it (`set_order_ttl`), and a clock that read nothing would still give
+/// the lifetime itself.
+fn deadline(store: &Store) -> Result<msg_codec::U256> {
+    let now = Clock::get()?.unix_timestamp.max(0) as u128;
+    Ok(msg_codec::U256::from_u128(now + store.order_ttl as u128))
 }
 
 /// The executor options of a send that will cause `legs` hub replies, and
@@ -174,7 +191,13 @@ pub(crate) fn send_to_hub<'info>(
             &[&[GAS_TANK_SEED, &[gas_tank_bump]]],
         )?;
     }
-    emit!(SentToHub { op: msg.op(), user: *user.key, native_fee: fee, legs, sponsored: store.sponsored });
+    let deadline = match msg {
+        SpawnMsg::Buy { deadline, .. } | SpawnMsg::Sell { deadline, .. } => {
+            deadline.as_u128().and_then(|d| u64::try_from(d).ok()).unwrap_or(u64::MAX)
+        }
+        _ => 0,
+    };
+    emit!(SentToHub { op: msg.op(), user: *user.key, native_fee: fee, legs, sponsored: store.sponsored, deadline });
     Ok(fee)
 }
 
@@ -419,6 +442,7 @@ impl<'info> BuyToken<'info> {
             buyer: msg_codec::WireAddr::from_pubkey(&user_key),
             usd_in: msg_codec::U256::from_spl_amount(params.usdc_in),
             min_tokens_out: msg_codec::U256::from_spl_amount(params.min_tokens_out),
+            deadline: deadline(&ctx.accounts.store)?,
         };
         let legs = ctx.accounts.store.trade_legs as u16;
         send_to_hub(
@@ -523,6 +547,7 @@ impl<'info> SellToken<'info> {
             seller: msg_codec::WireAddr::from_pubkey(&user_key),
             tokens_in: msg_codec::U256::from_spl_amount(params.amount),
             min_usd_out: msg_codec::U256::from_spl_amount(params.min_usdc_out),
+            deadline: deadline(&ctx.accounts.store)?,
         };
         let legs = ctx.accounts.store.trade_legs as u16;
         send_to_hub(
@@ -672,17 +697,19 @@ impl<'info> PullFees<'info> {
 /// was skipped at launch (its fee was above the hub's ceiling for this
 /// chain), failed, or the token is older than the chain's gateway
 /// (`SpawnGateway.openToken`). Anyone may; the caller pays the round trip —
-/// the message, the SYNC the hub sends back (`open_legs`), AND THE RENT OF
-/// THE REPLICA: its two accounts are created by that SYNC, which arrives
-/// with no lamports, so the opener leaves their rent at the two addresses
-/// now. The answer then costs the tank nothing, whoever executes it.
+/// the message and the SYNC the hub sends back (`open_legs`).
+///
+/// THE REPLICA'S RENT COMES WITH THE HUB'S SYNC, not from here: the pad
+/// sends a SYNC with one `returnUnit` of this chain's coin (lamports), which
+/// the hub adapter's operator sets to what a replica's two accounts cost
+/// (V7.md §9). `open_legs × return_unit` must therefore cover a SYNC that
+/// carries that value — it is what the hub's ceiling for this request
+/// (`requestCap(1, 10)`) is set to.
 ///
 /// The hub answers with an ordinary SYNC, or with nothing: an id it never
-/// spawned, or a SYNC that costs more right now than its ceiling for
-/// requests toward this chain (`SpawnPad.requestCap`). The fee is then
-/// spent and the rent stays at the two addresses — it serves the next open
-/// of that token; for an id that names no token it is lost. A frontend
-/// reads the hub before offering this.
+/// spawned, or a SYNC that costs more right now than that ceiling. The fee
+/// is then spent and the token still closed; a frontend reads the hub
+/// before offering this.
 #[derive(Accounts)]
 #[instruction(params: TokenMsgParams)]
 pub struct OpenToken<'info> {
@@ -698,11 +725,8 @@ pub struct OpenToken<'info> {
     #[account(mut, seeds = [GAS_TANK_SEED], bump)]
     pub gas_tank: SystemAccount<'info>,
     /// CHECK: where the replica entry will live — it must not exist yet
-    #[account(mut, seeds = [REPLICA_SEED, &params.hub_token], bump)]
+    #[account(seeds = [REPLICA_SEED, &params.hub_token], bump)]
     pub replica: UncheckedAccount<'info>,
-    /// CHECK: where its SPL mint will live
-    #[account(mut, seeds = [MINT_SEED, &params.hub_token], bump)]
-    pub mint: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -722,23 +746,6 @@ impl<'info> OpenToken<'info> {
             replica.owner != ctx.program_id || replica.data_is_empty(),
             GatewayError::AlreadyOpen
         );
-        // the rent of what the SYNC will create, left where it will be
-        // needed (a top-up: what an earlier open left there counts)
-        let rent = Rent::get()?;
-        let mint = ctx.accounts.mint.to_account_info();
-        for (target, space) in [(&replica, Replica::SIZE), (&mint, util::MINT_LEN)] {
-            let missing = rent.minimum_balance(space).saturating_sub(target.lamports());
-            if missing > 0 {
-                anchor_lang::solana_program::program::invoke(
-                    &system_instruction::transfer(ctx.accounts.user.key, target.key, missing),
-                    &[
-                        ctx.accounts.user.to_account_info(),
-                        target.clone(),
-                        ctx.accounts.system_program.to_account_info(),
-                    ],
-                )?;
-            }
-        }
         let msg = SpawnMsg::Open { hub_token: msg_codec::WireAddr(params.hub_token) };
         let legs = ctx.accounts.store.open_legs as u16;
         send_to_hub(
@@ -926,8 +933,14 @@ impl<'info> QuoteSend<'info> {
                 },
                 store.spawn_legs as u16 + if params.with_dev_buy { trade } else { 0 },
             ),
-            msg_codec::OP_BUY => (SpawnMsg::Buy { hub_token: zero, buyer: zero, usd_in: nil, min_tokens_out: nil }, trade),
-            msg_codec::OP_SELL => (SpawnMsg::Sell { hub_token: zero, seller: zero, tokens_in: nil, min_usd_out: nil }, trade),
+            // (the minimum's word and the deadline's are always there: a
+            // placeholder quotes a trade exactly)
+            msg_codec::OP_BUY => {
+                (SpawnMsg::Buy { hub_token: zero, buyer: zero, usd_in: nil, min_tokens_out: nil, deadline: nil }, trade)
+            }
+            msg_codec::OP_SELL => {
+                (SpawnMsg::Sell { hub_token: zero, seller: zero, tokens_in: nil, min_usd_out: nil, deadline: nil }, trade)
+            }
             msg_codec::OP_CLAIM => (SpawnMsg::Claim { hub_token: zero, claimer: zero }, trade),
             msg_codec::OP_PULL_FEES => (SpawnMsg::PullFees { hub_token: zero }, trade),
             msg_codec::OP_OPEN => (SpawnMsg::Open { hub_token: zero }, store.open_legs as u16),
@@ -950,6 +963,10 @@ pub struct SentToHub {
     pub native_fee: u64,
     pub legs: u16,
     pub sponsored: bool,
+    /// The deadline a BUY or SELL left with (unix seconds, on THIS cluster's
+    /// clock when it was stamped; the hub reads it against its own); 0 for
+    /// every other message.
+    pub deadline: u64,
 }
 
 #[event]

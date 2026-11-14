@@ -8,34 +8,42 @@ use oapp::{
     endpoint::{cpi::accounts::Clear, instructions::ClearParams, ConstructCPIContext, ID as ENDPOINT_ID},
     LzReceiveParams,
 };
+use std::cell::Cell;
 use util::PayoutAccounts;
 
 /// The executor (or anyone — a verified message is permissionless to
 /// execute) delivers a hub message here.
 ///
-/// NO LAMPORTS FROM THE CALLER, UNLESS THE MESSAGE BROUGHT THEM. The hub's
-/// messages carry an executor option with gas only — the pad prepays no
-/// reply, so the envelope's `value` is 0 — and LayerZero's executor refuses
-/// an `lz_receive` that spends more of its SOL than that value. So nothing
-/// here creates an account at the caller's expense: a delivery or a payout
-/// lands in accounts its recipient opened (and paid for) when they sent, or
-/// in the recipient's user account; an account the hub's message itself
-/// calls for — a replica (SYNC), the user account of a recipient who never
-/// came here (a PAYOUT of a claim moved from another chain) — is created out
-/// of the program's own tank, and out of the caller only when the tank is
-/// dry: the executor then declines, the packet stays verified, and it lands
-/// as soon as the tank is refilled or anyone runs it and pays that rent.
-/// Should a message ever arrive with a `value` (the same number the hub
-/// adapter put in its executor option), that many lamports are taken from
-/// the caller into the tank first — the mirror of the hub adapter's rule
-/// that a delivery must bring what its sender paid for.
+/// WHO PAYS FOR WHAT A MESSAGE CREATES. LayerZero's executor refuses an
+/// `lz_receive` that spends more of its SOL than the value its packet
+/// bought, and the envelope's last word says what that value is:
+///
+///  - a REPLY (a DELIVER, the PAYOUT of a sale or a dev claim, a FEE_DROP,
+///    a claim sent back) brings nothing. It needs nothing: it lands in
+///    accounts its recipient opened, and paid for, when they sent;
+///  - a message the hub was FREE TO SKIP — a SYNC (at a launch, for an
+///    open, for a resync) and the PAYOUT a move forwards — brings one
+///    `returnUnit` of lamports, set on the hub adapter to what the accounts
+///    such a message may have to create here cost (V7.md §9): a replica's
+///    two accounts, or the user account of a recipient who never came here.
+///
+/// So an account is funded, in this order: by the lamports the message
+/// brought; if they do not cover it, by the program's tank (what the
+/// message brought joins it first); and by the caller only when the tank
+/// cannot — which LayerZero's executor declines, leaving the packet
+/// verified: it lands as soon as the tank is topped up, the hub's unit is
+/// corrected, or anyone runs it and pays that rent. Whatever the message
+/// brought and did not use goes into the tank. A delivery that brings less
+/// than its envelope names is turned away, as on the hub ("LZM: value").
 ///
 /// NOTHING THAT CAN BE REFUSED IS FAILED. Solana has no try/catch, so every
 /// condition that could make a token CPI fail is checked first; what cannot
 /// be settled is parked (tokens) or becomes a claim (dollars) — FOR ANY
 /// 32-BYTE RECIPIENT (v7.2): the recipient of a moved claim is typed by a
 /// user on another chain and need not be a wallet, hold a token account, or
-/// have ever been seen here.
+/// have ever been seen here. (The hub forwards only a key whose top twelve
+/// bytes are not all zero — an EVM address pasted by mistake goes home —
+/// but nothing here relies on it.)
 ///
 /// remaining_accounts layout:
 ///   [0 .. Clear::MIN_ACCOUNTS_LEN)  endpoint accounts for the clear() CPI
@@ -60,11 +68,81 @@ pub struct LzReceive<'info> {
     pub peer: Account<'info, PeerConfig>,
 }
 
-/// The accounts every hub message gets, whatever its op.
+/// Who paid the rent of an account a hub message created (in events).
+pub const RENT_FROM_MESSAGE: u8 = 0;
+pub const RENT_FROM_TANK: u8 = 1;
+pub const RENT_FROM_CALLER: u8 = 2;
+
+/// The accounts every hub message gets, whatever its op — and the lamports
+/// it brought that nothing has used yet.
 struct Common<'a, 'info> {
     payer: AccountInfo<'info>,
     tank: &'a AccountInfo<'info>,
     system_program: &'a AccountInfo<'info>,
+    allowance: Cell<u64>,
+}
+
+/// The account that funds a creation, and what it signs with.
+struct Funding<'a, 'info> {
+    account: &'a AccountInfo<'info>,
+    tank_bump: Option<u8>,
+    from: u8,
+}
+
+impl<'a, 'info> Common<'a, 'info> {
+    /// Moves `lamports` of the caller's into the tank. A tank drained
+    /// below its own rent floor cannot take less than that floor — the
+    /// runtime would fail the whole delivery — so it is then left alone.
+    fn to_tank(&self, lamports: u64) -> Result<bool> {
+        util::check_tank(self.tank)?;
+        require!(*self.system_program.key == system_program::ID, GatewayError::AccountMismatch);
+        if self.tank.lamports().saturating_add(lamports) < Rent::get()?.minimum_balance(0) {
+            return Ok(false);
+        }
+        invoke(
+            &system_instruction::transfer(self.payer.key, self.tank.key, lamports),
+            &[self.payer.clone(), self.tank.clone(), self.system_program.clone()],
+        )?;
+        Ok(true)
+    }
+
+    /// Who funds `need` lamports of rent: the message, the tank, the caller
+    /// — in that order (see `LzReceive`).
+    fn fund(&self, need: u64) -> Result<Funding<'_, 'info>> {
+        require!(*self.system_program.key == system_program::ID, GatewayError::AccountMismatch);
+        let brought = self.allowance.get();
+        if brought >= need {
+            self.allowance.set(brought - need);
+            return Ok(Funding { account: &self.payer, tank_bump: None, from: RENT_FROM_MESSAGE });
+        }
+        // it brought less than this costs (a reply brings nothing): what it
+        // did bring joins the tank, and the tank pays if it can
+        let tank_bump = util::check_tank(self.tank)?;
+        if brought > 0 && self.to_tank(brought)? {
+            self.allowance.set(0);
+        }
+        if util::tank_spendable(self.tank)? >= need {
+            return Ok(Funding { account: self.tank, tank_bump: Some(tank_bump), from: RENT_FROM_TANK });
+        }
+        Ok(Funding { account: &self.payer, tank_bump: None, from: RENT_FROM_CALLER })
+    }
+}
+
+impl<'info> Funding<'_, 'info> {
+    /// Creates the PDA `new_account` (`space` bytes, owned by `owner`).
+    fn create(
+        &self,
+        system_program: &AccountInfo<'info>,
+        new_account: &AccountInfo<'info>,
+        new_seeds: &[&[u8]],
+        space: usize,
+        owner: &Pubkey,
+    ) -> Result<()> {
+        let bump = [self.tank_bump.unwrap_or(0)];
+        let tank_seeds: &[&[u8]] = &[GAS_TANK_SEED, &bump];
+        let seeds = self.tank_bump.map(|_| tank_seeds);
+        util::create_pda_account(self.account, seeds, new_account, new_seeds, space, owner, system_program)
+    }
 }
 
 impl<'info> LzReceive<'info> {
@@ -102,11 +180,6 @@ impl<'info> LzReceive<'info> {
             )?;
         }
 
-        let common = Common {
-            payer: ctx.accounts.payer.to_account_info(),
-            tank: &ctx.remaining_accounts[clear_len],
-            system_program: &ctx.remaining_accounts[clear_len + 1],
-        };
         let rest = &ctx.remaining_accounts[clear_len + 2..];
 
         // Unwrap the inter-transport envelope: the LZ-level peer is the hub
@@ -117,42 +190,41 @@ impl<'info> LzReceive<'info> {
         require!(env.src_sender.0 == ctx.accounts.store.hub_pad, GatewayError::NotPeer);
         require!(env.dst_addr.pubkey() == store_key, GatewayError::NotPeer);
 
-        // What the executor was asked to deliver WITH the message goes into
-        // the tank (v7.2 envelope). The hub sends 0 today; a delivery that
-        // names a value and does not bring it is turned away, like on the
-        // hub, and stays executable by whoever brings it.
-        if !env.value.is_zero() {
-            let lamports = env
-                .value
-                .as_u128()
-                .and_then(|v| u64::try_from(v).ok())
-                .ok_or(GatewayError::AmountOverflow)?;
-            util::check_tank(common.tank)?;
-            require!(*common.system_program.key == system_program::ID, GatewayError::AccountMismatch);
-            // (a tank that was emptied below its own rent floor cannot take
-            // less than that floor — the runtime would fail the whole
-            // delivery; the value then simply stays with the caller)
-            if common.tank.lamports().saturating_add(lamports) >= Rent::get()?.minimum_balance(0) {
-                invoke(
-                    &system_instruction::transfer(common.payer.key, common.tank.key, lamports),
-                    &[common.payer.clone(), common.tank.clone(), common.system_program.clone()],
-                )?;
-                emit!(ValueReceived { lamports });
-            }
-        }
+        // What the executor was asked to deliver WITH the message (the
+        // envelope's last word): lamports the handlers may spend on what
+        // the message creates; the rest goes to the tank. The caller's
+        // balance drops by exactly that much, or the delivery fails.
+        let brought = env
+            .value
+            .as_u128()
+            .and_then(|v| u64::try_from(v).ok())
+            .ok_or(GatewayError::AmountOverflow)?;
+        let common = Common {
+            payer: ctx.accounts.payer.to_account_info(),
+            tank: &ctx.remaining_accounts[clear_len],
+            system_program: &ctx.remaining_accounts[clear_len + 1],
+            allowance: Cell::new(brought),
+        };
 
         match SpawnMsg::decode(&env.payload)? {
             SpawnMsg::SyncToken { hub_token, name, symbol } => {
-                handle_sync_token(ctx, &common, rest, hub_token, name, symbol)
+                handle_sync_token(ctx, &common, rest, hub_token, name, symbol)?
             }
             SpawnMsg::Deliver { hub_token, to, tokens, refund } => {
-                handle_deliver(ctx, &common, rest, hub_token, to, tokens, refund)
+                handle_deliver(ctx, &common, rest, hub_token, to, tokens, refund)?
             }
-            SpawnMsg::Payout { to, usd_out } => handle_payout(ctx, &common, rest, to, usd_out),
-            SpawnMsg::FeeDrop { hub_token, amount } => handle_fee_drop(ctx, rest, hub_token, amount),
+            SpawnMsg::Payout { to, usd_out } => handle_payout(ctx, &common, rest, to, usd_out)?,
+            SpawnMsg::FeeDrop { hub_token, amount } => handle_fee_drop(ctx, rest, hub_token, amount)?,
             // Spoke→hub ops can never arrive at a spoke.
-            _ => Err(GatewayError::UnknownOp.into()),
+            _ => return Err(GatewayError::UnknownOp.into()),
         }
+
+        if brought > 0 {
+            let unused = common.allowance.get();
+            let to_tank = if unused > 0 && common.to_tank(unused)? { unused } else { 0 };
+            emit!(ValueReceived { lamports: brought, to_tank });
+        }
+        Ok(())
     }
 }
 
@@ -193,19 +265,20 @@ impl<'a, 'info> Recipient<'a, 'info> {
         Ok(Self { key: *key, info, common, bump, user, dirty: false })
     }
 
-    /// The user account, created now if it never was (rent: the tank).
+    /// The user account, created now if it never was (its rent: what the
+    /// message brought, else the tank).
     fn account(&mut self) -> Result<&mut UserAccount> {
         if self.user.is_none() {
-            let rent_from_tank = util::create_from_tank(
-                &self.common.payer,
-                self.common.tank,
+            let need = Rent::get()?.minimum_balance(UserAccount::SIZE).saturating_sub(self.info.lamports());
+            let funding = self.common.fund(need)?;
+            funding.create(
                 self.common.system_program,
                 self.info,
                 &[USER_SEED, self.key.as_ref(), &[self.bump]],
                 UserAccount::SIZE,
                 &crate::ID,
             )?;
-            emit!(UserAccountOpened { owner: self.key, rent_from_tank });
+            emit!(UserAccountOpened { owner: self.key, rent_from: funding.from });
             self.user = Some(UserAccount { owner: self.key, bump: self.bump, usd_claim: 0, parked: Vec::new() });
         }
         self.dirty = true;
@@ -243,13 +316,13 @@ fn settle<'info>(
 /// OP_SYNC_TOKEN — the replica entry and its SPL mint.
 /// accounts: [replica(mut), mint(mut), token_program]
 ///
-/// A replica is forever: a second SYNC for the same token is ignored. The
-/// rent of both accounts comes from whoever opened the token here
-/// (`open_token` leaves it at the two addresses), else from the tank; with a
-/// dry tank it comes from the transaction's payer — LayerZero's executor
-/// will not accept that (the message then simply waits, executable by
-/// anyone willing to pay the rent, or by the executor once the tank is
-/// refilled).
+/// A replica is forever: a second SYNC for the same token is ignored (what
+/// it brought goes to the tank). The rent of both accounts comes with the
+/// SYNC itself — one `returnUnit` of lamports, which the hub attaches to
+/// every SYNC — else from the tank; if neither covers it, from the
+/// transaction's payer — LayerZero's executor will not accept that (the
+/// message then simply waits, executable by anyone willing to pay the rent,
+/// or by the executor once the tank is topped up).
 fn handle_sync_token<'info>(
     ctx: &mut Context<'_, '_, 'info, 'info, LzReceive<'info>>,
     common: &Common<'_, 'info>,
@@ -260,10 +333,8 @@ fn handle_sync_token<'info>(
 ) -> Result<()> {
     require!(rest.len() >= 3, GatewayError::AccountMismatch);
     let (replica_info, mint_info, tok) = (&rest[0], &rest[1], &rest[2]);
-    let (tank, sys) = (common.tank, common.system_program);
-    require!(*sys.key == system_program::ID, GatewayError::AccountMismatch);
+    let sys = common.system_program;
     require!(*tok.key == token::ID, GatewayError::AccountMismatch);
-    let tank_bump = util::check_tank(tank)?;
 
     if util::load_replica(replica_info, &hub_token.0)?.is_some() {
         emit!(SyncIgnored { hub_token: hub_token.0 });
@@ -273,35 +344,17 @@ fn handle_sync_token<'info>(
     let (mint_pda, mint_bump) = Pubkey::find_program_address(&[MINT_SEED, &hub_token.0], ctx.program_id);
     require!(*mint_info.key == mint_pda, GatewayError::AccountMismatch);
 
-    // who funds what the two addresses do not hold yet: the tank when it
-    // can cover both accounts, the payer otherwise (never half of each)
+    // ONE funder for what the two addresses do not hold yet (never half of
+    // each): the message, else the tank, else the caller
     let rent = Rent::get()?;
     let need = rent
         .minimum_balance(Replica::SIZE)
         .saturating_sub(replica_info.lamports())
         .saturating_add(rent.minimum_balance(util::MINT_LEN).saturating_sub(mint_info.lamports()));
-    let from_tank = util::tank_spendable(tank)? >= need;
-    let tank_seeds: &[&[u8]] = &[GAS_TANK_SEED, &[tank_bump]];
-    let (funder, funder_seeds) = if from_tank { (tank, Some(tank_seeds)) } else { (&common.payer, None) };
+    let funding = common.fund(need)?;
 
-    util::create_pda_account(
-        funder,
-        funder_seeds,
-        replica_info,
-        &[REPLICA_SEED, &hub_token.0, &[replica_bump]],
-        Replica::SIZE,
-        ctx.program_id,
-        sys,
-    )?;
-    util::create_pda_account(
-        funder,
-        funder_seeds,
-        mint_info,
-        &[MINT_SEED, &hub_token.0, &[mint_bump]],
-        util::MINT_LEN,
-        &token::ID,
-        sys,
-    )?;
+    funding.create(sys, replica_info, &[REPLICA_SEED, &hub_token.0, &[replica_bump]], Replica::SIZE, ctx.program_id)?;
+    funding.create(sys, mint_info, &[MINT_SEED, &hub_token.0, &[mint_bump]], util::MINT_LEN, &token::ID)?;
     // the store is the only mint authority; no freeze authority, ever
     token::initialize_mint2(
         CpiContext::new(tok.clone(), token::InitializeMint2 { mint: mint_info.clone() }),
@@ -322,7 +375,7 @@ fn handle_sync_token<'info>(
         pending_fees: 0,
     };
     util::save(replica_info, &replica)?;
-    emit!(ReplicaCreated { hub_token: hub_token.0, mint: mint_pda, rent_from_tank: from_tank && need > 0 });
+    emit!(ReplicaCreated { hub_token: hub_token.0, mint: mint_pda, rent_from: funding.from });
     Ok(())
 }
 
@@ -396,7 +449,8 @@ fn handle_deliver<'info>(
 ///
 /// USDC when the vault holds it and the recipient's own USDC account can
 /// take it; a claim in the recipient's user account in EVERY other case —
-/// that account is created here if the recipient never had one.
+/// that account is created here if the recipient never had one, with the
+/// lamports a moved claim's PAYOUT brings for exactly that.
 fn handle_payout<'info>(
     ctx: &mut Context<'_, '_, 'info, 'info, LzReceive<'info>>,
     common: &Common<'_, 'info>,
@@ -449,7 +503,8 @@ fn handle_fee_drop<'info>(
 pub struct ReplicaCreated {
     pub hub_token: [u8; 32],
     pub mint: Pubkey,
-    pub rent_from_tank: bool,
+    /// `RENT_FROM_MESSAGE`, `RENT_FROM_TANK` or `RENT_FROM_CALLER`.
+    pub rent_from: u8,
 }
 #[event]
 pub struct SyncIgnored {
@@ -484,10 +539,13 @@ pub struct FeeDropped {
 #[event]
 pub struct UserAccountOpened {
     pub owner: Pubkey,
-    pub rent_from_tank: bool,
+    /// `RENT_FROM_MESSAGE`, `RENT_FROM_TANK` or `RENT_FROM_CALLER`.
+    pub rent_from: u8,
 }
-/// Lamports a hub message arrived with, now in the tank.
+/// Lamports a hub message arrived with, and how many of them it did not
+/// need and left in the tank.
 #[event]
 pub struct ValueReceived {
     pub lamports: u64,
+    pub to_tank: u64,
 }

@@ -1,7 +1,8 @@
 /**
- * The SPAWN! wire (protocol v7.2), client side: the 18 ↔ 6 decimal bridge,
- * bytes32 ids, and a byte-exact port of programs/spawn-gateway/src/
- * msg_codec.rs (ops 1–7 and 10–13, the four-field envelope, the executor
+ * The SPAWN! wire (protocol v7.2, final), client side: the 18 ↔ 6 decimal
+ * bridge, bytes32 ids, and a byte-exact port of programs/spawn-gateway/src/
+ * msg_codec.rs (ops 1–7 and 10–13 — a trade is FIVE words: its minimum and
+ * its deadline are always there —, the four-field envelope, the executor
  * option bytes). The program builds every message itself; the client needs
  * the codec to show a user what will be sent, to check a packet, and to
  * read a hub message.
@@ -90,10 +91,11 @@ export const OP = {
 type B32 = Uint8Array
 export type SpawnMsg =
   | { op: 'SPAWN'; creator: B32; name: string; symbol: string; metaUri: string; devBuyUsd: bigint; feeMode: number }
-  /** v7.2: `minTokensOut` (18-decimal token units; 0 = none) rides the wire. */
-  | { op: 'BUY'; hubToken: B32; buyer: B32; usdIn: bigint; minTokensOut: bigint }
-  /** v7.2: `minUsdOut` (net dollars, 18 decimals; 0 = none) rides the wire. */
-  | { op: 'SELL'; hubToken: B32; seller: B32; tokensIn: bigint; minUsdOut: bigint }
+  /** v7.2: `minTokensOut` (18-decimal token units; 0 = none) and `deadline`
+   * (unix seconds on the hub's clock; 0 = none) ride the wire. */
+  | { op: 'BUY'; hubToken: B32; buyer: B32; usdIn: bigint; minTokensOut: bigint; deadline: bigint }
+  /** v7.2: `minUsdOut` (net dollars, 18 decimals; 0 = none) and `deadline`. */
+  | { op: 'SELL'; hubToken: B32; seller: B32; tokensIn: bigint; minUsdOut: bigint; deadline: bigint }
   | { op: 'CLAIM'; hubToken: B32; claimer: B32 }
   | { op: 'PULL_FEES'; hubToken: B32 }
   /** v7.2: ask the hub for this chain's replica of a token. */
@@ -147,9 +149,9 @@ function innerSlots(m: SpawnMsg): Slot[] {
         uint(BigInt(m.feeMode)),
       ]
     case 'BUY':
-      return [word(m.hubToken), word(m.buyer), uint(m.usdIn), uint(m.minTokensOut)]
+      return [word(m.hubToken), word(m.buyer), uint(m.usdIn), uint(m.minTokensOut), uint(m.deadline)]
     case 'SELL':
-      return [word(m.hubToken), word(m.seller), uint(m.tokensIn), uint(m.minUsdOut)]
+      return [word(m.hubToken), word(m.seller), uint(m.tokensIn), uint(m.minUsdOut), uint(m.deadline)]
     case 'CLAIM':
       return [word(m.hubToken), word(m.claimer)]
     case 'PULL_FEES':
@@ -178,7 +180,8 @@ export function encodeMsg(m: SpawnMsg): Uint8Array {
  * bytes payload, uint256 value). `value` is the destination-native amount
  * the executor was asked to deliver with the message — toward the hub, the
  * reply budget the user prepaid (the hub adapter refuses a delivery that
- * brings less); from the hub, 0. */
+ * brings less); from the hub, 0 on a reply and one `returnUnit` of lamports
+ * on a message that may have to create an account here. */
 export function encodeEnvelope(srcSender: Uint8Array, dstAddr: Uint8Array, payload: Uint8Array, value: bigint): Uint8Array {
   return abiEncode([word(srcSender), word(dstAddr), dyn(payload), uint(value)])
 }
@@ -250,9 +253,9 @@ export function decodeMsg(payload: Uint8Array): SpawnMsg {
         feeMode: r.u8(5),
       }
     case OP.BUY:
-      return { op: 'BUY', hubToken: r.word(0), buyer: r.word(1), usdIn: r.uint(2), minTokensOut: r.uint(3) }
+      return { op: 'BUY', hubToken: r.word(0), buyer: r.word(1), usdIn: r.uint(2), minTokensOut: r.uint(3), deadline: r.uint(4) }
     case OP.SELL:
-      return { op: 'SELL', hubToken: r.word(0), seller: r.word(1), tokensIn: r.uint(2), minUsdOut: r.uint(3) }
+      return { op: 'SELL', hubToken: r.word(0), seller: r.word(1), tokensIn: r.uint(2), minUsdOut: r.uint(3), deadline: r.uint(4) }
     case OP.CLAIM:
       return { op: 'CLAIM', hubToken: r.word(0), claimer: r.word(1) }
     case OP.PULL_FEES:

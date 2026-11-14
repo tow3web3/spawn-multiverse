@@ -64,8 +64,36 @@ pub const MAX_META_BYTES: usize = 1024;
 /// Operator bounds on the fee model (SpawnGateway.sol MAX_TRADE_LEGS /
 /// MAX_SPAWN_LEGS; the adapter's cap on a reply budget: 0.05 native).
 pub const MAX_TRADE_LEGS: u8 = 4;
-pub const MAX_SPAWN_LEGS: u8 = 32;
+/// 128 since the last round of v7.2: a launch whose fan-out reaches an L1
+/// needs tens of its origin's legs. (What ONE message can carry toward the
+/// hub is capped lower by LayerZero's executor — 0.05 ETH today, V7.md §2.)
+pub const MAX_SPAWN_LEGS: u8 = 128;
 pub const MAX_RETURN_UNIT: u128 = 50_000_000_000_000_000; // 0.05 ETH, in wei
+/// The most executor gas the operator can make a user buy on the hub
+/// (`LayerZeroOmniMessenger.MAX_EXECUTOR_GAS`): a slip above it would
+/// over-charge every sender, and what it buys goes to LayerZero's executor
+/// — no tank holds it, nobody can give it back.
+pub const MAX_GAS_TO_HUB: u128 = 15_000_000;
+
+/// HOW LONG AN ORDER LIVES (v7.2, `SpawnGateway.orderTtl`), in seconds.
+/// Every BUY and SELL leaves with `cluster clock + order_ttl` as its
+/// deadline; the hub refuses, whole, an order that lands after it. The
+/// bounds are the EVM gateways': there is always a deadline, never an
+/// absurd one. The floor is a guard against a slip, not a promise that an
+/// order reaches the hub that fast.
+pub const MIN_ORDER_TTL: u32 = 2 * 60;
+pub const MAX_ORDER_TTL: u32 = 24 * 60 * 60;
+/// One hour from birth: the EVM gateways' thirty minutes, plus thirty for
+/// THIS chain's clock. `Clock::unix_timestamp` is not a block's wall time
+/// but a stake-weighted estimate, held within 25% fast / 150% slow of the
+/// nominal slot time since the epoch began: within a second of real time
+/// on an ordinary day, behind it — by minutes, once by about half an hour —
+/// when the cluster runs slow or comes back from a halt. The deadline is
+/// written from this clock and read against the hub's, so a clock that
+/// lags makes orders expire that much EARLY (they bounce whole: a fee, no
+/// loss). The lifetime must absorb the lag it is expected to meet; beyond
+/// it, the operator lengthens it.
+pub const DEFAULT_ORDER_TTL: u32 = 60 * 60;
 /// v7.2 (SpawnGateway.sol MAX_OPEN_LEGS / MAX_MOVE_LEGS): the SYNC an open
 /// asks for, and the PAYOUT a move sends to ANOTHER chain — an L1 seen from
 /// here costs many of this chain's reply units, hence the wide bound.
