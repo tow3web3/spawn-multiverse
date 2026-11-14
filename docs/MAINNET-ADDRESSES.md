@@ -32,38 +32,45 @@ Two independent read-only passes that preceded the tooling are kept at the
 end of this file; one of them caught a wrong Ethereum USDC address quoted
 from memory (it failed the EIP-55 checksum). Never type these from memory.
 
-Scope: the four EVM chains that have native USDC **and** CCTP V2 — Base
-(hub), Optimism, Arbitrum One, Ethereum — for the core universe's checks.
-BNB Chain is not listed in Circle's USDC address table (its "USDC" is a
-Binance-pegged 18-decimal token, which `OmniUSD`'s constructor rejects) and
-has no CCTP: it cannot be a leg of the core. It is a **universe of its own**,
-settled in BSC USDT; so is Ethereum, settled in USDC — both below.
+Scope (2026-11-14): the five EVM chains of THE universe — Base (hub),
+Optimism, Arbitrum One and Ethereum, which have Circle's native USDC **and**
+CCTP V2 (their vaults level each other), and BNB Chain, which has neither:
+its spoke settles in Binance-Peg USDT through `OmniUSDLocal` (no CCTP, never
+a CCTP peer). The single-chain BNB and Ethereum universes of v7.1 are
+retired ([BNB-UNIVERSE.md](BNB-UNIVERSE.md)). Re-checked 2026-11-14:
+`npx hardhat run scripts/preflight.js` passed every address check on all
+five chains, and every verifier of every pathway quoted it.
 
-## The BNB universe — BNB Chain, settled in USDT (v7.1, verified 2026-11-13)
+## BNB Chain — the USDT spoke (label 4; verified 2026-11-14)
 
 | Address | What | How it is checked |
 |---|---|---|
-| `0x55d398326f99059fF775485246999027B3197955` | **BSC USDT** ("Tether USD" / `USDT`, **18 decimals**), Binance-Peg BEP20 behind a `BEP20UpgradeableProxy`; owner `0xF68a4b64162906efF0fF6aE34E2bB1Cd42FEf62d` (`getOwner()`), which can `mint` | preflight (live): `symbol() == "USDT"`, `decimals() == 18`, `totalSupply()` inside 1–100 B whole USDT (9.18 B on 2026-11-13); **fork**: pulled, paid out and unwrapped by the real scripts on an anvil fork of BNB Chain (`npm run rehearse:bnb`) |
-| `0x1a44076050125825900e736c501f859c50fE728c` | LayerZero EndpointV2 on BNB Chain, **eid 30102** | preflight (live): `eid() == 30102`; fork: the adapter constructed against it as a loopback, **zero `PacketSent`** over a whole launch + finish |
+| `0x55d398326f99059fF775485246999027B3197955` | **BSC USDT** ("Tether USD" / `USDT`, **18 decimals**), Binance-Peg BEP20 behind a `BEP20UpgradeableProxy`; owner `0xF68a4b64162906efF0fF6aE34E2bB1Cd42FEf62d` (`getOwner()`), which can `mint` | preflight (live): `symbol() == "USDT"`, `decimals() == 18`, `totalSupply()` inside 1–100 B whole USDT (9.18 B on 2026-11-14); **fork**: deposited, paid out, claimed and unwrapped by the canary of the five-chain rehearsal (`npm run rehearse`) |
+| `0x1a44076050125825900e736c501f859c50fE728c` | LayerZero EndpointV2 on BNB Chain, **eid 30102** | preflight (live): `eid() == 30102`; **fork**: real sends and receives in the rehearsal (relay: verify as the receive library, then the endpoint's own `lzReceive`) |
 | chain id **56** | | preflight (live) |
 
-No CCTP, no Circle check, no verifier set, no gas tank: nothing leaves this
-chain. The peg is Binance's — one key can mint the dollar of this universe —
-which is why it is separate and never under the core's USDC claims
-([BNB-UNIVERSE.md](BNB-UNIVERSE.md) §11.1).
+No CCTP, no Circle check: the deploy, the self-check and `status.js` refuse
+any state in which a USDC vault names label 4 as a CCTP peer. The peg is
+Binance's — one key can mint this dollar — which is why the BNB vault's
+launch cap (10,000 USDT) is its own setting: it bounds every holder's
+exposure to a USDT de-peg (SPEC §7).
 
-## The Ethereum universe — Ethereum, settled in USDC (v7.1, verified 2026-11-13)
+## Ethereum — a USDC spoke behind a launch ceiling (label 2; verified 2026-11-14)
 
 | Address | What | How it is checked |
 |---|---|---|
-| `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | Circle-native **USDC** on Ethereum (6 decimals) | preflight (live): `symbol`, `decimals`, `isMinter(TokenMessengerV2.localMinter())` → `0xfd78EE919681417d192449715b2594ab58f5D002` is a minter; **fork**: minted by that minter (impersonated) and used by the real scripts (`npm run rehearse:ethereum`) |
-| `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d` | Circle `TokenMessengerV2` — only to prove the token is Circle's; no CCTP is used in this universe | preflight (live) |
-| `0x1a44076050125825900e736c501f859c50fE728c` | LayerZero EndpointV2 on Ethereum, **eid 30101** | preflight (live): `eid() == 30101`; fork: loopback only, zero `PacketSent` |
+| `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | Circle-native **USDC** on Ethereum (6 decimals) | preflight (live): `symbol`, `decimals`, `isMinter(TokenMessengerV2.localMinter())`; **fork**: minted by Circle's minter (impersonated) and used by the Ethereum canary (open, buy, sell, pull, unwrap) |
+| `0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d` | Circle `TokenMessengerV2` — the Ethereum vault is a CCTP peer of the three other USDC vaults (domain 0) | preflight (live) |
+| `0x1a44076050125825900e736c501f859c50fE728c` | LayerZero EndpointV2 on Ethereum, **eid 30101** | preflight (live); **fork**: real sends and receives in the rehearsal |
 | chain id **1** | | preflight (live) |
 
-Why a universe and not a leg: see the cost table at the end of this file.
-Deployer today: **0 ETH, 0 USDC** — the preflight reports it (not fatal):
-fund ~0.02 ETH and ~5 USDC before `bash scripts/launch.sh ethereum`.
+Ethereum is a spoke of the one universe since 2026-11-14, with a launch
+ceiling (`SpawnPad.syncCap`, 0.002 ETH — about twice what its SYNC cost on
+the forks, 0.00084 ETH with per-kind executor gas): at ordinary L1 prices
+every launch reaches Ethereum; when L1 is dear, launches skip it and a token
+is opened there per token (`openToken`).
+Deployer today: **0 ETH, 0 USDC** on Ethereum — fund ~0.02 ETH for the
+deploy, and 5 USDC + ~0.02 ETH for its canary.
 
 ## Native USDC
 
@@ -71,9 +78,9 @@ Source: <https://developers.circle.com/stablecoins/usdc-contract-addresses>
 
 | Chain | Address | Status | Notes |
 |---|---|---|---|
-| Ethereum | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | VERIFIED — preflight (live) | disabled by default (`SPAWN_ENABLE=ethereum`) |
+| Ethereum | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | VERIFIED — preflight (live) + fork (rehearsal) | a spoke behind a launch ceiling |
 | OP Mainnet | `0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85` | VERIFIED — preflight (live) + fork | pulled into the vault, paid out to users on the fork |
-| Arbitrum One | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | VERIFIED — preflight (live) | no fork run on Arbitrum yet |
+| Arbitrum One | `0xaf88d065e77c8cC2239327C5EDb3A432268e5831` | VERIFIED — preflight (live) + fork (rehearsal) | the canary's round trip on the five-chain rehearsal |
 | Base | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | VERIFIED — preflight (live) + fork | full local trading and a CCTP burn on the fork |
 
 Beware of look-alikes: each of these chains also has a *bridged* USDC
@@ -142,10 +149,11 @@ is rendered from it).
 
 | Chain | EndpointV2 | eid | Status | Evidence |
 |---|---|---|---|---|
-| Ethereum | `0x1a44076050125825900e736c501f859c50fE728c` | 30101 | VERIFIED — preflight (live) | `endpoint.eid()` |
+| Ethereum | `0x1a44076050125825900e736c501f859c50fE728c` | 30101 | VERIFIED — preflight (live) + fork | sent and received in the rehearsal |
 | OP Mainnet | `0x1a44076050125825900e736c501f859c50fE728c` | 30111 | VERIFIED — preflight (live) + fork | quoted, sent (PacketSent), configured, delegate set |
-| Arbitrum One | `0x1a44076050125825900e736c501f859c50fE728c` | 30110 | VERIFIED — preflight (live) | `endpoint.eid()` |
+| Arbitrum One | `0x1a44076050125825900e736c501f859c50fE728c` | 30110 | VERIFIED — preflight (live) + fork | sent and received in the rehearsal |
 | Base | `0x1a44076050125825900e736c501f859c50fE728c` | 30184 | VERIFIED — preflight (live) + fork | quoted, sent (PacketSent), configured, delegate set |
+| BNB Chain | `0x1a44076050125825900e736c501f859c50fE728c` | 30102 | VERIFIED — preflight (live) + fork | sent and received in the rehearsal |
 
 ### The verifier set (DVNs) — chosen, configured by `scripts/configure-dvn.js`
 
@@ -163,12 +171,25 @@ on that chain as live (v2, not deprecated), and each answered `getFee` on
 every pathway it serves — `node scripts/dvn-survey.js` re-checks both and
 exits 1 on any difference (run 2026-11-13: 16/16 ✓).
 
-| DVN | Base | Optimism | Arbitrum One | Ethereum |
-|---|---|---|---|---|
-| LayerZero Labs | `0x9e059a54699a285714207b43B055483E78FAac25` | `0x6A02D83e8d433304bba74EF1c427913958187142` | `0x2f55C492897526677C5B68fb199ea31E2c126416` | `0x589dEDbD617e0CBcB916A9223F4d1300c294236b` |
-| Google | `0xD56e4eAb23cb81f43168F9F45211Eb027b9aC7cc` | same | same | same |
-| Horizen | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0x9E930731cb4A6bf7eCc11F695A295c60bDd212eB` | `0x19670Df5E16bEa2ba9b9e68b48C054C5bAEa06B8` | `0x380275805876Ff19055EA900CDb2B46a94ecF20D` |
-| Twinstake | `0xcd37CA043f8479064e10635020c65FfC005d36f6` | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0xa59BA433ac34D2927232918Ef5B2eaAfcF130BA5` |
+| DVN | Base | Optimism | Arbitrum One | Ethereum | BNB Chain |
+|---|---|---|---|---|---|
+| LayerZero Labs | `0x9e059a54699a285714207b43B055483E78FAac25` | `0x6A02D83e8d433304bba74EF1c427913958187142` | `0x2f55C492897526677C5B68fb199ea31E2c126416` | `0x589dEDbD617e0CBcB916A9223F4d1300c294236b` | `0xfD6865c841c2d64565562fCc7e05e619A30615f0` |
+| Google | `0xD56e4eAb23cb81f43168F9F45211Eb027b9aC7cc` | same | same | same | same |
+| Horizen | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0x9E930731cb4A6bf7eCc11F695A295c60bDd212eB` | `0x19670Df5E16bEa2ba9b9e68b48C054C5bAEa06B8` | `0x380275805876Ff19055EA900CDb2B46a94ecF20D` | `0x247624e2143504730aeC22912ed41F092498bEf2` |
+| Twinstake | `0xcd37CA043f8479064e10635020c65FfC005d36f6` | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0xa7b5189bcA84Cd304D8553977c7C614329750d99` | `0xa59BA433ac34D2927232918Ef5B2eaAfcF130BA5` | `0x31F748a368a893Bdb5aBB67ec95F232507601A73` |
+
+**BNB Chain (added 2026-11-14).** The four candidates given for BNB Chain
+were confirmed three ways before the profile trusted them: (1) LayerZero's
+registry lists exactly these four for "bsc" as live v2, non-lzRead DVNs
+(`node scripts/dvn-survey.js`, which now maps the profile's `bnb` to the
+registry's `bsc`: 20/20 addresses ✓); (2) each answers `getFee` for
+`bnb→base` and `base→bnb` on the live chain (`scripts/preflight.js`); (3) on
+the forks the real BSC and Base libraries accepted the set on both ends and
+every packet of the rehearsal crossed under it. One thing the check caught:
+the checksummed form of Horizen's BSC address had been mistyped in the
+profile (`…aEC…` for `…aeC…`); ethers rejects a bad checksum, so the quote
+failed and the preflight said so — fixed, and the preflight now names a
+non-checksummed address as such.
 
 (The same address can be a different operator on another chain — `0xa7b5…0d99`
 is Horizen on Base and Twinstake on Optimism and Arbitrum. Hence the table.)

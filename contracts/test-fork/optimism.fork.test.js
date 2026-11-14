@@ -64,7 +64,9 @@ run('Optimism mainnet fork — a spoke over the real endpoint and real USDC', fu
     report.deployTxs = first.gas.txs
     const again = await deployNet({ profile, netKey: 'optimism', signer: deployer, dry: false, log: h.quiet })
     expect(again.gas.txs).to.equal(0)
-    expect(again.check.soft).to.deep.equal([])
+    // the hub and the sibling are stand-ins with no contract: the move routes
+    // toward the sibling (which read the hub's requestCap) stay closed here
+    expect(again.check.soft.filter((r) => !/moveLegs/.test(r.what))).to.deep.equal([])
 
     S = state().optimism
     expect(S.ready).to.equal(true) // only now may the hub wire this spoke
@@ -129,7 +131,8 @@ run('Optimism mainnet fork — a spoke over the real endpoint and real USDC', fu
     expect(packet.options).to.equal(
       ethers.solidityPacked(
         ['uint16', 'uint8', 'uint16', 'uint8', 'uint128', 'uint128'],
-        [3, 1, 33, 1, profile.gasToHub, profile.returnUnit],
+        // a BUY buys its own executor gas (second round: gasForOp), not the SPAWN's limit
+        [3, 1, 33, 1, BigInt(profile.opGas.toHub[2]), profile.returnUnit],
       ),
     )
     const [routed] = h.eventsOf(adapter, rc, 'Routed')

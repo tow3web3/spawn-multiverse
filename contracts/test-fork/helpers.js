@@ -12,6 +12,7 @@ const { ethers } = require('hardhat')
 const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
 const { PROFILES } = require('../config/profiles')
 const { USDC_ABI, CCTP_MESSENGER_ABI, ENDPOINT_ABI, GENERATION, b32, loadState, saveState } = require('../scripts/lib-net')
+const { encodeEnvelope, encodeTrade } = require('../scripts/lib-wire')
 
 const coder = ethers.AbiCoder.defaultAbiCoder()
 const U = (n) => ethers.parseUnits(String(n), 6)
@@ -22,13 +23,22 @@ const SCALE = 10n ** 12n
 const OP = { SPAWN: 1, BUY: 2, SELL: 3, CLAIM: 4, PULL: 5, SYNC: 10, DELIVER: 11, PAYOUT: 12, FEE_DROP: 13 }
 
 /** A private copy of the mainnet profile whose state and manifest live in a
- * temp dir — the real deploy code, pointed away from the repo's files. */
-function forkProfile() {
+ * temp dir — the real deploy code, pointed away from the repo's files.
+ * `off`: nets left out (enabled: false) — a single-chain fork suite only
+ * stands in for the spokes it names. `plain`: nets whose launch ceiling is
+ * dropped (these suites measure the plain fan-out; the five-chain rehearsal,
+ * scripts/fork-rehearsal.js, measures the ceilings). */
+function forkProfile({ off = ['ethereum', 'bnb'], plain = ['ethereum'] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-fork-'))
   const m = PROFILES.mainnet
   return {
     ...m,
-    nets: Object.fromEntries(Object.entries(m.nets).map(([k, v]) => [k, { ...v }])),
+    nets: Object.fromEntries(
+      Object.entries(m.nets).map(([k, v]) => [
+        k,
+        { ...v, ...(off.includes(k) ? { enabled: false } : {}), ...(plain.includes(k) ? { syncCap: undefined } : {}) },
+      ]),
+    ),
     dvn: { ...m.dvn, addresses: JSON.parse(JSON.stringify(m.dvn.addresses)) },
     stateFile: path.join(dir, 'mainnet.json'),
     manifestFile: path.join(dir, 'manifest.json'),
@@ -94,7 +104,8 @@ const payload = (op, types, values) => coder.encode(['uint8', 'bytes'], [op, cod
  * from the endpoint's address, with the prepaid reply budget as msg.value. */
 async function lzDeliver(profile, adapter, { srcEid, srcAdapter, srcSender, dst, data, value = 0n, nonce = 1 }) {
   const endpoint = await impersonate(profile.endpoint)
-  const message = coder.encode(['bytes32', 'bytes32', 'bytes'], [b32(srcSender), b32(dst), data])
+  // v7.2: the envelope's last word is the budget the delivery must bring
+  const message = encodeEnvelope(b32(srcSender), b32(dst), data, value)
   const tx = await adapter
     .connect(endpoint)
     .lzReceive({ srcEid, sender: b32(srcAdapter), nonce }, ethers.id(`guid/${nonce}/${Date.now()}`), message, ethers.ZeroAddress, '0x', { value })
@@ -129,5 +140,5 @@ const quiet = process.env.FORK_VERBOSE === '1' ? console.log : () => {}
 
 module.exports = {
   coder, U, E, SCALE, OP,
-  forkProfile, fakeAddr, injectRemote, impersonate, mintUsdc, fundDollars, usdcAt, payload, lzDeliver, packetsSent, eventsOf, quiet,
+  forkProfile, fakeAddr, injectRemote, impersonate, mintUsdc, fundDollars, usdcAt, payload, encodeTrade, lzDeliver, packetsSent, eventsOf, quiet,
 }

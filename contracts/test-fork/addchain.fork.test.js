@@ -132,7 +132,7 @@ describe(`the live deployment, after ${NEW} was added through the timelocks (for
     const unit = await opAdapter.returnUnit(0)
     const rc = await h.lzDeliver(profile, adapter, {
       srcEid: op.eid, srcAdapter: opState.adapter, srcSender: opState.gateway, dst: S.pad,
-      data: h.payload(OP.BUY, ['bytes32', 'bytes32', 'uint256'], [b32(token), b32(h.fakeAddr('op/buyer')), E(5)]),
+      data: h.encodeTrade('BUY', b32(token), b32(h.fakeAddr('op/buyer')), E(5)),
       value: unit, nonce: 901,
     })
     const out = h.packetsSent(profile, rc)

@@ -6,6 +6,7 @@ const { ethers } = require('hardhat')
 const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
 const { PROFILES } = require('../config/profiles')
 const { deployNet, loadState, b32, GENERATION } = require('../scripts/lib-net')
+const { time } = require('@nomicfoundation/hardhat-network-helpers')
 const { handover } = require('../scripts/lib-handover')
 const { tuneFees, keeperPull, status } = require('../scripts/lib-ops')
 
@@ -92,6 +93,11 @@ describe('deploy & ops tooling (profile-driven, in-process)', function () {
     const refreshed = await deploy(OP)
     expect(await opGw.spawnLegs()).to.equal(2n)
     expect(refreshed.check.soft).to.deep.equal([])
+    // the launch order ends with the spokes refreshed and the hub read back:
+    // the moves the refreshed spokes now price give the pad its PAYOUT
+    // ceilings (v7.2, second round: one per kind of request)
+    await deploy(ARB)
+    await deploy(HUB)
 
     for (const net of [HUB, OP, ARB]) {
       const again = await deploy(net)
@@ -435,7 +441,9 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
       ...t,
       nets: {
         [HUB]: { ...t.nets[HUB] }, [OP]: { ...t.nets[OP] }, [ARB]: { ...t.nets[ARB] },
-        [ETH]: { ...t.nets[ETH], enabled: false },
+        // the newcomer, without the testnet's L1 launch ceiling and gas: this
+        // suite is about the timelock path, not about prices
+        [ETH]: { ...t.nets[ETH], enabled: false, syncCap: undefined, gasToSpoke: undefined, optional: undefined },
       },
       endpoint: endpoint.target,
       stateFile: path.join(dir, 'state.json'),
@@ -497,6 +505,9 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
     expect(hubCtx.blocked.map((b) => b.fn)).to.deep.equal(['setRoute', 'setGateway'])
     expect(hubCtx.blocked.every((b) => b.role === 'admin')).to.equal(true)
     for (const net of [OP, ARB]) expect((await run(net)).blocked).to.deep.equal([])
+    // the spokes now price moves toward the newcomer: the hub, once more,
+    // gives the pad the matching PAYOUT ceiling (an operator step)
+    expect((await run(HUB)).blocked.map((b) => b.fn)).to.deep.equal(['setRoute', 'setGateway'])
     for (const net of [HUB, OP, ARB]) expect(await (await at('SpawnGateway', state()[net].gateway)).spawnLegs()).to.equal(3n)
 
     // spawns still work: 2 SYNCs go out, 3 legs are prepaid (the tank keeps the difference)
@@ -651,6 +662,13 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
       // settled: a second run changes nothing
       expect((await tuneFees({ profile, netKey: net, signer: deployer, apply: true, providers, log: quiet })).changed, net).to.equal(false)
     }
+    // v7.2: the hub runs LAST — its request ceilings follow what the spokes
+    // now prepay for an open or a move, and cover the live price again
+    const capsRun = await tuneFees({ profile, netKey: HUB, signer: deployer, apply: true, providers, log: quiet })
+    for (const c of capsRun.caps) {
+      expect(c.target, c.net).to.be.gte(c.live)
+      expect(await pad.requestCap(profile.nets[c.net].label, c.op), `${c.net} op ${c.op}`).to.equal(c.target)
+    }
     // a remote spawn is now fully funded by its sender, dearer SYNCs included
     const fromArb = await spawnFrom(ARB)
     expect(fromArb.syncs).to.equal(3)
@@ -742,173 +760,300 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
 })
 
 /**
- * SINGLE-CHAIN UNIVERSES (v7.1): the `bnb` and `ethereum` profiles deployed
- * in-process by the real scripts — one chain, hub + local gateway, vault =
- * OmniUSDLocal over a dollar of the universe's own decimals (18 like BSC
- * USDT, 6 like USDC), the fixed LayerZero adapter as a loopback only.
- * Launch (deploy + canary with the `*Min` proof), finish (hand-over +
- * launch caps), status — with ZERO LayerZero packets from start to end.
+ * ONE UNIVERSE, FIVE EVM CHAINS, TWO DOLLARS (v7.2) — the real scripts on
+ * one in-process chain over the mock endpoint: a hub (Base), three USDC
+ * spokes (Optimism, Arbitrum, Ethereum — Ethereum ten times dearer and
+ * behind a launch ceiling) and the USDT spoke (BNB Chain: OmniUSDLocal over
+ * an 18-decimal dollar). Deploy and wiring, prices, the request-ceiling
+ * rule, the canaries from every chain reusing one token (Ethereum opened from
+ * Ethereum, a claim moved from BNB to Base), the two-dollar backing check,
+ * per-chain launch caps — and the refusals: the USDT vault as a CCTP peer, a
+ * ceiling above what requests prepay, an open that prepays nothing.
  */
-describe('single-chain universes (bnb: 18-decimal dollar, ethereum: 6-decimal dollar)', function () {
-  this.timeout(300_000)
-  const { dollarUnits, dollarScale } = require('../config/profiles')
+describe('one universe, five chains, two dollars (v7.2 wiring, prices, canaries)', function () {
+  this.timeout(600_000)
   const { selfCheck } = require('../scripts/lib-net')
   const { setCap } = require('../scripts/lib-ops')
   const { smoke } = require('../scripts/lib-smoke')
+  const { requestSolvency } = require('../scripts/lib-prices')
+  const { launchCapOf, dollarUnits } = require('../config/profiles')
+  const HUB = 'baseSepolia'
+  const OP = 'optimismSepolia'
+  const ARB = 'arbitrumSepolia'
+  const ETH = 'ethereumSepolia'
+  const BNB = 'bnbTestnet'
+  const NETS = [HUB, OP, ARB, ETH, BNB]
+  const SPOKES = [OP, ARB, ETH, BNB]
+  const FEE = E('0.001')
+  let deployer, other, ownerW, endpoint, profile, providers, pad
 
-  for (const [name, decimals, symbol] of [
-    ['bnb', 18, 'USDT'],
-    ['ethereum', 6, 'USDC'],
-  ]) {
-    it(`${name}: launch, canary with the slippage proof, hand-over, caps, status — every amount in ${decimals} decimals, no packet`, async () => {
-      const [deployer, , , owner] = await ethers.getSigners()
-      const endpoint = await ethers.deployContract('MockLZEndpointV2', [E('0.001')])
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), `spawn-universe-${name}-`))
-      const base = PROFILES[name]
-      const NET = base.hub
-      expect(base.singleChain).to.equal(true)
-      expect(Object.keys(base.nets)).to.deep.equal([NET])
-      expect(base.dollar.decimals).to.equal(decimals)
-      expect(base.dollar.symbol).to.equal(symbol)
-      expect(base.vault).to.equal('OmniUSDLocal')
-      expect(base.dvn).to.equal(null)
-      const profile = {
-        ...base,
-        nets: { [NET]: { ...base.nets[NET] } },
-        endpoint: endpoint.target,
-        stateFile: path.join(dir, 'state.json'),
-        manifestFile: path.join(dir, 'manifest.json'),
-        // play money of the universe's own decimals instead of the real token
-        mockUsdc: true,
-        dollar: { symbol, decimals },
-        depositCapUsdc: 100n, // the canary cap, in WHOLE dollars
+  const state = () => loadState(profile.stateFile)
+  const at = (name, addr, signer) => ethers.getContractAt(name, addr, signer)
+  const run = async (net, extra = {}) => {
+    const ctx = await deployNet({ profile, netKey: net, signer: deployer, dry: false, preflight: false, providers, log: quiet, ...extra })
+    const adapter = state()[net]?.adapter
+    if (adapter && (await endpoint.eidOfAdapter(adapter)) === 0n) {
+      await (await endpoint.registerAdapter(adapter, profile.nets[net].eid)).wait()
+    }
+    return ctx
+  }
+  const deliverAll = async () => {
+    while ((await endpoint.pending()) > 0n) await (await endpoint.connect(other).deliverAll(32)).wait()
+  }
+  const tune = (net, signer = deployer) => tuneFees({ profile, netKey: net, signer, apply: true, providers, log: quiet })
+  /** the documented order: every spoke, then the hub — twice */
+  const tuneAll = async () => {
+    for (let i = 0; i < 2; i++) {
+      for (const n of SPOKES) await tune(n)
+      await tune(HUB)
+    }
+  }
+  /** a canary while a "relayer" delivers every packet in the background */
+  const canary = async (net, extra = {}) => {
+    let busy = false
+    const timer = setInterval(async () => {
+      if (busy) return
+      busy = true
+      try {
+        await deliverAll()
+      } catch {
+        /* the next tick retries */
       }
-      const providers = { [NET]: ethers.provider }
-      const run = (extra = {}) =>
-        deployNet({ profile, netKey: NET, signer: deployer, dry: false, preflight: false, providers, log: quiet, ...extra })
-
-      // ── launch: deploy ──
-      const first = await run()
-      expect(first.check.ok).to.equal(true)
-      expect(first.check.soft).to.deep.equal([])
-      const again = await run()
-      expect(again.gas.txs, 're-run sends nothing').to.equal(0)
-      const s = loadState(profile.stateFile)[NET]
-      const vault = await ethers.getContractAt('OmniUSDLocal', s.localUsd)
-      const dollar = await ethers.getContractAt('MockUSDC', s.usdc)
-      const gw = await ethers.getContractAt('SpawnGateway', s.gateway)
-      const pad = await ethers.getContractAt('SpawnPad', s.pad)
-      expect(await dollar.decimals()).to.equal(BigInt(decimals))
-      expect(await vault.SCALE()).to.equal(10n ** BigInt(18 - decimals))
-      expect(await vault.SCALE()).to.equal(dollarScale(profile))
-      // the cap is 100 WHOLE dollars in the token's own units — not 100e6
-      expect(await vault.depositCap()).to.equal(100n * 10n ** BigInt(decimals))
-      expect(await vault.depositCap()).to.equal(dollarUnits(profile, 100))
-      // nothing leaves this chain: no legs, every quote is 0, one chain on the pad
-      expect(await gw.tradeLegs()).to.equal(0n)
-      expect(await gw.spawnLegs()).to.equal(0n)
-      expect(await gw.quoteBuy()).to.equal(0n)
-      expect(await gw.quoteSpawn('N', 'S', '{}', true)).to.equal(0n)
-      expect(await pad.chainsLength()).to.equal(1n)
-
-      // ── the manifest contract the frontend codes against ──
-      const m = JSON.parse(fs.readFileSync(profile.manifestFile, 'utf8'))
-      expect(m.network).to.equal('mainnet')
-      expect(m.universe).to.equal(name)
-      expect(m.dollar).to.deep.equal({ symbol, decimals })
-      expect(m.sponsored).to.equal(false)
-      expect(m.gasDrip).to.equal(undefined)
-      expect(m.chains).to.have.length(1)
-      expect(m.chains[0].local).to.equal(true)
-      expect(m.chains[0].usdc).to.equal(s.usdc)
-      expect(m.chains[0].usd).to.equal(s.localUsd)
-      expect(m.chains[0].depositCap).to.equal(String(100n * 10n ** BigInt(decimals)))
-
-      // ── launch: the canary, slippage-protected, with the proof ──
-      const lines = []
-      const res = await smoke({ profile, netKey: NET, signer: deployer, providers, buy: 3, pollMs: 1, log: (l) => lines.push(l) })
-      expect(res.local).to.equal(true)
-      expect(res.single).to.equal(true)
-      expect(res.minOut).to.be.gt(0n)
-      expect(res.bought).to.be.gte(res.minOut)
-      expect(lines.some((l) => l.includes('an impossible minimum is refused ("GW: min out")'))).to.equal(true)
-      expect(lines.some((l) => l.includes('buyTokenUsdcMin'))).to.equal(true)
-      expect(lines.some((l) => l.includes('sellTokenMin'))).to.equal(true)
-      expect(lines.at(-1)).to.include(`HUB-LOCAL SPAWN + ${symbol} BUY`)
-      // the same refusal, directly: nothing pulled, nothing delivered
-      const d0 = await dollar.balanceOf(deployer.address)
-      await (await dollar.approve(s.localUsd, ethers.parseUnits('3', decimals))).wait()
-      await expect(
-        gw.buyTokenUsdcMin(res.token, ethers.parseUnits('3', decimals), ethers.parseEther('1000000000')),
-      ).to.be.revertedWith('GW: min out')
-      expect(await dollar.balanceOf(deployer.address)).to.equal(d0)
-      // more than the canary cap is refused at the vault
-      await (await dollar.mint(deployer.address, ethers.parseUnits('500', decimals))).wait()
-      await (await dollar.approve(s.localUsd, ethers.parseUnits('200', decimals))).wait()
-      await expect(gw.buyTokenUsdc(res.token, ethers.parseUnits('200', decimals))).to.be.reverted
-
-      // ── finish: hand-over (hot key = operator + guardian), then the launch caps ──
-      const ho = await handover({
-        profile, netKey: NET, signer: deployer, owner: owner.address, operator: deployer.address, guardian: deployer.address, log: quiet,
-      })
-      expect(await ho.timelock.getMinDelay()).to.equal(BigInt(48 * 3600))
-      for (const key of ['adapter', 'usd', 'pad', 'localUsd', 'gateway', 'localDist']) {
-        const c = await ethers.getContractAt('SpawnPad', s[key]) // Roles surface only
-        expect(await c.admin(), key).to.equal(ho.timelock.target)
-        expect(await c.operator(), key).to.equal(deployer.address)
-      }
-      const capRes = await setCap({ profile, netKey: NET, signer: deployer, wholeDollars: 25_000, apply: true, log: quiet })
-      expect(capRes.applied).to.equal(true)
-      expect(await vault.depositCap()).to.equal(25_000n * 10n ** BigInt(decimals))
-      expect((await setCap({ profile, netKey: NET, signer: deployer, wholeDollars: 25_000, apply: true, log: quiet })).changed).to.equal(false)
-      // a non-operator only gets calldata
-      const blocked = await setCap({ profile, netKey: NET, signer: owner, wholeDollars: 1, apply: true, log: quiet })
-      expect(blocked.applied).to.equal(false)
-      expect(blocked.blocked.target).to.equal(s.localUsd)
-
-      // ── the deploy re-runs clean after the hand-over; status is clean ──
-      const after = await run()
-      expect(after.blocked).to.deep.equal([])
-      expect(after.check.ok).to.equal(true)
-      const out = []
-      const st = await status({ profile, providers, log: (l) => out.push(l) })
-      expect(st.ok).to.equal(true)
-      expect(st.warnings).to.deep.equal([])
-      expect(st.missing).to.deep.equal([])
-      expect(st.held).to.equal(st.supply) // backing exact, to the wei
-      expect(out.some((l) => l.includes(`VAULTS (${symbol} held`))).to.equal(true)
-      expect(out.some((l) => l.includes('(the timelock)'))).to.equal(true)
-
-      // ── and not one LayerZero packet, from the first deploy to here ──
-      expect(await endpoint.packetsSent()).to.equal(0n)
-      expect(await endpoint.pending()).to.equal(0n)
-    })
+      busy = false
+    }, 60)
+    try {
+      return await smoke({ profile, netKey: net, signer: deployer, providers, pollMs: 40, log: process.env.CANARY_LOG ? console.log : quiet, ...extra })
+    } finally {
+      clearInterval(timer)
+      while (busy) await new Promise((r) => setTimeout(r, 20))
+      await deliverAll()
+    }
   }
 
-  it('the profiles themselves: universes are separate files, and "ethereum" means the universe — never a leg of the core', async () => {
-    const { getProfile, activeNets } = require('../config/profiles')
-    const files = new Set(['mainnet', 'bnb', 'ethereum'].map((n) => PROFILES[n].stateFile))
-    const manifests = new Set(['mainnet', 'bnb', 'ethereum'].map((n) => path.basename(PROFILES[n].manifestFile)))
-    expect(files.size).to.equal(3)
-    expect([...manifests].sort()).to.deep.equal(['mainnet-bnb.json', 'mainnet-ethereum.json', 'mainnet.json'])
-    expect(PROFILES.mainnet.universe).to.equal('core')
-    // inferred from the network name when SPAWN_PROFILE is not set
-    const saved = process.env.SPAWN_PROFILE
-    delete process.env.SPAWN_PROFILE
-    try {
-      expect(getProfile('bnb').name).to.equal('bnb')
-      expect(getProfile('ethereum').name).to.equal('ethereum')
-      expect(getProfile('base').name).to.equal('mainnet')
-    } finally {
-      if (saved !== undefined) process.env.SPAWN_PROFILE = saved
+  before(async () => {
+    ;[deployer, other] = await ethers.getSigners()
+    ownerW = ethers.Wallet.createRandom().connect(ethers.provider)
+    endpoint = await ethers.deployContract('MockLZEndpointV2', [FEE])
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-five-'))
+    const t = PROFILES.testnet
+    profile = {
+      ...t,
+      name: 'five',
+      nets: Object.fromEntries(NETS.map((n) => [n, { ...t.nets[n], optional: undefined }])),
+      endpoint: endpoint.target,
+      stateFile: path.join(dir, 'state.json'),
+      manifestFile: path.join(dir, 'manifest.json'),
+      sponsored: false,
+      returnUnit: E('0.002'),
+      gasToHub: 6_000_000n,
+      tank: { mode: 'fixed', hub: E('0.05'), spoke: 0n },
+      depositCapUsdc: 25_000n,
+      timelockDelay: 48 * 3600,
     }
-    // the core's launch chains do not include Ethereum, and the deploy refuses it
-    expect(Object.keys(activeNets(PROFILES.mainnet))).to.deep.equal(['base', 'optimism', 'arbitrum'])
-    const [deployer] = await ethers.getSigners()
-    await expect(
-      deployNet({ profile: PROFILES.mainnet, netKey: 'ethereum', signer: deployer, dry: true, preflight: false, log: quiet }),
-    ).to.be.rejectedWith(/must not be added to the core hub/)
-    void selfCheck
+    // Ethereum: a ceiling well under its (ten times dearer) SYNC, and a canary budget
+    profile.nets[ETH].syncCap = E('0.005')
+    profile.nets[ETH].canaryBudget = { coin: E('1'), dollars: 5 }
+    profile.nets[BNB].launchCap = 10_000
+    providers = Object.fromEntries(NETS.map((n) => [n, ethers.provider]))
+  })
+
+  it('deploys the five chains in the launch order; every v7.2 value reads back; the USDT vault is local and nobody\'s peer', async () => {
+    expect((await run(HUB)).check.ok).to.equal(true)
+    for (const n of SPOKES) expect((await run(n)).check.ok, n).to.equal(true)
+    const wired = await run(HUB)
+    expect(wired.check.ok).to.equal(true)
+    for (const n of SPOKES) {
+      const ctx = await run(n)
+      expect(ctx.check.ok, n).to.equal(true)
+      expect(ctx.check.soft.map((r) => r.what), n).to.deep.equal([])
+    }
+    // and the hub once more (launch.sh does too): the PAYOUT ceilings follow
+    // the move prices the refreshed spokes just set
+    const again = await run(HUB)
+    expect(again.check.ok).to.equal(true)
+    expect(again.check.soft.map((r) => r.what)).to.deep.equal([])
+    await (await endpoint.setDstFee(profile.nets[ETH].eid, E('0.01'))).wait() // an L1: ten times dearer
+    const s = state()
+    pad = await at('SpawnPad', s[HUB].pad)
+    // the launch ceiling exists only where the profile asks for it, set before the gateway
+    expect(await pad.syncCap(profile.nets[ETH].label)).to.equal(E('0.005'))
+    for (const n of [OP, ARB, BNB]) expect(await pad.syncCap(profile.nets[n].label), n).to.equal(0n)
+    // opens: free at home, prepaid elsewhere
+    expect(await (await at('SpawnGateway', s[HUB].gateway)).openLegs()).to.equal(0n)
+    for (const n of SPOKES) expect(await (await at('SpawnGateway', s[n].gateway)).openLegs(), n).to.be.gte(1n)
+    // moves: every gateway prices every other chain
+    for (const a of NETS) {
+      const gw = await at('SpawnGateway', s[a].gateway)
+      for (const b of NETS) if (a !== b) expect(await gw.moveLegs(profile.nets[b].label), `${a} → ${b}`).to.be.gte(1n)
+    }
+    // requests: every remote chain has a ceiling, and the rule holds
+    const solv = await requestSolvency({ profile, all: s, providers })
+    expect(solv.ok).to.equal(true)
+    for (const r of solv.rows) {
+      expect(r.capSync, r.net).to.be.gt(0n)
+      expect(r.capPayout, r.net).to.be.gt(0n)
+    }
+    // BNB: OmniUSDLocal over an 18-decimal dollar, no wrap, no peer
+    const bnbVault = await at('OmniUSDLocal', s[BNB].usd)
+    expect(await bnbVault.SCALE()).to.equal(1n)
+    expect(await (await at('MockDollar', s[BNB].usdc)).decimals()).to.equal(18n)
+    for (const n of [HUB, OP, ARB, ETH]) {
+      const v = await at('OmniUSD', n === HUB ? s[n].localUsd : s[n].usd)
+      expect((await v.peers(profile.nets[BNB].label)).vault, n).to.equal(ethers.ZeroHash)
+    }
+    // the manifest the site codes against
+    const m = JSON.parse(fs.readFileSync(profile.manifestFile, 'utf8'))
+    expect(m.generation).to.equal('v7.2')
+    expect(m.hubMessenger).to.equal(s[HUB].adapter)
+    expect(m.dollar).to.deep.equal({ symbol: 'USDC', decimals: 6 })
+    expect(m.chains.map((c) => c.id).sort()).to.deep.equal(['arbitrum', 'base', 'bnb', 'ethereum', 'optimism'])
+    const bnb = m.chains.find((c) => c.id === 'bnb')
+    expect(bnb).to.deep.include({ vault: 'local', dollar: { symbol: 'USDT', decimals: 18 }, usdc: s[BNB].usdc })
+    for (const c of m.chains.filter((x) => x.id !== 'bnb')) expect(c.vault).to.equal('cctp') && expect(c.dollar).to.equal(undefined)
+  })
+
+  it('tune-fees prices from live quotes: Ethereum leaves the launch fan-out, every request prepays the live price, the ceilings follow — settled', async () => {
+    await tuneAll()
+    const s = state()
+    const op = await tuneFees({ profile, netKey: OP, signer: deployer, providers, log: quiet })
+    expect(op.skipped).to.deep.equal([ETH]) // over its ceiling: launches skip it
+    expect(op.changed).to.equal(false) // settled
+    const eth = await tuneFees({ profile, netKey: ETH, signer: deployer, providers, log: quiet })
+    expect(eth.changed).to.equal(false)
+    // the hub's SYNC toward Ethereum fits under its REQUEST ceiling: an open from there is served
+    const ethRow = (await requestSolvency({ profile, all: s, providers })).rows.find((r) => r.net === ETH)
+    expect(ethRow.capOk).to.equal(true)
+    expect(ethRow.openCovered).to.equal(true)
+    expect(ethRow.movesCovered).to.equal(true)
+    expect(ethRow.capSync).to.be.gte(ethRow.qSync)
+    expect(ethRow.capPayout).to.be.gte(ethRow.qPayout)
+    // a move from Optimism toward Ethereum prepays many Optimism legs
+    const opGw = await at('SpawnGateway', s[OP].gateway)
+    expect(await opGw.moveLegs(profile.nets[ETH].label)).to.be.gt(5n)
+    const st = await status({ profile, providers, log: quiet })
+    expect(st.ok).to.equal(true)
+    expect(st.requests.ok).to.equal(true)
+  })
+
+  it('a launch skips Ethereum above its ceiling (the tank does not pay its SYNC); every other chain gets the replica', async () => {
+    const s = state()
+    const gw = await at('SpawnGateway', s[ARB].gateway, deployer)
+    const tank0 = await ethers.provider.getBalance(s[HUB].adapter)
+    const fee = await gw.quoteSpawn('SKIP', 'SKIP', '{}', false)
+    await (await gw.spawnToken('SKIP', 'SKIP', '{}', 0, 0, { value: fee })).wait()
+    await deliverAll()
+    const token = await pad.allTokens((await pad.tokensLength()) - 1n)
+    for (const n of [HUB, OP, ARB, BNB]) expect(await (await at('SpawnGateway', s[n].gateway)).replicaOf(token), n).to.not.equal(ethers.ZeroAddress)
+    expect(await (await at('SpawnGateway', s[ETH].gateway)).replicaOf(token)).to.equal(ethers.ZeroAddress)
+    expect(await ethers.provider.getBalance(s[HUB].adapter)).to.be.gte(tank0) // prepaid in full
+  })
+
+  it('the canaries: the hub launches ONE token; every spoke reuses it — Ethereum opens it, BNB moves a claim to Base in USDC; unaffordable means nothing sent', async () => {
+    const hub = await canary(HUB)
+    expect(hub.local).to.equal(true)
+    for (const n of [OP, ARB]) {
+      const r = await canary(n)
+      expect(r.token, n).to.equal(hub.token)
+      expect(r.opened, n).to.equal(false)
+    }
+    const bnb = await canary(BNB)
+    expect(bnb.token).to.equal(hub.token)
+    expect(bnb.moved).to.deep.include({ from: BNB, to: HUB })
+    // Ethereum: a round trip it cannot afford is refused up front, and nothing moves
+    const nonce = await ethers.provider.getTransactionCount(deployer.address)
+    profile.nets[ETH].canaryBudget = { coin: 1n, dollars: 5 }
+    const poor = await canary(ETH)
+    expect(poor.skipped).to.equal(true)
+    expect(await ethers.provider.getTransactionCount(deployer.address)).to.equal(nonce)
+    profile.nets[ETH].canaryBudget = { coin: E('1'), dollars: 5 }
+    const eth = await canary(ETH)
+    expect(eth.token).to.equal(hub.token)
+    expect(eth.opened).to.equal(true) // the launch skipped it: opened from Ethereum, paid by the canary
+    // the books: two dollars, one backing check, the USDT exposure in plain figures
+    const st = await status({ profile, providers, log: quiet })
+    expect(st.ok).to.equal(true)
+    expect(Object.keys(st.byDollar).sort()).to.deep.equal(['USDC', 'USDT'])
+    expect(st.bnb.net).to.equal(BNB)
+    expect(st.held).to.be.gte(st.supply)
+    expect(st.held - st.supply).to.be.lt(E('0.000001')) // nothing in flight: exact to dust
+    expect(st.peersOk).to.equal(true)
+  })
+
+  it('finish: hand-over on every chain, then each chain\'s own launch cap — 25,000 USDC, 10,000 USDT (18 decimals)', async () => {
+    for (const n of NETS) {
+      await handover({ profile, netKey: n, signer: deployer, owner: ownerW.address, operator: deployer.address, guardian: deployer.address, log: quiet })
+    }
+    for (const n of NETS) {
+      await setCap({ profile, netKey: n, signer: deployer, wholeDollars: launchCapOf(profile, n), apply: true, providers, log: quiet, manifest: false })
+    }
+    const s = state()
+    expect(await (await at('OmniUSDLocal', s[BNB].usd)).depositCap()).to.equal(10_000n * 10n ** 18n)
+    for (const n of [OP, ARB, ETH]) expect(await (await at('OmniUSD', s[n].usd)).depositCap(), n).to.equal(U(25_000))
+    expect(await (await at('OmniUSD', s[HUB].localUsd)).depositCap()).to.equal(dollarUnits(profile, 25_000, HUB))
+    for (const n of NETS) expect((await run(n)).check.ok, n).to.equal(true)
+    const st = await status({ profile, providers, log: quiet })
+    expect(st.ok).to.equal(true)
+    expect(st.warnings).to.deep.equal([])
+  })
+
+  it('refuses: a request ceiling above what requests prepay; an open that prepays nothing; the USDT vault as a CCTP peer', async () => {
+    const s = state()
+    // the operator sets a ceiling far above what any request toward Optimism prepays
+    const label = profile.nets[OP].label
+    for (const [op, what] of [[10, 'what an open from it prepays'], [12, 'what a move toward it prepays']]) {
+      const fair = await pad.requestCap(label, op)
+      await (await pad.setRequestCap(label, op, fair * 10n)).wait()
+      const st = await status({ profile, providers, log: quiet })
+      expect(st.ok, `op ${op}`).to.equal(false)
+      expect(st.warnings.some((w) => w.includes(`exceeds ${what}`)), `op ${op}`).to.equal(true)
+      await expect(run(HUB)).to.be.rejectedWith(/self-check failed: pad\.requestCap\(optimismSepolia, (SYNC|PAYOUT)\)/)
+      await tune(HUB) // brings it down to the smallest prepay
+      expect(await pad.requestCap(label, op)).to.equal(fair)
+      expect((await status({ profile, providers, log: quiet })).ok).to.equal(true)
+    }
+
+    // a return unit on an EVM label of the hub adapter: the hub chain's own
+    // gateway, and a remote spoke — both hard failures, everywhere
+    const hubAdapter = await at('LayerZeroOmniMessenger', s[HUB].adapter, deployer)
+    for (const net of [HUB, OP]) {
+      const l = profile.nets[net].label
+      const gas = await hubAdapter.gasLimit(l)
+      await (await hubAdapter.setDestination(l, gas, 1n)).wait()
+      const st = await status({ profile, providers, log: quiet })
+      expect(st.ok, net).to.equal(false)
+      expect(st.warnings.some((w) => w.includes(`returnUnit(${l})`)), net).to.equal(true)
+      await expect(run(HUB), net).to.be.rejectedWith(/self-check failed: .*returnUnit\(\d+ = /)
+      await (await hubAdapter.setDestination(l, gas, 0n)).wait()
+    }
+    let st = await status({ profile, providers, log: quiet })
+    expect(st.ok).to.equal(true)
+
+    // a remote gateway that prepays no SYNC for an open
+    const arbGw = await at('SpawnGateway', s[ARB].gateway, deployer)
+    const legs = await arbGw.openLegs()
+    await (await arbGw.setOpenLegs(0)).wait()
+    const chk = await selfCheck({ profile, netKey: ARB, providers, provider: ethers.provider, log: quiet })
+    expect(chk.hard.map((r) => r.what).some((w) => w.includes('openLegs ≥ 1'))).to.equal(true)
+    await expect(tune(HUB)).to.be.rejectedWith(/openLegs = 0 on the REMOTE gateway of arbitrumSepolia/)
+    expect((await status({ profile, providers, log: quiet })).ok).to.equal(false)
+    await (await arbGw.setOpenLegs(legs)).wait()
+
+    // the USDT vault named as a CCTP peer (by a hostile or mistaken admin —
+    // here the timelock, acting after its delay): loud, everywhere
+    const timelock = await at('SpawnTimelock', s[OP].timelock)
+    const opVault = await at('OmniUSD', s[OP].usd)
+    const data = opVault.interface.encodeFunctionData('setPeer', [profile.nets[BNB].label, 0, b32(s[BNB].usd)])
+    const salt = ethers.id('five/bad-peer')
+    await (await other.sendTransaction({ to: ownerW.address, value: E('1') })).wait()
+    await (await timelock.connect(ownerW).schedule(opVault.target, 0, data, ethers.ZeroHash, salt, 48 * 3600)).wait()
+    await time.increase(48 * 3600 + 1)
+    await (await timelock.connect(ownerW).execute(opVault.target, 0, data, ethers.ZeroHash, salt)).wait()
+    st = await status({ profile, providers, log: quiet })
+    expect(st.ok).to.equal(false)
+    expect(st.peersOk).to.equal(false)
+    const bad = await selfCheck({ profile, netKey: OP, providers, provider: ethers.provider, log: quiet })
+    expect(bad.hard.map((r) => r.what).some((w) => w.includes('USDT vault is NOT a CCTP peer'))).to.equal(true)
+    await expect(run(OP)).to.be.rejectedWith(/REFUSED — optimismSepolia usd names label 4/)
   })
 })
 
@@ -1041,5 +1186,68 @@ describe('v7.1: a failed SYNC is seen and repaired; tradeLegs = 0 on a remote ga
     const fixed = await run(OP)
     expect(await opGw.tradeLegs()).to.equal(1n)
     expect(fixed.check.ok).to.equal(true)
+  })
+})
+
+/** The mainnet profile itself: the rules the tooling relies on. */
+describe('the mainnet profile: one universe, five EVM chains', function () {
+  const P = require('../config/profiles')
+  const m = P.PROFILES.mainnet
+
+  it('Base is the hub; Optimism, Arbitrum, Ethereum and BNB Chain are its spokes; label 1 is kept for Solana', () => {
+    expect(m.hub).to.equal('base')
+    expect(Object.keys(P.activeNets(m)).sort()).to.deep.equal(['arbitrum', 'base', 'bnb', 'ethereum', 'optimism'])
+    expect(Object.values(m.nets).map((c) => c.label)).to.not.include(1)
+    expect(() => P.validate({ name: 'x', nets: { s: { label: 1 } } })).to.throw(/reserved for solana/)
+  })
+
+  it('the dollar and the vault are per chain: USDC/CCTP on four chains, USDT/local on BNB Chain — and a local vault may name no CCTP plumbing', () => {
+    for (const n of ['base', 'optimism', 'arbitrum', 'ethereum']) {
+      expect(P.vaultKind(m, n), n).to.equal('cctp')
+      expect(P.dollarOfNet(m, n), n).to.deep.include({ symbol: 'USDC', decimals: 6 })
+    }
+    expect(P.vaultKind(m, 'bnb')).to.equal('local')
+    expect(P.vaultContract(m, 'bnb')).to.equal('OmniUSDLocal')
+    expect(P.dollarOfNet(m, 'bnb')).to.deep.include({ symbol: 'USDT', decimals: 18 })
+    expect(m.nets.bnb.usdc).to.equal('0x55d398326f99059fF775485246999027B3197955')
+    expect(P.dollarUnits(m, 10_000, 'bnb')).to.equal(10_000n * 10n ** 18n)
+    expect(P.dollarScale(m, 'bnb')).to.equal(1n)
+    expect(() => P.validate({ name: 'x', nets: { b: { label: 4, vault: 'local', cctpDomain: 0 } } })).to.throw(/no CCTP/)
+  })
+
+  it('caps: canary 100 everywhere at launch; then 25,000 per USDC vault and 10,000 for the BNB vault', () => {
+    expect(m.canaryCap).to.equal(100)
+    for (const n of ['base', 'optimism', 'arbitrum', 'ethereum']) expect(P.launchCapOf(m, n), n).to.equal(25_000n)
+    expect(P.launchCapOf(m, 'bnb')).to.equal(10_000n)
+  })
+
+  it('only Ethereum has a launch ceiling; every verifier address is checksummed on every chain', () => {
+    for (const [n, c] of Object.entries(m.nets)) expect(c.syncCap !== undefined, n).to.equal(n === 'ethereum')
+    for (const [name, byNet] of Object.entries(m.dvn.addresses)) {
+      for (const n of Object.keys(m.nets)) {
+        expect(byNet[n], `${name} on ${n}`).to.be.a('string')
+        expect(ethers.getAddress(byNet[n]), `${name} on ${n} must be EIP-55`).to.equal(byNet[n])
+      }
+    }
+  })
+
+  it('the retired single-chain universes are refused with a pointer, not silently mapped', () => {
+    const before = process.env.SPAWN_PROFILE
+    try {
+      for (const name of ['bnb', 'ethereum']) {
+        process.env.SPAWN_PROFILE = name
+        expect(() => P.getProfile('bnb')).to.throw(/retired/)
+      }
+    } finally {
+      if (before === undefined) delete process.env.SPAWN_PROFILE
+      else process.env.SPAWN_PROFILE = before
+    }
+    expect(P.getProfile('bnb').name).to.equal('mainnet')
+    expect(P.getProfile('ethereum').name).to.equal('mainnet')
+  })
+
+  it('hubGasFor covers the worst spawn measured on the forks (4 remote chains), with its margin', () => {
+    expect(P.hubGasFor(m, 4, 1)).to.be.gte((4_249_915n * 120n) / 100n)
+    expect(P.hubGasFor(m, 4, 4)).to.be.gte((4_515_748n * 120n) / 100n)
   })
 })

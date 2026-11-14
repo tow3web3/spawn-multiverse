@@ -5,8 +5,7 @@
  * (contracts/deployments/mainnet.json: the live pad, adapters, vaults and
  * timelocks, as they are on chain right now).
  *
- *   node scripts/fork-addchain.js                # ethereum
- *   node scripts/fork-addchain.js ethereum
+ *   node scripts/fork-addchain.js <net>          # a net of the profile not live yet
  *   FORK_VERBOSE=1 …                             # the scripts' own output
  *   FORK_RPC_BASE=https://… (…_OPTIMISM, …)      # another upstream RPC per chain
  *
@@ -37,10 +36,9 @@ const cwd = path.join(__dirname, '..')
 const liveFile = path.join(cwd, 'deployments', 'mainnet.json')
 if (!fs.existsSync(liveFile)) {
   console.error(
-    `no ${path.relative(cwd, liveFile)}: the core universe is not deployed right now (v7.0 was retired — its state is ` +
-      `deployments/mainnet-v7_0.retired.json). Deploy v7.1 first (bash scripts/launch.sh, then finish.sh); this rehearsal ` +
-      `starts from the LIVE state. (Ethereum L1 is only a rehearsal candidate here: as a chain of its own it is the ` +
-      `"ethereum" universe — node scripts/fork-universe.js ethereum.)`,
+    `no ${path.relative(cwd, liveFile)}: the universe is not deployed right now (v7.0 was retired — its state is ` +
+      `deployments/mainnet-v7_0.retired.json). This rehearsal starts from the LIVE state; the first launch of the ` +
+      `five chains is rehearsed by node scripts/fork-rehearsal.js.`,
   )
   process.exit(2)
 }

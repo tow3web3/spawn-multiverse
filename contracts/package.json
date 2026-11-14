@@ -12,20 +12,12 @@
     "test:fork:optimism": "node scripts/fork-run.js optimism",
     "test:fork": "node scripts/fork-run.js base && node scripts/fork-run.js optimism",
     "rehearse": "node scripts/fork-rehearsal.js",
-    "rehearse:bnb": "node scripts/fork-universe.js bnb",
-    "rehearse:ethereum": "node scripts/fork-universe.js ethereum",
     "rehearse:add-chain": "node scripts/fork-addchain.js",
     "dvn:survey": "node scripts/dvn-survey.js",
     "budget": "SPAWN_PROFILE=mainnet hardhat run scripts/estimate-budget.js",
-    "budget:bnb": "SPAWN_PROFILE=bnb hardhat run scripts/estimate-budget.js",
-    "budget:ethereum": "SPAWN_PROFILE=ethereum hardhat run scripts/estimate-budget.js",
     "status:mainnet": "SPAWN_PROFILE=mainnet hardhat run scripts/status.js",
-    "status:bnb": "SPAWN_PROFILE=bnb hardhat run scripts/status.js",
-    "status:ethereum": "SPAWN_PROFILE=ethereum hardhat run scripts/status.js",
     "status:testnet": "SPAWN_PROFILE=testnet hardhat run scripts/status.js",
-    "preflight": "hardhat run scripts/preflight.js",
-    "preflight:bnb": "SPAWN_PROFILE=bnb hardhat run scripts/preflight.js",
-    "preflight:ethereum": "SPAWN_PROFILE=ethereum hardhat run scripts/preflight.js"
+    "preflight": "hardhat run scripts/preflight.js"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

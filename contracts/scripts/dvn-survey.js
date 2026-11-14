@@ -43,8 +43,9 @@ async function main() {
   // name -> net -> address (live v2 DVNs only)
   const byName = {}
   for (const net of netKeys) {
-    const entry = reg[net]
-    if (!entry?.dvns) throw new Error(`registry has no "${net}" entry`)
+    // the registry's own name for the chain (BNB Chain is "bsc" there)
+    const entry = reg[nets[net].registryKey ?? net]
+    if (!entry?.dvns) throw new Error(`registry has no "${nets[net].registryKey ?? net}" entry`)
     for (const [addr, v] of Object.entries(entry.dvns)) {
       if (v.deprecated || v.lzReadCompatible || v.version !== 2) continue
       ;(byName[v.canonicalName] ??= {})[net] = ethers.getAddress(addr)
@@ -64,7 +65,7 @@ async function main() {
   // LayerZero's default config per pathway (what an unconfigured OApp rides)
   const nameOf = (net, addr) =>
     Object.entries(byName).find(([, m]) => m[net]?.toLowerCase() === addr.toLowerCase())?.[0] ??
-    reg[net].dvns[addr.toLowerCase()]?.canonicalName ??
+    reg[nets[net].registryKey ?? net].dvns[addr.toLowerCase()]?.canonicalName ??
     addr
   const defaults = {}
   for (const [a, b] of pathways) {
@@ -98,7 +99,7 @@ async function main() {
     rows.push({ name, fees, usable })
   }
 
-  const short = (k) => k.replace('optimism', 'op').replace('arbitrum', 'arb').replace('ethereum', 'eth')
+  const short = (k) => k.replace(/optimism/g, 'op').replace(/arbitrum/g, 'arb').replace(/ethereum/g, 'eth')
   const cols = pathways.map(([a, b]) => `${a}>${b}`)
   console.log(`LayerZero DVN survey — ${new Date().toISOString()} — fees in ETH, sender ${SENDER}\n`)
   console.log('DEFAULT CONFIG PER PATHWAY (what an unconfigured adapter rides):')
