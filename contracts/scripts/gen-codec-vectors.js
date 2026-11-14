@@ -5,9 +5,10 @@
  * the wire. The Solana codec must round-trip each vector bit-for-bit — that
  * is the cross-chain contract.
  *
- * PROTOCOL v7.2 (second round): BUY and SELL carry the trader's minimum as a
- * fourth word; OPEN (6) and MOVE (7) are new; the adapter envelope ends with
- * the reply budget the message must arrive with.
+ * PROTOCOL v7.2 (final): BUY and SELL carry the trader's minimum as a fourth
+ * word and a deadline (unix seconds on the hub's clock, 0 = none) as a fifth;
+ * OPEN (6) and MOVE (7) are new; the adapter envelope ends with the reply
+ * budget the message must arrive with.
  *
  * WIRE CONVENTION (protocol v4): every account rider is a `bytes32`. EVM
  * addresses ride left-padded; 32-byte chains (Solana) ride raw pubkeys.
@@ -53,12 +54,13 @@ const CASES = [
   // >32-byte strings exercise multi-word tails; unicode exercises UTF-8 length vs char count
   ['SPAWN', [BMAX, 'a name that is much longer than thirty-two bytes, yes indeed', '🔥🚀', 'x'.repeat(95), 5n * E18, 0]],
   ['SPAWN', [SOL1, 'SOLANA BORN', 'SOL', '{"home":"devnet"}', 2n * E18, 2], true],
-  ['BUY', [TOK, B1, 5n * E18, 0n]],
-  ['BUY', [B0, BMAX, 1n, U256_MAX]],
-  ['BUY', [TOK, SOL1, 7n * E18, 1_000_000n * E18], true],
-  ['SELL', [TOK, PAD, 884495291384607698648615n, 3n * E18]],
-  ['SELL', [B1, B1, 0n, 0n]],
-  ['SELL', [TOK, SOLMAX, 42n * E18, 1n], true],
+  // (token, actor, amount, minimum, deadline)
+  ['BUY', [TOK, B1, 5n * E18, 0n, 0n]],
+  ['BUY', [B0, BMAX, 1n, U256_MAX, U256_MAX]],
+  ['BUY', [TOK, SOL1, 7n * E18, 1_000_000n * E18, 1_794_700_000n], true],
+  ['SELL', [TOK, PAD, 884495291384607698648615n, 3n * E18, 1_794_700_000n]],
+  ['SELL', [B1, B1, 0n, 0n, 0n]],
+  ['SELL', [TOK, SOLMAX, 42n * E18, 1n, 1_800n], true],
   // v7.2: a chain asks for a token's replica; a claim moves to another chain
   ['OPEN', [TOK]],
   ['OPEN', [B0]],

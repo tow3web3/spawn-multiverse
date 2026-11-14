@@ -1,6 +1,6 @@
 /**
  * THE WIRE, in one place — every protocol payload and the inter-adapter
- * envelope as the contracts encode them (v7.2, second round), for the tools
+ * envelope as the contracts encode them (v7.2, final), for the tools
  * that build or read messages themselves: the codec-vector generator, the
  * fork relay, the fork suites.
  *
@@ -8,19 +8,20 @@
  *   envelope = abi.encode(bytes32 srcSender, bytes32 dstAddr, bytes payload, uint256 value)
  *              (`value`, v7.2: the reply budget the message must ARRIVE with)
  *
- * BUY and SELL: (token, actor, amount, minimum). The third contract round adds
- * a fifth word (a deadline the gateway computes, `orderTtl`): add it to
- * TRADE_FIELDS and to `tradeValues` — nothing else in the tooling encodes a
- * trade.
+ * BUY and SELL: (token, actor, amount, minimum, deadline). The minimum is what
+ * the trader must receive (0 = none); the deadline is unix seconds on the
+ * hub's clock (0 = none) — a gateway always sets one (`orderTtl`), and an
+ * order that lands after it comes back whole. Nothing else in the tooling
+ * encodes a trade.
  */
 const { AbiCoder } = require('ethers')
 
 const coder = AbiCoder.defaultAbiCoder()
 
-/** BUY / SELL data: (token, buyer|seller, usdIn|tokensIn, minOut). */
-const TRADE_FIELDS = ['bytes32', 'bytes32', 'uint256', 'uint256']
+/** BUY / SELL data: (token, buyer|seller, usdIn|tokensIn, minOut, deadline). */
+const TRADE_FIELDS = ['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256']
 /** The values of a BUY / SELL, in TRADE_FIELDS order. */
-const tradeValues = (token, actor, amount, min = 0n) => [token, actor, amount, min]
+const tradeValues = (token, actor, amount, min = 0n, deadline = 0n) => [token, actor, amount, min, deadline]
 
 const OPS = {
   SPAWN: { op: 1, types: ['bytes32', 'string', 'string', 'string', 'uint256', 'uint8'] },
@@ -42,7 +43,8 @@ const ENVELOPE_FIELDS = ['bytes32', 'bytes32', 'bytes', 'uint256']
 /** A protocol payload. */
 const encodeOp = (name, values) => coder.encode(['uint8', 'bytes'], [OPS[name].op, coder.encode(OPS[name].types, values)])
 /** A BUY / SELL payload. */
-const encodeTrade = (name, token, actor, amount, min = 0n) => encodeOp(name, tradeValues(token, actor, amount, min))
+const encodeTrade = (name, token, actor, amount, min = 0n, deadline = 0n) =>
+  encodeOp(name, tradeValues(token, actor, amount, min, deadline))
 /** The adapter envelope. */
 const encodeEnvelope = (src, dst, payload, value = 0n) => coder.encode(ENVELOPE_FIELDS, [src, dst, payload, value])
 /** { src, dst, payload, value, op } of an envelope. */
