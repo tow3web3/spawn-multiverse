@@ -16,7 +16,7 @@ contract MockDollar is ERC20 {
     mapping(address => bool) public frozen;
     /// Basis points burned out of every transfer (fee-on-transfer).
     uint16 public feeBps;
-    /// When armed: the next transfer INTO `reentryVault` re-enters its `wrap`.
+    /// When armed: the next transfer INTO `reentryVault` re-enters it.
     address public reentryVault;
 
     constructor(string memory name_, string memory symbol_, uint8 decimals_) ERC20(name_, symbol_) {
@@ -42,8 +42,9 @@ contract MockDollar is ERC20 {
         feeBps = bps;
     }
 
-    /// Makes this token re-enter `vault.wrap` during the next deposit, with
-    /// tokens of its own — the reentrancy a vault must refuse.
+    /// Makes this token re-enter `vault.unwrap` during the next deposit —
+    /// the reentrancy a vault must refuse. (`unwrap` because both vaults
+    /// have it and guard it; `OmniUSDLocal` has no `wrap` since v7.2.)
     function armReentry(address vault) external {
         require(msg.sender == admin, "MOCK: not admin");
         _mint(address(this), 10 ** uint256(_decimals));
@@ -56,7 +57,7 @@ contract MockDollar is ERC20 {
         if (reentryVault != address(0) && to == reentryVault && from != address(this)) {
             address vault = reentryVault;
             reentryVault = address(0);
-            (bool ok, bytes memory ret) = vault.call(abi.encodeWithSignature("wrap(uint256)", 10 ** uint256(_decimals)));
+            (bool ok, bytes memory ret) = vault.call(abi.encodeWithSignature("unwrap(uint256)", 10 ** uint256(_decimals)));
             if (!ok) {
                 assembly {
                     revert(add(ret, 32), mload(ret))

@@ -75,6 +75,24 @@ async function deployDistributor(usd, gateway) {
   return dist
 }
 
+/**
+ * v7.2 — prices the legs a gateway's users prepay beyond a trade's:
+ *  - `openLegs`: the SYNC the hub sends back to an `openToken`. 0 at home
+ *    (a free local call); the contract's own default, 1, elsewhere.
+ *  - `moveLegs[dst]`: the PAYOUT the hub carries to ANOTHER chain for a
+ *    `moveClaim`, in THIS chain's reply units. A destination with no price
+ *    is closed, so every other chain of the world gets one. `moveLegsFor`
+ *    (label → legs) overrides the flat `1` of a world whose legs all cost
+ *    the same.
+ */
+async function setV72Legs(gateway, { local, labels = [], self, moveLegsFor = () => 1 }) {
+  if (local) await (await gateway.setOpenLegs(0)).wait()
+  for (const dst of labels) {
+    if (dst === self) continue
+    await (await gateway.setMoveLegs(dst, moveLegsFor(dst))).wait()
+  }
+}
+
 /** Every contract of a deployed world that answers to the three Roles. */
 function roleContracts(world) {
   const list = [world.pad, world.hubUsd, world.messenger ?? world.hubMessenger]
@@ -106,9 +124,12 @@ async function assignRoles(world, { operator, guardian } = {}) {
  * delivery is a free synchronous call — so by default every label is
  * `autoDrop` and slices ship at once. `{ autoDrop: false }` runs the
  * simulated world the mainnet way. `venueName` swaps the price-discovery
- * module (tests use a venue that can refuse trades).
+ * module (tests use a venue that can refuse trades). `{ requests: true }`
+ * also prices what v7.2 lets a user ASK the hub for — a claim moved to
+ * another chain, a token opened on a chain it never reached; left out, the
+ * gateways keep the contract's default (no destination priced: moves closed).
  */
-async function deployWorld({ autoDrop = true, venueName = 'InternalCurveVenue' } = {}) {
+async function deployWorld({ autoDrop = true, venueName = 'InternalCurveVenue', requests = false } = {}) {
   const messenger = await ethers.deployContract('LocalOmniMessenger')
   await messenger.waitForDeployment()
 
@@ -144,6 +165,13 @@ async function deployWorld({ autoDrop = true, venueName = 'InternalCurveVenue' }
     // prepays 1 reply, a spawn the SYNC to all six chains. The simulated
     // fee is 0 unless a test turns it on (`messenger.setFlatFee`).
     await (await gateway.setLegs(1, CHAINS.length)).wait()
+    if (requests) {
+      // (v7.2) a claim can be moved to any other chain, one reply's worth
+      // each; and the hub hands on any request toward this chain that costs
+      // no more than a whole coin (the simulated fee is 0, or a test's)
+      await setV72Legs(gateway, { local: false, labels: CHAINS.map((x) => x.label), self: c.label })
+      await (await pad.setRequestCap(c.label, ethers.parseEther('1'))).wait()
+    }
     chains.push({ ...c, usdc, cctp, usd, gateway, dist })
   }
 
@@ -180,9 +208,10 @@ const MOCK_GAS_TO_HUB = 6_000_000n
  * prepays `RETURN_UNIT` (≥ FEE) per reply into the hub tank. With
  * `sponsored: true` (default — how testnets run) gateways ride their tank
  * and tests can call them without value; with `sponsored: false` (mainnet)
- * every user call must attach the quoted fee.
+ * every user call must attach the quoted fee. `requests: true` prices the
+ * v7.2 requests (moves, opens) on every chain, as in `deployWorld`.
  */
-async function deployWorldAsync({ sponsored = true } = {}) {
+async function deployWorldAsync({ sponsored = true, requests = false } = {}) {
   const FEE = ethers.parseEther('0.001')
   const RETURN_UNIT = ethers.parseEther('0.0012')
   const EID = (label) => 30_000 + label
@@ -249,6 +278,13 @@ async function deployWorldAsync({ sponsored = true } = {}) {
     // replies a user prepays: 1 per trade on a remote chain, none at home;
     // a spawn prepays the SYNC to every remote chain wherever it starts
     await (await gateway.setLegs(local ? 0 : 1, remotes)).wait()
+    // (v7.2) an open prepays its SYNC — nothing at home, where it is a free
+    // local call. With `requests`: a move prepays the hub's leg to its
+    // destination (one RETURN_UNIT covers any leg here), and the hub's
+    // ceiling for a request toward a remote chain is what it prepaid (the
+    // hub chain's own gateway needs none: its leg is free).
+    await setV72Legs(gateway, { local, labels: requests ? CHAINS.map((x) => x.label) : [], self: c.label })
+    if (requests && !local) await (await pad.setRequestCap(c.label, RETURN_UNIT)).wait()
     chains.push({ ...c, usdc, cctp, usd, gateway, messenger, dist, local })
   }
 
@@ -262,6 +298,8 @@ async function deployWorldAsync({ sponsored = true } = {}) {
 module.exports = {
   deployWorld,
   deployWorldAsync,
+  deployDistributor,
+  setV72Legs,
   assignRoles,
   roleContracts,
   CHAINS,

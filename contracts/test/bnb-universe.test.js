@@ -21,6 +21,13 @@ const BILLION = E(1_000_000_000)
  * contracts that run the USDC universe on mainnet, unchanged. The only new
  * custody code is the vault, `OmniUSDLocal`.
  *
+ * v7.2: the same vault is the spoke vault of BNB Chain inside the SHARED
+ * universe (test/v72.test.js runs it behind a remote gateway), and it has no
+ * `wrap` any more — a claim is portable, so oUSD must only come to exist
+ * here the way a claim does. Where these tests need a user to HOLD oUSD they
+ * create it that way: dollars the agent took in (`depositFor`), handed back
+ * as a claim (`bridgeMint`) — `claim()` below.
+ *
  * Wiring order mirrors scripts/lib-net.js for a hub and its local gateway.
  *
  * `transport` picks the messenger, both existing contracts:
@@ -84,6 +91,16 @@ async function deployUniverse({
     await (await dollar.connect(who).approve(usd.target, ethers.MaxUint256)).wait()
   }
   u.replica = async (token) => ethers.getContractAt('SpawnToken', await gateway.replicaOf(token))
+  /** Leaves `who` holding `dollars` of oUSD, backed: the vault's agent (the
+   * gateway) takes the dollars in and hands their value back as a claim —
+   * what `wrap` did in one call before v7.2. Returns the last transaction. */
+  u.claim = async (who, dollars) => {
+    await impersonateAccount(gateway.target)
+    await setBalance(gateway.target, E(1))
+    const agent = await ethers.getSigner(gateway.target)
+    await (await usd.connect(agent).depositFor(who.address, T(dollars))).wait()
+    return usd.connect(agent).bridgeMint(who.address, T(dollars) * SCALE)
+  }
   /** Both sides of the backing invariant, in oUSD wei. */
   u.backing = async () => ({
     held: (await dollar.balanceOf(usd.target)) * SCALE,
@@ -130,7 +147,14 @@ async function deployVault({ decimals = 18, kind = 'MockDollar', cap = true } = 
     await (await dollar.mint(who.address, T(dollars))).wait()
     await (await dollar.connect(who).approve(vault.target, ethers.MaxUint256)).wait()
   }
-  return { dollar, vault, agent, T, fund, SCALE: await vault.SCALE() }
+  const SCALE = await vault.SCALE()
+  /** `who` ends up holding `units × SCALE` of oUSD against `units` taken in
+   * by the agent — the only way oUSD exists here since v7.2 (no `wrap`). */
+  const claim = async (who, units) => {
+    await (await vault.connect(agent).depositFor(who.address, units)).wait()
+    return vault.connect(agent).bridgeMint(who.address, units * SCALE)
+  }
+  return { dollar, vault, agent, T, fund, claim, SCALE }
 }
 
 describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () => {
@@ -148,14 +172,12 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
 
   describe('OmniUSDLocal — the vault', () => {
     for (const decimals of [18, 8, 6]) {
-      it(`wraps and unwraps 1:1 at ${decimals} decimals; dust rules follow SCALE`, async () => {
-        const { dollar, vault, T, fund, SCALE } = await deployVault({ decimals })
+      it(`a claim unwraps 1:1 at ${decimals} decimals; dust rules follow SCALE`, async () => {
+        const { dollar, vault, T, fund, claim, SCALE } = await deployVault({ decimals })
         expect(SCALE).to.equal(10n ** BigInt(18 - decimals))
         await fund(user, 100)
 
-        await expect(vault.connect(user).wrap(T(100)))
-          .to.emit(vault, 'Wrapped')
-          .withArgs(user.address, T(100), E(100))
+        await (await claim(user, T(100))).wait()
         expect(await vault.balanceOf(user)).to.equal(E(100))
         expect(await dollar.balanceOf(vault.target)).to.equal(T(100))
         expect(await vault.liquidity()).to.equal(T(100))
@@ -172,8 +194,9 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
           await (await vault.connect(user).unwrap(E(40))).wait()
           expect(await vault.balanceOf(user)).to.equal(E(60))
           await expect(vault.connect(user).unwrap(1n)).to.emit(vault, 'Unwrapped').withArgs(user.address, 1n)
-          await (await dollar.connect(user).approve(vault.target, ethers.MaxUint256)).wait()
-          await (await vault.connect(user).wrap(1n)).wait() // and a single wei wraps back
+          // the smallest deposit the vault takes (1e12 wei) comes back as a claim, redeemable to the wei
+          await (await claim(user, 10n ** 12n)).wait()
+          await (await vault.connect(user).unwrap(10n ** 12n - 1n)).wait()
         }
         await expect(vault.connect(user).unwrap(0n)).to.be.revertedWith('oUSD: dust')
         expect(await dollar.balanceOf(user)).to.equal(T(40))
@@ -181,6 +204,35 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
         expect((await dollar.balanceOf(vault.target)) * SCALE).to.equal(await vault.totalSupply())
       })
     }
+
+    it('has no `wrap` (v7.2): nobody can mint oUSD against the dollar at will — dollars only enter through the agent', async () => {
+      const { dollar, vault, agent, T, fund } = await deployVault()
+      await fund(user, 100)
+      expect(vault.interface.fragments.some((f) => f.type === 'function' && f.name === 'wrap')).to.equal(false)
+      expect(vault.interface.fragments.some((f) => f.type === 'event' && f.name === 'Wrapped')).to.equal(false)
+      // the selector is simply not there: the call the old ABI would make reverts
+      const wrapCall = new ethers.Interface(['function wrap(uint256 units) returns (uint256)']).encodeFunctionData('wrap', [T(10)])
+      await expect(user.sendTransaction({ to: vault.target, data: wrapCall })).to.be.reverted
+      await expect(agent.sendTransaction({ to: vault.target, data: wrapCall })).to.be.reverted
+      expect(await vault.totalSupply()).to.equal(0n)
+      expect(await dollar.balanceOf(vault.target)).to.equal(0n)
+      // every function that can MINT oUSD belongs to the agent; the only thing a user can do is redeem
+      const open = vault.interface.fragments
+        .filter((f) => f.type === 'function' && f.stateMutability !== 'view' && f.stateMutability !== 'pure')
+        .map((f) => f.name)
+        .sort()
+      expect(open).to.deep.equal([
+        'acceptAdmin', 'approve', 'bridgeBurn', 'bridgeMint', 'depositFor', 'pauseDeposits', 'payout', 'setAgent',
+        'setDepositCap', 'setGuardian', 'setOperator', 'transfer', 'transferAdmin', 'transferFrom', 'unpauseDeposits',
+        'unwrap',
+      ])
+      for (const fn of ['bridgeMint', 'depositFor', 'payout']) {
+        await expect(vault.connect(user)[fn](user.address, T(1))).to.be.revertedWith('oUSD: not agent')
+      }
+      // the USDC vault keeps its `wrap`
+      const omni = new ethers.Interface((await artifacts.readArtifact('OmniUSD')).abi)
+      expect(omni.getFunction('wrap')).to.not.equal(null)
+    })
 
     it('accepts a dollar of 6 to 18 decimals and nothing else', async () => {
       const F = await ethers.getContractFactory('OmniUSDLocal')
@@ -199,28 +251,28 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       const { dollar, vault, agent, T, fund } = await deployVault({ cap: false })
       await fund(user, 1_000)
       expect(await vault.depositCap()).to.equal(0n)
-      await expect(vault.connect(user).wrap(T(1))).to.be.revertedWith('oUSD: deposit cap')
       await expect(vault.connect(agent).depositFor(user.address, T(1))).to.be.revertedWith('oUSD: deposit cap')
 
       await expect(vault.setDepositCap(T(100))).to.emit(vault, 'DepositCapSet').withArgs(T(100))
-      await (await vault.connect(user).wrap(T(60))).wait()
-      await expect(vault.connect(user).wrap(T(41))).to.be.revertedWith('oUSD: deposit cap')
+      await (await vault.connect(agent).depositFor(user.address, T(60))).wait()
+      await expect(vault.connect(agent).depositFor(user.address, T(41))).to.be.revertedWith('oUSD: deposit cap')
       await (await vault.connect(agent).depositFor(user.address, T(40))).wait()
       await expect(vault.connect(agent).depositFor(user.address, 1n)).to.be.revertedWith('oUSD: deposit cap')
-      // exits are not capped
+      // exits are not capped (ten of those dollars came back to the user as a claim)
+      await (await vault.connect(agent).bridgeMint(user.address, E(10))).wait()
       await (await vault.connect(user).unwrap(E(10))).wait()
       // a donation fills the cap like a deposit would (the operator raises it)
       await (await dollar.mint(vault.target, T(10))).wait()
-      await expect(vault.connect(user).wrap(T(1))).to.be.revertedWith('oUSD: deposit cap')
-      await expect(vault.connect(user).wrap(0n)).to.be.revertedWith('oUSD: zero')
+      await expect(vault.connect(agent).depositFor(user.address, T(1))).to.be.revertedWith('oUSD: deposit cap')
+      await expect(vault.connect(agent).depositFor(user.address, 0n)).to.be.revertedWith('oUSD: zero')
     })
 
     it('roles: the admin names the agent once, the operator sets the cap, the guardian only closes deposits', async () => {
-      const { vault, agent, T, fund } = await deployVault()
+      const { vault, agent, T, fund, claim } = await deployVault()
       await (await vault.setOperator(operator.address)).wait()
       await (await vault.setGuardian(guardian.address)).wait()
       await fund(user, 500)
-      await (await vault.connect(user).wrap(T(100))).wait()
+      await (await claim(user, T(100))).wait()
 
       await expect(vault.setAgent(stranger.address)).to.be.revertedWith('oUSD: agent set')
       const fresh = await ethers.deployContract('OmniUSDLocal', [LABEL, await vault.usdc()])
@@ -234,14 +286,13 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       }
 
       await expect(vault.connect(guardian).pauseDeposits()).to.emit(vault, 'DepositsPaused').withArgs(guardian.address)
-      await expect(vault.connect(user).wrap(T(1))).to.be.revertedWith('oUSD: deposits paused')
       await expect(vault.connect(agent).depositFor(user.address, T(1))).to.be.revertedWith('oUSD: deposits paused')
       // exits ignore the switch
       await (await vault.connect(user).unwrap(E(10))).wait()
       await (await vault.connect(agent).payout(user2.address, E(5))).wait()
       await expect(vault.connect(guardian).unpauseDeposits()).to.be.revertedWith('ROLES: not operator')
       await (await vault.connect(operator).unpauseDeposits()).wait()
-      await (await vault.connect(user).wrap(T(1))).wait()
+      await (await vault.connect(agent).depositFor(user.address, T(1))).wait()
 
       // the admin is two-step transferable, like every other contract
       await (await vault.transferAdmin(stranger.address)).wait()
@@ -255,9 +306,9 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     })
 
     it('payout never reverts: tokens when it can, a redeemable claim when it cannot', async () => {
-      const { dollar, vault, agent, T, fund } = await deployVault()
+      const { dollar, vault, agent, T, fund, claim } = await deployVault()
       await fund(user, 5_000)
-      await (await vault.connect(user).wrap(T(100))).wait()
+      await (await claim(user, T(100))).wait()
 
       // liquid: straight tokens, nothing minted
       await expect(vault.connect(agent).payout(user2.address, E(30)))
@@ -273,8 +324,8 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       expect(await vault.balanceOf(user2)).to.equal(E(500))
       expect(await dollar.balanceOf(vault.target)).to.equal(T(70))
       await expect(vault.connect(user2).unwrap(E(500))).to.be.revertedWith('oUSD: vault short')
-      // the claim redeems as soon as the vault is liquid again
-      await (await vault.connect(user).wrap(T(1_000))).wait()
+      // the claim redeems as soon as the vault is liquid again (buyers' dollars come in)
+      await (await vault.connect(agent).depositFor(user.address, T(1_000))).wait()
       await (await vault.connect(user2).unwrap(E(500))).wait()
       expect(await dollar.balanceOf(user2)).to.equal(T(530))
 
@@ -296,7 +347,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     it('sub-unit dust of a payout is minted, so nothing is lost at 6 decimals — and there is none at 18', async () => {
       const six = await deployVault({ decimals: 6 })
       await six.fund(user, 100)
-      await (await six.vault.connect(user).wrap(six.T(100))).wait()
+      await (await six.claim(user, six.T(100))).wait()
       const odd = E(7) + 123_456n // 7 dollars and a sub-unit remainder
       await expect(six.vault.connect(six.agent).payout(user2.address, odd))
         .to.emit(six.vault, 'PaidOut')
@@ -310,7 +361,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
 
       const eighteen = await deployVault({ decimals: 18 })
       await eighteen.fund(user, 100)
-      await (await eighteen.vault.connect(user).wrap(E(100))).wait()
+      await (await eighteen.claim(user, E(100))).wait()
       await expect(eighteen.vault.connect(eighteen.agent).payout(user2.address, odd))
         .to.emit(eighteen.vault, 'PaidOut')
         .withArgs(user2.address, odd, 0n)
@@ -327,8 +378,6 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       await expect(vault.connect(agent).depositFor(user.address, 10n ** 12n))
         .to.emit(vault, 'Deposited')
         .withArgs(user.address, 10n ** 12n, 10n ** 12n)
-      // wrap carries no message: it has no floor
-      await (await vault.connect(user).wrap(1n)).wait()
 
       // at 6 decimals the floor is exactly one token unit — i.e. no extra rule
       const six = await deployVault({ decimals: 6 })
@@ -341,9 +390,11 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       await (await dollar.setFeeBps(100)).wait() // 1% burned on every transfer
       await fund(user, 1_000)
 
-      await expect(vault.connect(user).wrap(T(100)))
-        .to.emit(vault, 'Wrapped')
+      await expect(vault.connect(agent).depositFor(user.address, T(100)))
+        .to.emit(vault, 'Deposited')
         .withArgs(user.address, T(99), E(99))
+      // (what arrived comes back to the user as a claim, to be redeemed below)
+      await (await vault.connect(agent).bridgeMint(user.address, E(99))).wait()
       expect(await vault.balanceOf(user)).to.equal(E(99))
       expect(await vault.connect(agent).depositFor.staticCall(user.address, T(200))).to.equal(E(198))
       await (await vault.connect(agent).depositFor(user.address, T(200))).wait()
@@ -358,9 +409,9 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     })
 
     it('a dollar whose transfer returns nothing (USDT on Ethereum) works on every path', async () => {
-      const { dollar, vault, agent, T, fund, SCALE } = await deployVault({ decimals: 6, kind: 'MockNoReturnDollar' })
+      const { dollar, vault, agent, T, fund, claim, SCALE } = await deployVault({ decimals: 6, kind: 'MockNoReturnDollar' })
       await fund(user, 1_000)
-      await (await vault.connect(user).wrap(T(100))).wait()
+      await (await claim(user, T(100))).wait()
       await (await vault.connect(agent).depositFor(user.address, T(50))).wait()
       await expect(vault.connect(agent).payout(user2.address, E(20)))
         .to.emit(vault, 'PaidOut')
@@ -372,12 +423,10 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     })
 
     it('a token that calls back into the vault mid-deposit is refused', async () => {
-      const { dollar, vault, T, fund } = await deployVault()
+      const { dollar, vault, agent, T, fund } = await deployVault()
       await fund(user, 100)
+      // the token re-enters the vault (its `unwrap`) while the deposit is pulling it in
       await (await dollar.armReentry(vault.target)).wait()
-      await expect(vault.connect(user).wrap(T(10))).to.be.revertedWithCustomError(vault, 'ReentrancyGuardReentrantCall')
-      // the same hook on the agent's path is refused the same way
-      const [, , , , agent] = await ethers.getSigners()
       await expect(vault.connect(agent).depositFor(user.address, T(10))).to.be.revertedWithCustomError(
         vault,
         'ReentrancyGuardReentrantCall',
@@ -397,8 +446,9 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
 
   describe('drop-in for OmniUSD under the immutable gateway', () => {
     /** What OmniUSDLocal deliberately does not have. */
-    const REMOVED_FUNCTIONS = ['tokenMessenger', 'peers', 'setPeer', 'rebalance', 'CCTP_FINALITY_STANDARD']
-    const REMOVED_EVENTS = ['PeerSet', 'Rebalanced']
+    // (v7.2: and no `wrap` — see the vault's header, point 4)
+    const REMOVED_FUNCTIONS = ['tokenMessenger', 'peers', 'setPeer', 'rebalance', 'CCTP_FINALITY_STANDARD', 'wrap']
+    const REMOVED_EVENTS = ['PeerSet', 'Rebalanced', 'Wrapped']
     // v7.1: OmniUSD carries the same MIN_DEPOSIT floor, so the vault adds nothing
     const ADDED_FUNCTIONS = []
     let omni, local
@@ -560,7 +610,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     it('money already held as oUSD trades without a new deposit (the gateway\'s other entry path)', async () => {
       const u = await deployUniverse()
       await u.fund(user, 1_000)
-      await (await u.usd.connect(user).wrap(u.T(600))).wait()
+      await (await u.claim(user, 600)).wait()
       await (await u.gateway.connect(user).spawnToken('CLAIM COIN', 'CLM', '{}', E(40), 0)).wait()
       const token = await u.lastToken()
       await pastGenesis()
@@ -771,7 +821,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
 
       await step(() => gateway.connect(stranger).buyTokenUsdc(a, T(1_500)))
       await step(() => gateway.connect(user2).buyTokenUsdc(b, T(700)))
-      await step(() => usd.connect(user).wrap(T(2_000)))
+      await step(() => u.claim(user, 2_000))
       await step(() => gateway.connect(user).buyToken(a, E(800)))
       await step(async () => gateway.connect(user2).sellToken(a, (await repA.balanceOf(user2)) / 3n))
       await step(async () => gateway.connect(stranger).sellToken(a, await repA.balanceOf(stranger)))
@@ -835,7 +885,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
               await (await gateway.connect(who).buyToken(token, part >= 10n ** 12n ? part : held)).wait()
               trades++
             } else {
-              await (await usd.connect(who).wrap(T(50 + Number(rnd(200))))).wait()
+              await (await u.claim(who, 50 + Number(rnd(200)))).wait()
             }
           } else if (action < 9) {
             const bag = await rep.balanceOf(who)
@@ -901,7 +951,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
     /** An honest user leaves 1,000 dollars in the vault. */
     async function seed(u) {
       await u.fund(user, 1_000)
-      await (await u.usd.connect(user).wrap(u.T(1_000))).wait()
+      await (await u.claim(user, 1_000)).wait()
     }
 
     it('LayerZero adapter: only the endpoint delivers, and a packet from a chain with no peer is refused', async () => {

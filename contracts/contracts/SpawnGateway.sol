@@ -29,6 +29,13 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// SYNC fan-out). The `quote*` views return that fee exactly, before
 /// signing. A short fee reverts the whole call: nothing is burned or pulled.
 ///
+/// v7.2 adds two actions that are not trades. `openToken` asks the hub for
+/// this chain's replica of a token that never reached it (its SYNC was
+/// skipped or failed, or the chain joined later). `moveClaim` sends an oUSD
+/// claim to another chain of the universe, for the holder whose vault here
+/// cannot pay it: the vaults do not all hold the same dollar, so they cannot
+/// all be levelled with one another.
+///
 /// TWO RULES FOR REVERTS (v7).
 ///  - A USER CALL may revert freely: it is atomic, nothing is in flight. So
 ///    everything the hub would refuse is refused HERE first (unknown token,
@@ -44,6 +51,8 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     uint8 internal constant OP_SELL = 3;
     uint8 internal constant OP_CLAIM = 4;
     uint8 internal constant OP_PULL_FEES = 5;
+    uint8 internal constant OP_OPEN = 6;
+    uint8 internal constant OP_MOVE = 7;
     uint8 internal constant OP_SYNC_TOKEN = 10;
     uint8 internal constant OP_DELIVER = 11;
     uint8 internal constant OP_PAYOUT = 12;
@@ -63,6 +72,10 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     /// Sanity bounds on what a user can be asked to prepay.
     uint8 public constant MAX_TRADE_LEGS = 4;
     uint8 public constant MAX_SPAWN_LEGS = 32;
+    uint8 public constant MAX_OPEN_LEGS = 8;
+    /// A move is answered on ANOTHER chain, which can cost hundreds of this
+    /// chain's reply units (an L1 seen from an L2).
+    uint16 public constant MAX_MOVE_LEGS = 4096;
 
     IOmniMessenger public immutable messenger;
     OmniUSD public immutable usd; // this chain's instance
@@ -86,6 +99,22 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     /// reach).
     uint8 public tradeLegs;
     uint8 public spawnLegs;
+    /// Legs prepaid by `openToken` (v7.2): the SYNC the hub sends back to
+    /// THIS chain. It has its own count because a SYNC can cost more than
+    /// the DELIVER a trade leg is priced on. It starts at 1, not 0: on a
+    /// remote chain an open that prepays nothing would be paid by the hub
+    /// tank, and anyone could ask for one. The hub chain's own gateway is
+    /// set to 0 (its SYNC is a free local call).
+    uint8 public openLegs = 1;
+    /// Legs prepaid by `moveClaim` (v7.2), per DESTINATION chain: what the
+    /// hub pays to carry the PAYOUT there, in this chain's reply units —
+    /// never fewer than `tradeLegs`, which pays for the way back if the
+    /// hub has to return the claim. 0 = no price was set: moves to that
+    /// chain are refused. `tradeLegs` alone would not do: it is priced on a
+    /// reply to THIS chain, and it is 0 on the hub chain's own gateway —
+    /// where a move would then make the hub tank pay a remote message for
+    /// nothing, as often as anyone liked.
+    mapping(uint32 => uint16) public moveLegs;
 
     /// Tokens the hub delivered that could not be minted when they landed
     /// (the replica's SYNC had not arrived yet, or the mint failed):
@@ -98,6 +127,11 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
 
     event ReplicaDeployed(address indexed hubToken, address replica, string name, string symbol);
     event LegsSet(uint8 tradeLegs, uint8 spawnLegs);
+    event OpenLegsSet(uint8 openLegs);
+    event MoveLegsSet(uint32 indexed dstChain, uint16 legs);
+    /// `from` burned `amount` of oUSD here and asked the hub to pay it to
+    /// (`dstChain`, `to`). The hub's `Moved` says where it ended up.
+    event ClaimMoved(address indexed from, uint32 indexed dstChain, bytes32 to, uint256 amount);
     event DistributorSet(address distributor);
     event Paused(address by);
     event Unpaused(address by);
@@ -134,6 +168,20 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         tradeLegs = trade;
         spawnLegs = spawn;
         emit LegsSet(trade, spawn);
+    }
+
+    function setOpenLegs(uint8 legs) external onlyOperator {
+        require(legs <= MAX_OPEN_LEGS, "GW: legs too high");
+        openLegs = legs;
+        emit OpenLegsSet(legs);
+    }
+
+    /// Prices — and thereby opens — moves from this chain to `dstChain`;
+    /// 0 closes them again.
+    function setMoveLegs(uint32 dstChain, uint16 legs) external onlyOperator {
+        require(legs <= MAX_MOVE_LEGS, "GW: legs too high");
+        moveLegs[dstChain] = legs;
+        emit MoveLegsSet(dstChain, legs);
     }
 
     function pause() external onlyGuardian {
@@ -313,6 +361,62 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         );
     }
 
+    /* --------------- opening a token, moving a claim (v7.2) --------------- */
+
+    /// Asks the hub for this chain's replica of a token it never got: the
+    /// SYNC was skipped at spawn (its fee was above the hub's ceiling for
+    /// this chain), failed, or the chain joined after the launch. The caller
+    /// pays the round trip in THIS chain's coin — the message, and the SYNC
+    /// the hub sends back (`openLegs`). Nothing else moves. The hub refuses
+    /// an id it never spawned, and does not send a SYNC that costs more
+    /// than its ceiling for requests toward this chain right now
+    /// (`SpawnPad.requestCap` — set to what an open prepays): the fee is
+    /// then spent and the token still closed, so a frontend should compare
+    /// the hub's quote with that ceiling before offering this.
+    function openToken(address hubToken) external payable nonReentrant whenNotPaused {
+        require(address(replicaOf[hubToken]) == address(0), "GW: already open");
+        messenger.send{value: msg.value}(
+            HUB_CHAIN,
+            _b32(pad),
+            abi.encode(OP_OPEN, abi.encode(_b32(hubToken))),
+            openLegs
+        );
+    }
+
+    /// Sends a dollar claim (oUSD) to `to` on another chain, whose vault
+    /// pays it in that chain's dollar if it can and as a claim there if it
+    /// cannot. For the claim a short vault left behind: dollars enter where
+    /// buyers are and leave where sellers are, and a vault that settles in
+    /// another dollar cannot be levelled with the rest (docs/SPEC.md §7).
+    /// `to` is a wide id: an address left-padded for an EVM chain.
+    ///
+    /// An EXIT: it ignores the pause. If the hub cannot hand the claim on —
+    /// no such chain, a recipient that chain cannot pay, a leg that fails or
+    /// costs more right now than the hub's ceiling for it
+    /// (`SpawnPad.requestCap`) — it comes back to the caller here, as
+    /// dollars or as the same claim. The caller pays the message and the
+    /// hub's leg to the destination (`moveLegs`).
+    function moveClaim(uint32 dstChain, bytes32 to, uint256 amount) external payable nonReentrant {
+        require(amount >= MIN_AMOUNT, "GW: dust");
+        require(to != bytes32(0) && dstChain != chainLabel && dstChain != HUB_CHAIN, "GW: bad destination");
+        uint256 legs = _moveLegs(dstChain);
+        usd.bridgeBurn(msg.sender, amount);
+        messenger.send{value: msg.value}(
+            HUB_CHAIN,
+            _b32(pad),
+            abi.encode(OP_MOVE, abi.encode(_b32(msg.sender), to, amount, dstChain)),
+            legs
+        );
+        emit ClaimMoved(msg.sender, dstChain, to, amount);
+    }
+
+    /// What a move to `dstChain` prepays; reverts for a chain with no price.
+    function _moveLegs(uint32 dstChain) internal view returns (uint256 legs) {
+        legs = moveLegs[dstChain];
+        require(legs != 0, "GW: route closed");
+        if (legs < tradeLegs) legs = tradeLegs;
+    }
+
     /* ------------------ slippage protection (v7.1) ------------------ */
 
     /// ALL-OR-NOTHING TRADES — ONLY WHERE THE HUB ANSWERS IN THE SAME
@@ -441,6 +545,20 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
 
     function quotePull() external view returns (uint256) {
         return _quote(abi.encode(OP_PULL_FEES, abi.encode(bytes32(0))), tradeLegs);
+    }
+
+    function quoteOpen() external view returns (uint256) {
+        return _quote(abi.encode(OP_OPEN, abi.encode(bytes32(0))), openLegs);
+    }
+
+    /// The price depends on where the claim goes; reverts ("GW: route
+    /// closed") for a destination this chain has no price for.
+    function quoteMove(uint32 dstChain) external view returns (uint256) {
+        return
+            _quote(
+                abi.encode(OP_MOVE, abi.encode(bytes32(0), bytes32(0), uint256(0), uint32(0))),
+                _moveLegs(dstChain)
+            );
     }
 
     function quoteSpawn(

@@ -3,7 +3,7 @@
  * new protocol version can deploy fresh while the old addresses (and their
  * recoverable gas tanks) stay on record. Plain node, sends nothing.
  *
- *   node scripts/archive-state.js testnet _v70_pre71 baseSepolia optimismSepolia arbitrumSepolia
+ *   node scripts/archive-state.js testnet _v71_pre72 baseSepolia optimismSepolia arbitrumSepolia
  *   node scripts/archive-state.js bnb _v71_pre72 bnb
  *
  * (The v7.0 MAINNET deployment is not archived this way: it was retired and

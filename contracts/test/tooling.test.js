@@ -5,7 +5,7 @@ const path = require('path')
 const { ethers } = require('hardhat')
 const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
 const { PROFILES } = require('../config/profiles')
-const { deployNet, loadState, b32 } = require('../scripts/lib-net')
+const { deployNet, loadState, b32, GENERATION } = require('../scripts/lib-net')
 const { handover } = require('../scripts/lib-handover')
 const { tuneFees, keeperPull, status } = require('../scripts/lib-ops')
 
@@ -129,6 +129,26 @@ describe('deploy & ops tooling (profile-driven, in-process)', function () {
       deployNet({ profile: old, netKey: HUB, signer: deployer, dry: false, preflight: false, log: quiet }),
     ).to.be.rejectedWith(/pre-v7 deployment/)
     expect(await ethers.provider.getTransactionCount(deployer.address)).to.equal(nonce)
+  })
+
+  it('a v7.1 state entry is refused the same way: v7.2 never completes or extends an older generation', async () => {
+    expect(GENERATION).to.equal('v7.2')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spawn-tooling-v71-'))
+    const old = { ...profile, stateFile: path.join(dir, 'state.json') }
+    const entry = { transport: 'v7.1', adapter: deployer.address, usd: deployer.address, pad: deployer.address }
+    fs.writeFileSync(old.stateFile, JSON.stringify({ [HUB]: entry }))
+    const nonce = await ethers.provider.getTransactionCount(deployer.address)
+    for (const net of [HUB, OP]) {
+      // the hub itself, and a spoke asked to join a v7.1 hub
+      await expect(
+        deployNet({ profile: old, netKey: net, signer: deployer, dry: false, preflight: false, log: quiet }),
+      ).to.be.rejectedWith(/v7\.1 deployment/)
+    }
+    await expect(
+      deployNet({ profile: old, netKey: HUB, signer: deployer, dry: false, preflight: false, log: quiet }),
+    ).to.be.rejectedWith(/_v71_pre72/) // and it says how to archive it
+    expect(await ethers.provider.getTransactionCount(deployer.address)).to.equal(nonce)
+    expect(loadState(old.stateFile)[HUB]).to.deep.equal(entry) // untouched
   })
 
   it('the deployed world trades cross-chain with user-paid fees; keeper-pull brings a remote slice home; status sees it all backed', async () => {
@@ -986,7 +1006,8 @@ describe('v7.1: a failed SYNC is seen and repaired; tradeLegs = 0 on a remote ga
     await (await hubAdapter.setDestination(label, gas, 0)).wait() // the leg is repaired
     out = await resync({ profile, netKey: HUB, signer: stranger, token: 'missing', apply: true, providers, log: quiet })
     expect(out[0].sent).to.equal(false)
-    await expect(pad.connect(stranger).resync(token, label)).to.be.revertedWith('ROLES: not operator')
+    // (v7.2: anyone may resync — by paying for the message; with nothing attached it is refused)
+    await expect(pad.connect(stranger).resync(token, label)).to.be.revertedWith('PAD: fee')
     // shown first (nothing sent), then applied by the operator
     out = await resync({ profile, netKey: HUB, signer: deployer, token: 'missing', providers, log: quiet })
     expect(out[0].sent).to.equal(false)

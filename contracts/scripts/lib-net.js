@@ -29,8 +29,11 @@ const MAINNET_CONFIRM = 'I_UNDERSTAND_THIS_IS_REAL_MONEY'
 /** The contract generation a state entry was deployed from. A deployment is
  * never "resumed" across generations: v7.1 fixed the adapter (an unset peer
  * matched a zero sender — SPEC F-11), so a `v7` entry (v7.0 bytecode) must
- * be archived and the network deployed fresh. */
-const GENERATION = 'v7.1'
+ * be archived and the network deployed fresh. v7.2 is a new pad, gateway
+ * and USDT vault (two wire ops, a payable `resync`, ceilings, no `wrap` on
+ * `OmniUSDLocal` — SPEC §1): a pad is immutable and a gateway is forever, so
+ * a `v7.1` entry cannot be completed or extended with v7.2 bytecode either. */
+const GENERATION = 'v7.2'
 const b32 = (addr) => ethers.zeroPadValue(addr, 32)
 const fmt = (wei) => ethers.formatEther(wei)
 const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase()
@@ -454,7 +457,8 @@ async function deployAdapter(ctx) {
   if (state.adapter && state.transport !== GENERATION) {
     throw new Error(
       `${netKey}: the state holds a ${state.transport ?? 'pre-v7'} deployment — ${GENERATION} never resumes an older ` +
-        `generation. Archive this network's entry first (node scripts/archive-state.js ${profile.name} _v70_pre71 ${netKey}); ` +
+        `generation. Archive this network's entry first (node scripts/archive-state.js ${profile.name} ` +
+        `_${String(state.transport ?? 'old').replace(/\W/g, '')}_pre${GENERATION.replace(/\D/g, '')} ${netKey}); ` +
         `its gas tank is recoverable with scripts/recover-tanks.js (through the timelock if it was handed over)`,
     )
   }

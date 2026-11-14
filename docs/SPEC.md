@@ -1,4 +1,4 @@
-# SPAWN! protocol specification (v7.1)
+# SPAWN! protocol specification (v7.2)
 
 Audience: a security auditor opening this repo cold. Everything below is
 written from the code at the commit that introduced it, with
@@ -55,6 +55,31 @@ deployed bytecode cannot be patched:
   no pad change, no wire change;
 - *both vaults refuse a deposit that credited nothing* (`MIN_DEPOSIT`, §7).
 
+Protocol version v7.2 (**a full redeploy once more — v7.1 never reached
+mainnet. Two ADDITIVE wire ops, 6 and 7; ops 1–5 and 10–13 are unchanged**).
+The hub pad cannot be changed once deployed and a gateway is forever, so
+what ONE universe on six chains needs from the hub goes in now: Base (the
+hub) + Optimism + Arbitrum on Circle USDC, levelled with CCTP; Ethereum L1
+on USDC, where a message costs L1 gas; BNB Chain on BSC USDT (18 decimals,
+no Circle dollar, no CCTP); Solana, later. Chains open one by one.
+- *anyone can bring a token to a chain* (§4) — `SpawnPad.resync` is payable
+  and permissionless: the operator still sends it on the tank's account,
+  anyone else attaches what the message costs;
+- *one dear leg does not drain the tank* (§3, §4) — an operator-set ceiling
+  per chain on the SYNC a spawn fans out (`syncCap`): above it that chain
+  is skipped, like a dead leg, and the others are served;
+- *a chain that was skipped is opened from that chain* (§4) — `OP_OPEN = 6`:
+  `SpawnGateway.openToken` asks the hub for the replica and prepays the
+  SYNC in its own coin;
+- *a claim can leave a chain whose vault cannot pay it* (§4, §7) —
+  `OP_MOVE = 7`: `SpawnGateway.moveClaim` burns oUSD on one chain and the
+  hub forwards it as a PAYOUT to another — or sends it home;
+- *the tank fronts nothing it was not paid for* (§3) — a message someone
+  asked for (an open's SYNC, a move's PAYOUT) is sent only under a second
+  ceiling per chain, `requestCap`, set to what such a request prepays;
+- *the USDT vault mints no claim on demand* (§7) — `OmniUSDLocal`, now the
+  spoke vault of BNB Chain inside the shared universe, has no `wrap`.
+
 ## 2. Actors and trust model
 
 | Actor | Powers | Where |
@@ -63,7 +88,8 @@ deployed bytecode cannot be patched:
 | **operator** (mainnet: the owner's Safe) | prices, limits, rebalancing, unpause | `Roles.sol`, every contract |
 | **guardian** (a hot key) | pause | `Roles.sol`, every contract |
 | **token creator ("dev")** | locks the fee mode at launch; claims the dev fee share from any chain | `SpawnGateway.sol:spawnToken/spawnTokenUsdc`, `SpawnPad.sol:_claim` |
-| **trader / holder** | buy, sell, pull this chain's holder fees, claim holder dividends, claim a parked delivery — all on their own chain; wrap/unwrap USDC ⇄ oUSD | `SpawnGateway.sol:buyToken/buyTokenUsdc/sellToken/pullFees/claimPending`, `FeeDistributor.sol:claim`, `OmniUSD.sol:wrap/unwrap` |
+| **trader / holder** | buy, sell, pull this chain's holder fees, claim holder dividends, claim a parked delivery — all on their own chain; wrap USDC → oUSD (USDC chains only) and unwrap; v7.2: open a token on a chain it never reached, move an oUSD claim to another chain | `SpawnGateway.sol:buyToken/buyTokenUsdc/sellToken/pullFees/claimPending/openToken/moveClaim`, `FeeDistributor.sol:claim`, `OmniUSD.sol:wrap/unwrap`, `OmniUSDLocal.sol:unwrap` |
+| **anyone** (v7.2) | send a token's SYNC to a chain, by paying for the message on the hub | `SpawnPad.sol:resync` |
 | **Circle (USDC issuer, CCTP attester)** | can blacklist any account incl. a vault, pause USDC, denylist CCTP callers, switch on a CCTP minimum fee | external — see §7 |
 | **LayerZero endpoint + DVN/executor** | message verification & delivery between adapters | `lz/LayerZeroOmniMessenger.sol` |
 
@@ -90,7 +116,8 @@ Powers are split by what they can do to user funds:
 | | `transferAdmin`, `setOperator`, `setGuardian` — everywhere | role assignment |
 | **operator** | adapter `setDestination` (executor gas, reply budget — capped at `MAX_RETURN_UNIT = 0.05` native); gateway `setLegs` (capped at 4 / 32) | prices a moving market; bounded |
 | | OmniUSD `setDepositCap`, `rebalance` (to an existing peer only), `unpauseDeposits`; pad / gateway `unpause` | limits and liveness |
-| | pad `resync(token, chain)` (v7.1) | re-sends a token's SYNC to one chain; the pad's sends ride the hub tank, so it cannot be anyone's to call |
+| | pad `resync(token, chain)` with NO value attached (v7.1) | re-sends a token's SYNC to one chain on the hub tank's account. Since v7.2 anyone else may call it too — by attaching what the message costs (§4) |
+| | pad `setSyncCap`, `setRequestCap`; gateway `setOpenLegs` (≤ 8), `setMoveLegs` (≤ 4096) (v7.2) | prices again: what the tank may front for a message the pad is free to skip, and what a user prepays for one (§3) |
 | **guardian** | pad `pause`, gateway `pause`, OmniUSD `pauseDeposits` | a fast stop for NEW exposure |
 
 **Intended mainnet deployment** (proved end to end in
@@ -114,12 +141,28 @@ guardian are granted their roles and the deployer renounces all of its own
 | | set executor gas too low → hub-bound messages run out of gas on arrival | — | value is not lost: a failed LayerZero delivery stays retryable by anyone with more gas |
 | | `rebalance` a vault's whole USDC to a peer vault; `setDepositCap`; unpause during an incident | — | USDC can only go to a peer the admin named; local payouts fall back to oUSD claims, redeemable once liquidity returns. No operator function sends funds out of the protocol |
 | | `resync` in a loop (v7.1) → the hub tank pays one message per call until it is empty and replies stall (retryable) | — | the same harm as a reply budget set too low; a SYNC moves no value and a gateway ignores a duplicate |
+| | (v7.2) `setSyncCap` / `setRequestCap` to 1 wei → no launch reaches that chain, no open of it succeeds (the opener's fee is spent for nothing), every claim moved toward it comes home. Set huge → the tank is exposed to that chain's price again. `setMoveLegs(dst, 0)` closes moves from one chain to another; `setOpenLegs` / `setMoveLegs` set high over-charge whoever signs the quote | — | no value at risk: a SYNC that was skipped is sent by anyone's paid `resync` (no ceiling applies to it), a claim that cannot go on returns to its owner. But the `moveClaim` exit toward a chain is live only while the operator prices it — like every message-based exit already is, through `setDestination` |
 | **admin** (the Safe proposes through the timelock) | nothing | **everything**: name an attacker as peer vault and have the operator rebalance into it; re-point a spoke's hub route to a forged adapter and send it `OP_PAYOUT`; add a gateway label that mints unbacked oUSD into the hub's books; `recover` every tank; sponsor a gateway; replace operator and guardian | the delay itself: each of these is a public `CallScheduled` event for 48–72 h, during which every exit stays open and the guardian can `cancel`. **The timelock buys users time to leave, not immunity** — a hostile admin whom nobody vetoes drains what is left |
 | **deployer** (after the hand-over) | nothing | nothing | holds no role anywhere (asserted) |
 
 Testnets run with all three roles on the deployer EOA — a configuration
 value of `deploy-testnet.js`, not a code branch. **A deployment whose admin
 is an EOA has no delay: its admin key is a drain key.**
+
+### The v7.2 entry points — who can do what with them
+
+| Entry point | A stranger | A user of a spoke | Operator | Guardian | A destination that fails |
+|---|---|---|---|---|---|
+| `SpawnPad.resync(token, chain)` payable | sends the SYNC of a REAL token to a chain that HAS a gateway, if `msg.value ≥` the adapter's quote; the whole value goes to the adapter, which pays the fee out of it — the tank ends ≥ where it started (to the wei on the mock). Cannot name a token the pad did not spawn or a chain without a gateway (`"PAD: unknown"`), cannot change what the SYNC says (it is rebuilt from the pad's own storage), cannot fork a token (a gateway ignores a second SYNC). Works while paused | — (a hub-chain call) | the same with no value: the tank pays, as in v7.1 | pays like a stranger | the call reverts with the leg's own error (`"LZM: no gas limit"`, …) — a user call, atomic, the value is not taken |
+| `SpawnPad.setSyncCap` / `setRequestCap` | `"ROLES: not operator"` | — | any value, any chain — see the table above | `"ROLES: not operator"` | — |
+| `SpawnGateway.openToken` → `OP_OPEN` | on any chain where they hold its coin: asks for a token's replica THERE, only where none exists, prepaying `openLegs`. The hub sends the SYNC if the id is a token it spawned and the SYNC costs ≤ `requestCap` of that chain. Cannot create a replica of anything the hub did not spawn, cannot make the tank front more than `requestCap` | the same | sets `openLegs`, `requestCap` | a paused GATEWAY refuses opens; a paused PAD serves them | the hub logs `SyncFailed` and consumes the message — the fee is spent, nothing else was at stake |
+| `SpawnGateway.moveClaim` → `OP_MOVE` | nothing without oUSD of their own on that chain: the gateway burns the CALLER's balance | moves their own claim to any chain the operator priced, for any recipient; pays the message and the hub's leg (`moveLegs[dst]`). Cannot move more than they hold, cannot reach the hub's own books, cannot make the hub pay out more than was burned (the amount is the gateway's, not theirs to state twice) | prices and thereby opens or closes each (source, destination) pair; sets `requestCap` | cannot stop it: neither the gateway's pause nor the pad's applies | the claim comes home: no gateway there, a recipient that chain cannot pay, a leg that cannot be priced or will not take the message, or costs more than `requestCap`. If the way home fails too, the inbound message reverts and LayerZero keeps it |
+| a `SpawnGateway` itself (i.e. whoever can speak as one: its chain's adapter route, its verifier set) | — | — | — | — | **v7.2 widens this**: a forged `OP_MOVE` is a PAYOUT of any amount on ANY chain, where before v7.2 the hub only ever paid the chain a message came from. Every pathway's verifier set is now custody of every vault, directly (§11) |
+
+The admin (the timelock) gains nothing here that it did not hold: it may
+act as operator for each of these — free `resync`, the ceilings, the legs —
+after its delay, like everything it does. It names the gateways, and a
+gateway is what `OP_MOVE` trusts.
 
 Trust chain for an inbound message (production transport):
 1. endpoint authenticity — `lzReceive` requires `msg.sender == endpoint`
@@ -195,6 +238,24 @@ triggers.** Nothing rides on charity, so nothing can be drained by spam.
   quoteSpawn(name, symbol, metaURI, withDevBuy)` return the exact fee before
   signing. Trade payloads are fixed-size; a spawn's fee depends on its
   strings, so its quote takes them.
+- (v7.2) Two actions are answered by a message that is NOT a trade's
+  reply, and are priced on their own:
+  - `openToken` prepays `openLegs` units — the SYNC the hub sends back to
+    this chain (`quoteOpen()`). A fresh gateway has `openLegs = 1`, not 0:
+    on a remote chain an open that prepaid nothing would be the hub tank's
+    to pay, and anyone could ask for one. The hub chain's own gateway is
+    set to 0 (its SYNC is a local call). Capped at 8.
+  - `moveClaim` prepays `moveLegs[dstChain]` units — the PAYOUT the hub
+    carries to ANOTHER chain, priced per destination in the SOURCE chain's
+    reply units (`quoteMove(dstChain)`); never fewer than `tradeLegs`,
+    which pays for the way home if the hub has to return the claim; 0 = no
+    price = that destination is refused (`"GW: route closed"`). Capped at
+    4096: an L1 seen from an L2 costs hundreds of the L2's units.
+    `tradeLegs` could not serve here — it is 0 on the hub chain's own
+    gateway and priced on a reply to the source everywhere else (F-14).
+- (v7.2) The pad forwards value in exactly one place: `resync` hands its
+  caller's whole `msg.value` to the messenger (§4). Everywhere else it
+  still attaches nothing and passes `returnLegs = 0`.
 - Sponsorship is configuration, not a code path: testnets sponsor their
   gateways (the tank pays, visitors need no fee logic); mainnet sponsors the
   pad only.
@@ -220,6 +281,48 @@ every fee mode, with and without dev buys, buys inside and after the
 genesis window, sells, dev claims, pulls) the hub tank's balance is
 checked after every single delivery and never decreases.
 
+### What the tank fronts, and its two ceilings (v7.2)
+
+Every reply is prepaid by its cause — at the price the operator last set.
+Between that and the price the hub pays when the reply leaves, the tank
+carries the difference. For a reply that carries a user's value home there
+is no choice: it is sent, and a budget set too low drains the tank (the
+liveness model of §11). For a message the pad is FREE TO SKIP there is a
+choice, and v7.2 makes it (`SpawnPad._within`, `_trySend`):
+
+| Message | Who prepaid it | Ceiling (hub-native wei, operator-set) | Above it |
+|---|---|---|---|
+| a token's SYNC in a spawn's fan-out | the launcher, in ANOTHER chain's units (`spawnLegs`) | `syncCap[chain]`; 0 = none, and no quote is made | `SyncFailed`, the spawn goes on |
+| the same SYNC toward the chain the spawn came FROM | the launcher, in that chain's OWN units | the larger of `syncCap[chain]` and `requestCap[chain]` — and none where `syncCap` is 0 | `SyncFailed`; a dev buy's bag is then parked on that chain until the token is opened there (§4) |
+| the SYNC of an `OP_OPEN` | the opener, in that chain's own units (`openLegs`) | `requestCap[chain]`; always quoted, so 0 lets through only a leg that costs nothing | `SyncFailed`, the message is consumed |
+| the PAYOUT an `OP_MOVE` forwards | the mover, in the source chain's units (`moveLegs[dst]`) | `requestCap[dstChain]`, the same | the claim goes home (a reply, prepaid by the same legs) |
+| `resync` | its caller, in full, on the hub — or the operator's own decision | none | — |
+
+The second row is what lets a chain that is left out of every launch still
+launch for itself: its launcher prepaid at its own price, exactly like an
+opener (tested: a launch FROM the dear chain gets its replica and its dev
+buy there, and the tank comes out ahead; at a spike it does not).
+
+Why two. `syncCap` is a POLICY on launches: set below a chain's ordinary
+price it leaves that chain out of every launch — Ethereum, whose SYNC no
+launcher on an L2 can prepay (`spawnLegs` tops out at 32 of an L2's
+units). `requestCap` is SOLVENCY: set to what an open or a move toward
+that chain prepays, the tank never fronts more than a request brought,
+whatever the price does between the user's quote and the hub (F-15, §12).
+It defaults to 0: a remote chain is closed to opens and to incoming moves
+until the operator prices it; the hub chain's own gateway needs none, its
+leg costs nothing.
+
+Asserted on the mock (`v72.test.js`), with a leg ten times dearer than the
+others: without a ceiling a launch from Optimism takes `3·fee + 10·fee −
+4·unit` out of the tank; with `syncCap` the same launch skips that chain
+and the tank GROWS by `4·unit − 3·fee`; an open from the dear chain adds
+its own unit and spends the dear fee (a positive margin); under a 5× price
+spike the open is not sent and the tank keeps what it prepaid, while a
+stranger's `resync` at the spike price leaves the tank unchanged to the
+wei; and a move adds one unit and spends at most one fee for each of the
+twenty (source, destination) pairs, the hub chain's own gateway included.
+
 ### Per-destination options
 
 `setDestination(label, gas, unit)` replaces the old global options blob.
@@ -235,12 +338,26 @@ endpoint — hub figures are therefore pessimistic):
 
 | Op (where it lands) | Gas used | Budget in deploy config |
 |---|---|---|
-| OP_SPAWN (hub), 5 remote SYNCs and a dev buy | 4.50M on the mock ≈ 1.4M of protocol work + one send per remote chain + the DELIVER (≈ 0.52M each on the mock) | 4M to the hub |
-| OP_BUY / OP_SELL / OP_PULL_FEES (hub), incl. one reply send | 0.24M / 0.20M / 0.13M (a buy no longer carries a fee fan-out) | 4M to the hub |
+| OP_SPAWN (hub), 5 remote SYNCs and a dev buy | 4.56M on the mock ≈ 1.4M of protocol work + one send per remote chain + the DELIVER (≈ 0.52M each on the mock). v7.1 measured 4.546M on the same test, v7.2 4.560M: with no ceiling set it adds under 3k gas per chain of the fan-out | 4M to the hub |
+| OP_SPAWN (hub), v7.2 worst case: the largest spawn a gateway admits (64 + 16 + 1,024 bytes of strings, a dev buy), FOUR remote chains and the hub chain's own replica | **4.946M** with no ceiling; **4.957M** with a `syncCap` on one chain that is under it (+0.011M: one quote); **4.411M** with that chain over its ceiling (−0.535M: one send less); 4.991M with a ceiling on all four | 6M on the mock; real: `hubGasFor` |
+| OP_BUY / OP_SELL / OP_PULL_FEES (hub), incl. one reply send | 0.26M / 0.21M / 0.15M (unchanged by v7.2 to within 200 gas) | 4M to the hub |
+| OP_OPEN (hub), v7.2 — one quote, one SYNC send | 0.25M | 4M to the hub |
+| OP_MOVE (hub), v7.2 — forwarded to a remote chain (one quote, one send) / to the hub chain's own gateway (one quote, the payout itself) / turned back | 0.11M / 0.12M / 0.10M | 4M to the hub |
 | OP_SYNC_TOKEN (spoke — a replica deploy) | 0.72M | 2M to a spoke |
-| OP_DELIVER / OP_PAYOUT / OP_FEE_DROP (spoke) | 0.15M / 0.10M / 0.13M | 2M to a spoke |
+| OP_DELIVER / OP_PAYOUT / OP_FEE_DROP (spoke) | 0.15M / 0.10M (0.07M for a claim on an empty vault) / 0.13M | 2M to a spoke |
 
 (`PRINT_GAS=1 npx hardhat test --grep "executor gas"` reprints these.)
+
+Two things the mock does not tell. A message that sends ONE reply looks
+cheap on it (the reply's packet is stored in the slots the delivered
+packet just freed), which is why a BUY or a MOVE reads 0.1–0.26M where a
+real send alone was measured at about 0.27M on a mainnet fork
+(`hubGasFor`). And the mock's `quote` costs
+about 10k gas where a real one walks the send library, each DVN and the
+executor's price feed (an estimated 0.1–0.2M — not measured): every chain
+with a `syncCap`, every open and every move pays one. Neither changes the
+order of magnitude, but the hub's executor gas for a spawn must be
+recomputed with one real quote per chain that has a ceiling.
 
 Executor gas is nearly free on L2 destinations (≈ destination gas price ×
 gas — see MAINNET-ADDRESSES.md), but it is one number per destination, so a
@@ -420,6 +537,19 @@ its users prepay no reply and the hub tank pays them. The deploy script
 sets the legs and its self-check reads them back; the contract does not
 enforce it.
 
+The class in v7.2's own additions — each default chosen so that UNSET means
+closed, or means what it meant before:
+
+| Site | The unset value | What it means |
+|---|---|---|
+| pad `_move` | `gateways[dstChain] == 0` for a destination a USER names | explicit: refused before any send, the claim goes home (F-16 — with a route already on the adapter the send would have succeeded, to nobody) |
+| pad `_move` | `to == 0` | explicit: goes home (the gateway refuses it at entry too) |
+| pad `requestCap[chain] == 0` | no price | closed: only a leg that costs nothing passes |
+| pad `syncCap[chain] == 0` | no ceiling | open, deliberately: the fan-out behaves as in v7.1 |
+| gateway `moveLegs[dst] == 0` | no price | closed (`"GW: route closed"`) — also what refuses a destination that does not exist |
+| gateway `openLegs` | starts at 1, not 0 | an open prepays one leg unless the operator says otherwise (the hub chain's gateway is set to 0) |
+| pad `resync` | `operator == 0` (never named) | nobody but the admin sends for free; everyone else pays |
+
 ## 4. Message catalog — the single source of truth
 
 Envelope payload = `abi.encode(uint8 op, bytes data)`; `data` per op below.
@@ -431,22 +561,28 @@ revert (`SpawnPad.sol:_addr` → `"PAD: bad recipient"`,
 
 | Op | Name | Direction | Wire tuple (`data`) | Trigger | Effect on receive |
 |---|---|---|---|---|---|
-| 1 | OP_SPAWN | gateway → pad | `(bytes32 creator [wide ok], string name, string symbol, string metaURI, uint256 devBuyUsd, uint8 feeMode)` | `SpawnGateway.spawnToken` (burns dev-buy oUSD first) or `spawnTokenUsdc` (v7: pulls dev-buy USDC into the vault via `OmniUSD.depositFor`) — same message. The gateway first refuses what the hub would: `feeMode > 3` (`"GW: bad fee mode"`), name > 64 / symbol > 16 / metaURI > 1024 bytes (`"GW: string too long"`), a paused gateway (`"GW: paused"`), and (v7.1) an oUSD dev buy under 1e12 wei (`"GW: dust"`) | `SpawnPad._spawn`: deploy hub `SpawnToken` (premint 1B to pad, reporting to no distributor), store `Meta` (creator stays wide), `venue.openMarket`, emit `Spawned`, send OP_SYNC_TOKEN to **every** registered chain — each send under `try` (v7.1): one that fails emits `SyncFailed(token, chain)` and the spawn goes on — then optional dev-buy via `_buy`. **Refused** (no token; a dev buy goes home by OP_PAYOUT) when the pad is paused or `feeMode > 3` |
+| 1 | OP_SPAWN | gateway → pad | `(bytes32 creator [wide ok], string name, string symbol, string metaURI, uint256 devBuyUsd, uint8 feeMode)` | `SpawnGateway.spawnToken` (burns dev-buy oUSD first) or `spawnTokenUsdc` (v7: pulls dev-buy USDC into the vault via `OmniUSD.depositFor`) — same message. The gateway first refuses what the hub would: `feeMode > 3` (`"GW: bad fee mode"`), name > 64 / symbol > 16 / metaURI > 1024 bytes (`"GW: string too long"`), a paused gateway (`"GW: paused"`), and (v7.1) an oUSD dev buy under 1e12 wei (`"GW: dust"`) | `SpawnPad._spawn`: deploy hub `SpawnToken` (premint 1B to pad, reporting to no distributor), store `Meta` (creator stays wide), `venue.openMarket`, emit `Spawned`, send OP_SYNC_TOKEN to **every** registered chain — each send under `try` (v7.1): one that fails emits `SyncFailed(token, chain)` and the spawn goes on; a chain with a `syncCap` is quoted first and skipped the same way above it (v7.2) — then optional dev-buy via `_buy`. **Refused** (no token; a dev buy goes home by OP_PAYOUT) when the pad is paused or `feeMode > 3` |
 | 2 | OP_BUY | gateway → pad | `(bytes32 token [downcast], bytes32 buyer [wide ok], uint256 usdIn)` | `SpawnGateway.buyToken` (burns buyer's oUSD; ≥ 1e12 wei, `"GW: dust"`) or `buyTokenUsdc` (v7: pulls USDC into the vault; the vault refuses a deposit that credited less than 1e12 oUSD wei, `"oUSD: dust"`, v7.1), or their `…Min` twins on the local path (v7.1, §3) — same message; both first require a local replica (`"GW: unknown token"`), so a BUY for a token the hub never spawned cannot leave the chain | `SpawnPad._buy`: genesis gate, fee off the top, `venue.execBuy`, mint `spend + fee` into the hub's books, burn hub tokens, `supplyByChain[src] += out`, send OP_DELIVER (tokens + refund), emit `Trade`, `_accrueFee`. **Refused** — whole `usdIn` refunded — when the pad is paused or the venue refuses (via OP_DELIVER, `out = 0`), or the token id is wide/unknown (via OP_PAYOUT) |
 | 3 | OP_SELL | gateway → pad | `(bytes32 token [downcast], bytes32 seller [wide ok], uint256 tokensIn)` | `SpawnGateway.sellToken` (burns seller's replica; ≥ 1e12 wei, `"GW: dust"`), or `sellTokenMin` on the local path (v7.1, §3). Never paused | `SpawnPad._sell`: `venue.execSell`, mint tokens back to pad custody, `supplyByChain[src] -= tokensIn`, 1% fee, burn net oUSD, send OP_PAYOUT, emit `Trade`, `_accrueFee`. **Refused** when the venue will not price it: the bag goes back by OP_DELIVER |
 | 4 | OP_CLAIM | gateway → pad | `(bytes32 token [downcast], bytes32 claimer [wide ok])` | `SpawnGateway.claimFees` (requires a local replica). Never paused | `SpawnPad._claim`: pay `dev − devClaimed` via OP_PAYOUT to the claim chain, emit `DevClaimed`. **Refused** (no reply) when `claimer` is not the creator (wide comparison) or nothing is accrued |
 | 5 | OP_PULL_FEES (v7) | gateway → pad | `(bytes32 token [downcast])` | `SpawnGateway.pullFees` — anyone, for any token with a local replica; prepays `tradeLegs`. Never paused | `SpawnPad._pull`: split any pot not split yet, then send `OP_FEE_DROP(token, pendingDrop[token][src])` to the source chain and zero it, emit `FeesPulled`. **Refused** (no reply) when nothing is waiting or the token is unknown |
-| 10 | OP_SYNC_TOKEN | pad → gateway | `(bytes32 token [downcast on EVM spokes; raw 32-byte seed on Solana], string name, string symbol)` | inside `_spawn`, one per registered chain; and `SpawnPad.resync(token, chain)` (operator, v7.1) for a chain whose SYNC failed or which joined after the token | EVM: deploy replica (`SpawnToken` premint 0, controller = gateway), record `replicaOf`, then book any fee drop parked for it. A SYNC for a token that already has a replica is ignored. Solana: create Replica PDA + SPL mint, decimals 6, authority = store (`lz_receive.rs::handle_sync_token`) |
+| 6 | OP_OPEN (v7.2) | gateway → pad | `(bytes32 token [downcast])` | `SpawnGateway.openToken` — anyone, for a hub token id that has NO replica on this chain (`"GW: already open"`); prepays `openLegs`. Refused by a paused gateway (`"GW: paused"`) | send that token's OP_SYNC_TOKEN to the SOURCE chain if it costs the tank no more than `requestCap[src]`, emit `Resynced`; otherwise — the leg refuses, cannot be priced, or is above the ceiling — emit `SyncFailed`, no revert. **Refused** (`Refused`, reason 2, no reply) for an id the pad never spawned. Ignores the pad's pause |
+| 7 | OP_MOVE (v7.2) | gateway → pad | `(bytes32 from [wide ok], bytes32 to [wide ok — see §5], uint256 amount, uint32 dstChain)` | `SpawnGateway.moveClaim` — burns `amount` (≥ 1e12 wei, `"GW: dust"`) of the caller's oUSD; `to ≠ 0`, `dstChain` neither this chain nor label 0 (`"GW: bad destination"`), and a destination the operator priced (`"GW: route closed"`); prepays `moveLegs[dstChain]`. Never paused | `SpawnPad._move`: forward `OP_PAYOUT(to, amount)` to `dstChain`, or — no gateway there, `to` is zero, `to` is not an address and the destination is an EVM chain, the leg costs more than `requestCap[dst]`, cannot be priced or will not take the message — send `OP_PAYOUT(from, amount)` back to the source. Emits `Moved(src, dst, from, to, amount, forwarded)`. The hub's own books are not touched. Ignores the pad's pause |
+| 10 | OP_SYNC_TOKEN | pad → gateway | `(bytes32 token [downcast on EVM spokes; raw 32-byte seed on Solana], string name, string symbol)` | inside `_spawn`, one per registered chain not above its `syncCap`; `SpawnPad.resync(token, chain)` (v7.1; v7.2: anyone who pays, or the operator) for a chain whose SYNC failed, was skipped, or which joined after the token; the answer to OP_OPEN (v7.2) | EVM: deploy replica (`SpawnToken` premint 0, controller = gateway), record `replicaOf`, then book any fee drop parked for it. A SYNC for a token that already has a replica is ignored. Solana: create Replica PDA + SPL mint, decimals 6, authority = store (`lz_receive.rs::handle_sync_token`) |
 | 11 | OP_DELIVER | pad → gateway | `(bytes32 token [downcast/seed], bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 tokens, uint256 refund)` | inside `_buy`; also a refused sell's bag coming back | EVM: `replica.bridgeMint(to, tokens)` — or, if the replica does not exist yet or the mint fails, **park** in `pendingDelivery[token][to]` for `claimPending`; the refund settles at once either way by `OmniUSD.payout(to, refund)` (USDC if the vault is liquid, else an oUSD claim). Solana: mint `tokens / 1e12` to recipient's ATA (+ scaled refund) |
-| 12 | OP_PAYOUT | pad → gateway | `(bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 usdOut)` | `_sell` net proceeds, `_claim` dev share, a refused spawn's dev buy, a refused unknown-token buy | EVM: `OmniUSD.payout(to, usdOut)` (v7 — USDC if liquid, else an oUSD claim; never reverts) |
+| 12 | OP_PAYOUT | pad → gateway | `(bytes32 to [downcast on EVM; raw pubkey on Solana], uint256 usdOut)` | `_sell` net proceeds, `_claim` dev share, a refused spawn's dev buy, a refused unknown-token buy; v7.2: a moved claim arriving at its destination, or coming home | EVM: `OmniUSD.payout(to, usdOut)` (v7 — USDC if liquid, else an oUSD claim; never reverts) |
 | 13 | OP_FEE_DROP | pad → gateway | `(bytes32 token [downcast/seed], uint256 amount)` | the reply to OP_PULL_FEES; or, for an `autoDrop` chain only, `_distributeHolders` directly | EVM: `distributor.drop(replica, amount)` and mint the oUSD into the chain's `FeeDistributor`; if there is no replica or no distributor yet, or the distributor refuses, **park** in `pendingFeeDrop[token]` (flushed by the SYNC, or by anyone via `flushFeeDrop`). Holders claim oUSD and unwrap or trade with it. Solana: mint into the store's vault ATA, parked pending the phase-3 distributor |
 
 Unknown ops revert (`"PAD: bad op"` / `"GW: bad op"`); the Solana codec
 rejects unknown ops, dirty envelope padding and bad offsets
-(`msg_codec.rs` tests). Op 5 is ADDITIVE: ops 1–4 and 10–13 are byte-for-
-byte unchanged, the codec vectors in `solana/tests/codec-vectors.json` were
-not regenerated, and the Solana program neither sends op 5 yet nor ever
-receives it (it is gateway → pad only).
+(`msg_codec.rs` tests). Ops 5, 6 and 7 are ADDITIVE: ops 1–4 and 10–13 are
+byte-for-byte unchanged, the codec vectors in
+`solana/tests/codec-vectors.json` were not regenerated, and the Solana
+program neither sends ops 5–7 yet nor ever receives them (they are gateway
+→ pad only). What v7.2 does ask of a non-EVM gateway: its PAYOUT handler
+now receives recipients a user CHOSE (a moved claim), not only identities
+that were a signer on that chain — it must pay, park or mint a claim for
+any 32-byte `to`, never fail (§5, §11).
 
 ### What can still revert on the message path
 
@@ -472,8 +608,13 @@ through every contract it calls:
 | pad | `usd.bridgeBurn` / `SpawnToken.bridgeBurn` insufficient balance | invariant guard | cannot fire while V1 / S1 hold (now exact, see above) |
 | pad | `"VENUE: market open"`, `new SpawnToken` | unreachable | a fresh CREATE address has no market; deployment fails only by running out of gas (bounded by the string caps) |
 | pad → adapter | `"LZM: gas tank empty"` | **acceptable — retryable** | the reply cannot be paid; the inbound message is not consumed and LayerZero keeps it re-executable by anyone once the tank is refilled (tested). Cannot happen from protocol traffic alone: every reply is prepaid |
-| pad `_spawn` → the SYNC fan-out | ANY failure of one chain's send: `"LZM: no route"`, `"LZM: no gas limit"`, a message the pathway's executor will not carry (LayerZero's default toward some chains admits less than a SYNC), a pathway LayerZero retired; on the hub chain's own gateway, `"GW: no distributor"` | **was a liveness bug (F-12) — fixed in v7.1** | `setGateway` is permanent and `_spawn` sent every SYNC with a plain call, so one leg whose send reverted undid EVERY launch from EVERY chain — for the 48 h a timelocked repair takes, or for good if the chain is gone. Each SYNC now runs under `try`; a failure emits `SyncFailed(token, chain)` and the spawn stands. The operator re-sends it with `resync(token, chain)` once the leg works. Meanwhile that chain has no replica: its gateway refuses buys, sells, claims and pulls at entry, and anything the hub sends there first (a dev buy's DELIVER, a FEE_DROP) is parked |
+| pad `_spawn` → the SYNC fan-out | ANY failure of one chain's send: `"LZM: no route"`, `"LZM: no gas limit"`, a message the pathway's executor will not carry (LayerZero's default toward some chains admits less than a SYNC), a pathway LayerZero retired; on the hub chain's own gateway, `"GW: no distributor"` | **was a liveness bug (F-12) — fixed in v7.1** | `setGateway` is permanent and `_spawn` sent every SYNC with a plain call, so one leg whose send reverted undid EVERY launch from EVERY chain — for the 48 h a timelocked repair takes, or for good if the chain is gone. Each SYNC now runs under `try`; a failure emits `SyncFailed(token, chain)` and the spawn stands. It is re-sent with `resync(token, chain)` once the leg works — by the operator on the tank's account, or (v7.2) by anyone who pays for it. Meanwhile that chain has no replica: its gateway refuses buys, sells, claims and pulls at entry, and anything the hub sends there first (a dev buy's DELIVER, a FEE_DROP) is parked |
 | pad `_spawn` | `"PAD: gas"` | acceptable — retryable | a SYNC send that failed with almost no gas left behind it (`gasleft() < 100,000`) was STARVED, not refused: the spawn reverts and is retried with enough gas. Without this, whoever delivers a spawn — or a wallet's own `eth_estimateGas` — could pick the gas at which the last SYNC runs dry and the launch "succeeds" without a chain (`v71.test.js` sweeps the gas of a spawn and finds no such value) |
+| pad, every skippable message (v7.2: a spawn's SYNC under a `syncCap`, the SYNC of an OP_OPEN, the forward leg of an OP_MOVE) → the QUOTE, then the send | any failure of either; a quote above the ceiling | never a revert — except starvation | `_within` prices the message (`messenger.quote` under `try`), `_trySend` sends it (under `try`). A quote over the ceiling, a quote that reverts and a send that reverts all mean "not sent": `SyncFailed` for a SYNC, the way home for a move. The same floor applies to both calls (`_notStarved`, `"PAD: gas"`): a QUOTE that ran dry must not pass for a ceiling, or the gas of a delivery would again decide whether a chain gets its replica — after a failed quote on the last chain of a fan-out, or on an OP_OPEN, only an event remains to be emitted. `v72.test.js` sweeps the gas of a spawn, an open and a move with a quote that costs what a real one does (the mock's is nearly free, which hides it) and fails without the floor |
+| pad OP_OPEN | an id the pad never spawned | refused | `Refused(6, src, id, 0, 0, 2)`, no reply. It carried no value; the fee it prepaid stays in the tank |
+| pad OP_MOVE → the way home (`_sendHome`) | `"LZM: no route"`, `"LZM: no gas limit"`, `"LZM: gas tank empty"` | misconfiguration — retryable | the forward leg is skippable, the return is not: it is a reply carrying the mover's value to the chain it came from. If it cannot be sent the inbound message reverts as a whole and LayerZero keeps it (tested) |
+| pad OP_MOVE → the destination gateway's PAYOUT handler | ~~`"GW: bad recipient"` on a recipient that is not an address~~, ~~a mint to the zero address~~, ~~a payout addressed to no contract~~ | **would have been stranding bugs — designed out** | `to` is the first recipient on the wire that a user chose. An EVM gateway reverts on a wide one (corruption guard, above), `OmniUSD.payout` reverts minting a claim to `address(0)`, and a message to a chain whose adapter route exists but whose gateway the pad does not know yet (a chain being added, inside the timelock delay) would be addressed to nobody. The pad refuses all three BEFORE it forwards — the claim goes home — and the source gateway refuses a zero recipient at entry |
+| pad `resync` (v7.2: anyone) | `"PAD: unknown"`, `"PAD: fee"`, the leg's own error | a user call | atomic: the value attached is not taken |
 | pad → adapter, REPLIES (DELIVER, PAYOUT, a pulled FEE_DROP) | `"LZM: no route"`, `"LZM: no gas limit"` | misconfiguration — retryable | a reply carries a user's value to the chain it came from; it cannot be skipped. If that leg cannot be sent the inbound message reverts and LayerZero keeps it until the adapter is fixed. Deploy scripts set the destination before the pad learns a gateway |
 | pad `_distributeHolders` → `autoDrop` send | any failure of the local drop | fixed | the send runs under `try`; a drop that cannot be shipped falls back to `pendingDrop` instead of undoing the trade that triggered it |
 | gateway DELIVER | ~~missing replica~~ (F-2), a failing `bridgeMint` | **was a stranding bug — fixed** | parked in `pendingDelivery`, claimed by the recipient with `claimPending`; the refund leg still settles at once |
@@ -497,7 +638,22 @@ which is why it carries an explicit floor (`"PAD: gas"`, above). (2) A
 `try` only guards an external call's revert; nothing is swallowed inside
 the pad or the gateway themselves.
 
-### Liveness of the SYNC fan-out (v7.1)
+**A correction to (1), found in v7.2.** "63/64 of the remaining gas" is per
+call frame, and each frame between the pad and the one that actually runs
+dry hands its own 1/64 back as it unwinds. After a starved call `k` frames
+deep the pad holds up to `k/64` of what it had, not `1/64`: a real
+LayerZero send or quote is five or six frames deep (adapter, endpoint, send
+library, a DVN or the executor, its price feed). So the 100,000 floor
+catches a starved call that needs less than about 6.4M / k of gas — about
+1M for a LayerZero send, which the mainnet-fork suite measured at about
+0.27M per remote chain (`config/profiles.js:hubGasFor`) — not "less than
+6.3M" as v7.1 wrote. Still a margin of about 4×, and the mock (two frames,
+0.52M per send) is swept in tests; but the depth is read from LayerZero's
+architecture, not measured, a real QUOTE has not been measured at all, and
+the floor is a constant of the immutable pad: the fork rehearsal must
+measure both before the pad is deployed.
+
+### Liveness of the SYNC fan-out (v7.1, v7.2)
 
 - **A chain without the replica is closed for that token, not broken.**
   `buyToken*`, `claimFees`, `pullFees` revert `"GW: unknown token"`,
@@ -510,21 +666,57 @@ the pad or the gateway themselves.
   `supplyByChain` like any delivered token, and minted by `claimPending`
   after `resync`. If the replies cannot be sent either, the spawn message
   reverts and waits in LayerZero — a reply is never skipped.
-- **`resync(token, chain)`** — operator only: the pad is a sponsored sender,
-  so the hub tank pays for the message. It needs a token the pad spawned
+- **`resync(token, chain)`** — payable, and anyone's since v7.2. The pad is
+  a sponsored sender, so its messages are paid by the hub tank: the
+  OPERATOR (or the admin) may call it with no value, as in v7.1; anyone
+  else must attach at least `messenger.quote(chain, gateway, payload, 0)`
+  (`"PAD: fee"`), and the WHOLE `msg.value` is handed to the messenger, so
+  the tank is never out of pocket (on the mock: unchanged to the wei at
+  the exact fee, larger by any surplus). It needs a token the pad spawned
   and a chain that has a gateway (`"PAD: unknown"`), re-sends the same
   `OP_SYNC_TOKEN` built from the stored name and symbol, and emits
-  `Resynced`. It moves no value and cannot fork a token: a gateway ignores
-  a SYNC for a replica it already has. A side effect worth having: tokens
-  spawned BEFORE a chain was added can now be given a replica there.
-- **Retiring a leg.** There is deliberately no on-chain "retired" flag. A
-  dead leg costs each spawn one failed call (a few thousand gas) and one
-  `SyncFailed` event; if the leg is dead but its sends still SUCCEED (and
-  cost a fee nobody will ever earn back), the operator already holds the
-  switch: `setDestination(label, 0, …)` on the hub adapter makes every send
-  to that label revert `"LZM: no gas limit"` before any fee is paid, and is
-  reversible. A second switch on the pad would cost bytes the pad does not
-  have to spare (23,374 of 24,576) for no new capability.
+  `Resynced`. No ceiling applies — the caller is paying — and it ignores
+  the pad's pause: it moves no value and cannot fork a token (a gateway
+  ignores a SYNC for a replica it already has). Tokens spawned BEFORE a
+  chain was added are given a replica there the same way, by whoever
+  wants them there. A resync toward the hub chain's own gateway costs
+  nothing but its gas (the leg is a local call).
+- **A ceiling per chain on the fan-out: `syncCap` (v7.2).** With Ethereum as
+  a leg, one SYNC costs what dozens of L2 messages do, and a launcher
+  prepaid the fan-out at ANOTHER chain's prices (`spawnLegs` × its own
+  reply unit, capped at 32 legs): at an L1 gas spike — or simply at L1's
+  ordinary price — every spawn would take the difference out of the tank's
+  float, after which ordinary replies, prepaid with no slack, start
+  failing. `setSyncCap(chain, cap)` (operator; hub-native wei) bounds what
+  one spawn may spend on that chain's SYNC: the pad asks the adapter for
+  the quote first, and above the ceiling — or if the quote itself reverts —
+  it emits `SyncFailed` and goes on to the next chain without sending. The
+  tank is not charged for a message that was not sent (asserted to the
+  wei). `0` means no ceiling AND no quote: a chain without one costs the
+  spawn exactly what it did. A ceiling cannot skip the hub chain's own
+  gateway (its SYNC costs nothing). And for the chain a spawn came FROM the
+  ceiling is the larger of `syncCap` and `requestCap`: that launcher
+  prepaid at that chain's own price and wants the token where they stand —
+  without this, a chain left out of every launch could not launch for
+  itself (its dev buy would be parked behind a replica nobody sent). Set
+  BELOW a chain's ordinary price, the ceiling takes that chain out of every
+  OTHER chain's launches: it is then opened token by token —
+- **`openToken` / `OP_OPEN` (v7.2).** Someone on the chain a token never
+  reached asks the hub for it and pays the round trip in that chain's own
+  coin: the message, plus `openLegs` reply units for the SYNC (its own
+  count: a SYNC can cost more than the DELIVER a trade leg is priced on).
+  The hub sends the SYNC if it costs no more than `requestCap` of that
+  chain (§3) and emits `Resynced`; otherwise `SyncFailed`, and the fee
+  stays in the tank. The gateway only takes the call where no replica
+  exists; two opens in flight for the same token cost their callers one
+  fee each and deploy one replica.
+- **Retiring a leg.** Two reversible switches, both the operator's. On the
+  hub adapter, `setDestination(label, 0, …)` makes every send to that label
+  revert `"LZM: no gas limit"` before any fee is paid — replies included,
+  so it is for a chain that is gone. On the pad (v7.2), `setSyncCap(label,
+  1)` takes the chain out of the launch fan-out only, at the cost of one
+  quote per spawn, and `setRequestCap(label, 0)` closes it to opens and to
+  incoming moves; trades already there keep their replies.
 
 ## 5. Identity model — the downcast is a security boundary
 
@@ -545,6 +737,18 @@ end-to-end; only hub-local settlement downcasts.**
   Solana recipient bounces instead of minting to a truncated address.
 - `pad.gateways` is `mapping(uint32 => bytes32)` so a Solana OApp store
   pubkey can be a gateway (`SpawnPad.sol:87`, `setGateway`).
+- **A recipient someone chose (v7.2).** Until `OP_MOVE`, every identity the
+  hub echoed back to a chain had been a signer ON that chain, which is
+  what made the EVM spoke's downcast a safe revert. `moveClaim(dstChain,
+  to, amount)` breaks that: `to` is typed by a user on another chain. The
+  hub therefore decides BEFORE forwarding whether the destination can pay
+  it: a gateway id whose top 12 bytes are zero is an EVM chain (a 32-byte
+  key with 96 leading zero bits does not occur), and there `to` must fit
+  an address; a wide gateway takes any non-zero `to` as it is. What fails
+  the test goes home to `(srcChain, from)` — and `from` IS a signer of the
+  source chain, so the way home cannot hit the same wall
+  (`SpawnPad._move`). An address-shaped `to` nobody controls on the
+  destination is the sender's own mistake, as with any transfer.
 
 Audit focus: every `_addr` call site is classified in code comments
 (passthrough vs local settlement); verify none of the passthrough paths can
@@ -584,7 +788,9 @@ Invariants an auditor should try to break:
   it never leaves the pad's custody. `setGateway` refuses label 0.
 - **S4 (no spoke-to-spoke path):** replicas cannot move between spokes
   except through a hub sell + re-buy, so `_sell`'s unchecked-looking
-  subtraction cannot underflow while S2 holds.
+  subtraction cannot underflow while S2 holds. v7.2's `moveClaim` moves
+  DOLLAR CLAIMS between chains, never tokens: it does not touch
+  `supplyByChain` or any replica.
 
 ## 7. Value (oUSD) accounting and invariants
 
@@ -600,17 +806,25 @@ instance per chain, in one of two modes fixed at construction
   sit in the spokes' vaults. All USDC functions revert `"oUSD: ledger
   only"`; a gateway cannot be constructed over a ledger instance
   (`"GW: ledger usd"`).
+- **Backed by another dollar** (`OmniUSDLocal`, v7.2: the spoke vault of BNB
+  Chain): the same vault over a dollar Circle does not issue there — BSC
+  USDT, 18 decimals. `SCALE = 10^(18 − decimals)` (1 for USDT: no sub-unit
+  dust), no CCTP, no peer, no `rebalance`, **no `wrap`**. It keeps
+  `OmniUSD`'s surface wherever the gateway, the distributor and the tooling
+  touch it (same selectors, events and revert strings — pinned by
+  `bnb-universe.test.js`), so the one `SpawnGateway` runs against either.
+  See "Two dollars, one set of books" below.
 
 How oUSD comes to exist or disappear — the complete list (a test pins the
 set of state-changing functions, `test/settlement.test.js`):
 
 | Path | Who | USDC | oUSD |
 |---|---|---|---|
-| `wrap(usdc6)` | anyone | pulled into the vault (under `depositCap`) | minted 1:1 to the caller |
+| `wrap(usdc6)` — `OmniUSD` only; `OmniUSDLocal` has none (v7.2) | anyone, on a USDC chain | pulled into the vault (under `depositCap`) | minted 1:1 to the caller |
 | `unwrap(amount18)` | anyone | paid out; reverts `"oUSD: vault short"` if the local vault lacks it | whole-USDC multiple burned, sub-`SCALE` dust stays |
 | `depositFor(from, usdc6)` | agent (gateway) | pulled from `from` (under `depositCap`) | **none** — the value leaves in the outgoing message (≡ wrap + bridgeBurn) |
 | `payout(to, amount18)` | agent (gateway) | `floor(amount18/SCALE)` paid if the vault has it and the transfer succeeds | only the sub-`SCALE` dust minted — or, on fallback, the **whole** amount |
-| `bridgeMint` / `bridgeBurn` | agent | — | value arriving by / leaving in a protocol message (oUSD-denominated buys, fee drops into the distributor, all hub ledger moves) |
+| `bridgeMint` / `bridgeBurn` | agent | — | value arriving by / leaving in a protocol message (oUSD-denominated buys, fee drops into the distributor, all hub ledger moves; v7.2: the claim a `moveClaim` burns on its way to another chain, where it arrives through `payout`) |
 
 Deposits credit the balance **delta** actually received, not the requested
 amount, and every USDC-moving function is `nonReentrant`. A deposit that
@@ -623,10 +837,15 @@ of 6 to 18 decimals, where an amount below the floor is otherwise
 expressible — docs/BNB-UNIVERSE.md).
 
 - **V0 (global backing) — the invariant everything else rests on:**
-  `Σ over backed instances of USDC held × 1e12 = Σ over ALL instances (hub
-  ledger included) of oUSD.totalSupply()`, modulo value in flight (a
-  message between its burn and its mint; a CCTP rebalance between its burn
-  and Circle's mint). It is a GLOBAL equality, not a per-chain one.
+  `Σ over vaults of dollar tokens held × that vault's SCALE = Σ over ALL
+  instances (hub ledger included) of oUSD.totalSupply()`, modulo value in
+  flight (a message between its burn and its mint; a CCTP rebalance between
+  its burn and Circle's mint). It is a GLOBAL equality, not a per-chain
+  one — and since v7.2 the left side adds up two different dollars (USDC ×
+  1e12, USDT × 1). `v72.test.js` asserts it after every step of a
+  five-chain, two-dollar universe (label 3 by loopback, USDC on 6, 5 and
+  2, USDT on 4): launches from every chain, trades, pulls, claims, moves,
+  moves turned back, opens, and a randomized sequence of them.
 - **Payouts never revert (message path).** `payout` runs inside
   `onOmniMessage`; a revert would strand the payout. It is all-or-nothing:
   if the vault holds the USDC **and** the transfer succeeds (low-level call —
@@ -640,7 +859,9 @@ expressible — docs/BNB-UNIVERSE.md).
   buyers are and leave where sellers are; fees drop where holders are; a
   dev may claim on any chain. A chain's vault can therefore owe more oUSD
   than it holds USDC while V0 still holds globally. First-come-first-served
-  on local liquidity; later claimants hold oUSD until a rebalance.
+  on local liquidity; later claimants hold oUSD until a rebalance — or,
+  since v7.2, take the claim to a chain whose vault can pay it
+  (`moveClaim`, below).
 - **Rebalancing trust model.** `rebalance(dstLabel, usdc6)`
   (operator) burns vault USDC through Circle CCTP V2
   `TokenMessengerV2.depositForBurn` with `mintRecipient =
@@ -668,6 +889,60 @@ expressible — docs/BNB-UNIVERSE.md).
   (exits fall back to oUSD claims, deposits revert); a CCTP denylist entry
   or a non-zero CCTP `minFee` makes `rebalance` revert (safe failure — a
   non-zero fee would otherwise break V0 by the fee amount).
+
+### Two dollars, one set of books (v7.2)
+
+Between USDC chains the vaults are levelled with CCTP: a dollar in the
+Optimism vault and a dollar in the Base vault are the same thing, one burn
+and one mint apart. The BNB vault holds USDT and can be levelled with
+nothing (docs/SATELLITE-DOLLARS.md). With one curve pricing a token for
+every chain, dollars that enter on BNB pay sellers on Base and the reverse,
+so the two sides drift apart for good: a seller on BNB can be left with a
+claim that vault will never hold the USDT for while the dollars sit on
+Base as USDC — and a seller on Base with a claim whose dollars sit on BNB.
+
+**`moveClaim(dstChain, to, amount)`** is the answer the protocol gives: the
+holder burns the claim where it cannot be paid and the hub forwards it as
+an `OP_PAYOUT` to a chain of their choosing, where that vault pays its own
+dollar if it holds it and mints a claim there if it does not (the holder
+may move it on). What it is and is not:
+
+- it never touches the hub's books (V1 is unchanged: tested — the ledger's
+  supply is the same before and after a move) and V0 holds at both ends: a
+  claim burned on one chain becomes a claim, or a dollar leaving a vault,
+  on another. In flight the two sides of V0 differ by exactly the amount;
+- it is an exit: no pause applies, on the gateway or on the pad;
+- it pays out whatever the DESTINATION vault holds. A claim that arose in
+  USDT leaves in USDC and the reverse, at par. That is the point — and
+  the exposure: **every vault now backs every claim in the universe, in
+  its own dollar**. First-come-first-served is global.
+
+**What `OmniUSDLocal` having no `wrap` does, and does not do.** With
+portable claims, `wrap` on the USDT vault would be a free, unlimited,
+one-step exchange of USDT for USDC at par through the vaults — ruinous for
+every USDC holder the day USDT slips its peg. Without it, oUSD exists on
+BNB only as a claim does: a payout that vault could not make (short, or the
+issuer froze the recipient), and holder fees dropped into the distributor
+(there is no sub-unit dust at 18 decimals). Dollars enter that vault
+through the gateway only (`depositFor`), bound to a trade. It does NOT
+separate the two dollars:
+
+| Channel | Direction | Rate | What bounds it |
+|---|---|---|---|
+| `OmniUSD.wrap` on a USDC chain, then `moveClaim` to BNB | USDC → USDT, at par | one message, any size | what the BNB vault holds at that moment; the operator can close the route (`setMoveLegs(4, 0)` on a gateway) or the destination (`setRequestCap(4, 0)`) |
+| a claim on BNB (short vault, frozen seller), moved to a USDC chain | USDT-side claim → USDC, at par | as claims arise | by design — this is the exit; bounded by what USDC vaults hold |
+| fees: trade on BNB in USDT, claim the dev share on a USDC chain (`claimFees` pays on the chain the dev asks from), or pull and move a holder share | USDT → USDC, at par | 1% of volume per trade — 2% of a wallet's capital per round trip on its own token, up to 30% of a buy inside a genesis window | the BNB vault's deposit cap bounds its BALANCE, not this flow; the guardian's stops are the brake: `pause` on the BNB gateway and `pauseDeposits` on its vault end every USDT inflow |
+| a sale on a USDC chain of a bag whose price BNB buyers pushed up | USDT in, USDC out | the market itself | this is "one curve": inherent |
+
+So a depeg of either dollar is every holder's problem, to the extent of
+what the other side's vaults hold: if USDT slips, USDC leaves through the
+fee channels until the guardian closes BNB's deposits; if USDC slips, the
+BNB vault's USDT leaves through `wrap` + `moveClaim` at the speed of one
+message per transfer until a route is closed. Neither is theft and V0
+holds throughout — in UNITS. V0 says nothing about what a unit is worth.
+The honest statement to users: **a claim is a claim on the universe's
+dollars — mostly USDC, partly USDT — not on USDC.** The deposit cap on the
+BNB vault is the knob that bounds how much of the backing can be USDT.
 
 The pre-v7 invariants are unchanged in shape:
 
@@ -897,11 +1172,20 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 | Gateway sponsorship is one admin flag | AUDIT SCOPE (hostile/mistaken admin, now behind the timelock) — sponsoring a gateway on mainnet reopens the dust-drain of its adapter's tank |
 | ~~The adapter accepts a zero-sender packet from an unconfigured chain as the hub~~ | **RESOLVED in v7.1** (F-11, §3) by a full redeploy; the retired v7.0 deployment held only canary funds |
 | ~~One chain whose send reverts bricks every launch~~ | **RESOLVED in v7.1** (F-12, §4) — failed SYNCs are logged, `resync` repairs them |
-| No slippage protection on CROSS-CHAIN trades | open — the local path has `*Min` (v7.1, §3); a cross-chain minimum needs a wire change (the hub must enforce it and bounce). Until then a cross-chain buy or sell fills at the price it finds minutes later |
+| ~~Only the operator can bring a token to a chain~~ | **RESOLVED in v7.2** (§4) — `resync` is anyone's who pays for the message; `openToken` asks for it from the chain itself |
+| ~~A dear leg (Ethereum L1) drains the hub tank at every launch~~ | **RESOLVED in v7.2** (§3, §4) — `syncCap` per chain. Residual: the ceilings are operator-set estimates of a moving price, like every reply budget (below) |
+| Two dollars back one set of claims (v7.2: USDT on BNB, USDC elsewhere) | **BY DESIGN, and the largest economic exposure of v7.2** (§7 "Two dollars, one set of books"). The vaults cannot be levelled; `moveClaim` makes every vault pay any claim, at par; removing `wrap` from the USDT vault closes the free, unlimited USDT → USDC exchange but not the fee channels, and `OmniUSD.wrap` + `moveClaim` is a USDC → USDT exchange at par up to the BNB vault's balance. A depeg of either dollar is socialised to the extent of the other side's vaults. Bounded by the BNB deposit cap (stock, not flow) and the guardian's deposit pause; AUDIT SCOPE as an economic model, and to be disclosed to users |
+| A forged gateway message can now pay out on ANY chain (v7.2) | **AUDIT SCOPE** — before `OP_MOVE` the hub only ever sent value back to the chain a message came from, so a compromised leg (its adapter route, its verifier set, a faulty non-EVM gateway program) could drain other vaults only indirectly (unbacked buys moving the price). A forged `OP_MOVE` is a direct `OP_PAYOUT` of any amount to any chain: USDC out of every liquid vault, unbacked claims beyond. The weakest pathway's verifier set is now custody of every vault. There is no per-chain or per-period limit on what a chain may move out — it would need hub storage and a policy; not built |
+| The executor's prepaid value is not enforced on arrival | **AUDIT SCOPE (pre-existing, sharper in v7.2)** — LayerZero lets anyone execute a verified packet, with any `msg.value`; `LayerZeroOmniMessenger.lzReceive` accepts whatever comes. A sender who pays the source fee and then delivers their own packet with zero value makes the hub tank pay the reply unfunded. It costs them more than it costs the tank for a cheap reply; for a dear one (a move toward an L1, an open there) the ratio is about 1:1, and `requestCap` bounds each such message. An adapter that checked `msg.value` against a value carried in the envelope would close it — an envelope change |
+| A spawn cannot prepay a leg far dearer than its own chain's reply | open (pre-existing, now reachable) — `spawnLegs` ≤ 32 units priced on a reply to the ORIGIN chain; an L1 SYNC costs hundreds of an L2's units. v7.2 does not fund it: `syncCap` skips it instead and the chain is opened per token. Consequence to state plainly: with a ceiling below L1's ordinary price, NO token is on Ethereum until someone pays to open it there |
+| The pad is close to the code-size limit | 23,932 of 24,576 bytes after v7.2 (644 to spare; `sizes.test.js` requires 512). Room was made by routing every reply send, every `Refused` and the BUY/SELL dispatch through shared internals — no behaviour change (BUY / SELL / PULL cost within 200 gas of v7.1). It only matters until the pad is deployed: after that nothing can be added anyway |
+| `requestCap` defaults to 0 — closed | by design (fail-closed: an unpriced chain cannot make the tank front anything) — but the deploy tooling must set it for every remote chain, with `moveLegs` for every pair and `openLegs = 0` on the hub chain's gateway, or opens waste their fee and moves come home. TOOLING CHANTIER (next) |
+| No slippage protection on CROSS-CHAIN trades | open — the local path has `*Min` (v7.1, §3); a cross-chain minimum needs a wire change (the hub must enforce it and bounce). Until then a cross-chain buy or sell fills at the price it finds minutes later. NOT added in v7.2, and after v7.2 the hub can no longer be changed: a cross-chain minimum would have to be a new op the immutable pad does not know — i.e. it is now out of reach for this hub |
 | No slippage protection on a spawn's dev buy | not needed — it executes first on a curve that did not exist one instruction earlier, inside the spawn itself |
 | A parked delivery needs a user transaction (`claimPending`) and the UI does not surface it yet | frontend chantier — the tokens are safe and visible on-chain (`pendingDelivery`, `DeliveryParked`), but a user who never looks never gets them |
 | No rescue path for a permanently refused message's prepaid native fee, or for USDC sent to a vault by mistake | by design so far (no admin function moves vault USDC); note it |
 | Solana program still pays its sends from a protocol GasTank and prepays no reply | must adopt the v7 fee model before a Solana mainnet leg (wire unchanged; the fee plumbing is transport-side) |
+| Solana program and the v7.2 ops | not written. As a DESTINATION of a move its PAYOUT handler receives a user-chosen 32-byte recipient and must never fail on it (an account that does not exist, is not a wallet, has no token account): pay, park, or mint a claim. The hub forwards ANY non-zero `to` to a wide gateway. As a SOURCE it needs `OP_OPEN` / `OP_MOVE` in its codec (new vectors) and per-destination pricing |
 | Frontend indexing by raw `eth_getLogs` scans | OUT OF SCOPE (ops; mainnet gets an indexer) |
 | LayerZero DVN/executor selection | adapters now set a delegate (v7), so the set CAN be chosen — and must be, at deploy time, per pathway and on both sides (§3). Until `endpoint.setConfig` is called the defaults apply. AUDIT SCOPE for mainnet config review |
 | Raydium/Meteora venue adapter | does not exist yet; OUT OF SCOPE until written |
@@ -912,8 +1196,9 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 Observations made while writing this spec from the code — none silently
 papered over. Status after the v7 hardening chantier: **F-1, F-2, F-5, F-6
 resolved; F-7 to F-10 found and resolved by that chantier; F-11 to F-13
-found after the v7.0 mainnet deployment and resolved in v7.1; F-3 and F-4 are
-Solana-side and remain open.**
+found after the v7.0 mainnet deployment and resolved in v7.1; F-14 to F-17
+found while building v7.2 and resolved in it; F-3 and F-4 are Solana-side
+and remain open.**
 
 - **F-1 — `gatewayChain` is write-only.** RESOLVED: removed. *(Original
   note:)* `SpawnPad.setGateway` populates
@@ -1005,3 +1290,46 @@ Found by the hardening chantier's own revert audit, all RESOLVED there:
   finish the spawn. A wallet's own gas estimate lands exactly there. The
   floor makes a starved send revert the spawn instead; `v71.test.js` fails
   without it (a spawn delivered with 3,524,093 gas skipped one SYNC).
+
+Found while building v7.2 (none of these ever ran anywhere):
+
+- **F-14 — a move priced like a trade is a free message from the hub
+  chain.** The first shape of `moveClaim` prepaid `tradeLegs`, like a sell.
+  But `tradeLegs` is 0 on the hub chain's own gateway (its replies are
+  local calls) and is priced on a reply to the SOURCE chain everywhere
+  else — while a move's reply goes to ANOTHER chain. From Base, anyone
+  holding 0.000001 oUSD (`wrap` is open on USDC chains) could have made
+  the hub tank pay a remote message per call, for the gas of a Base
+  transaction, until replies stalled for everyone. RESOLVED before it
+  shipped: `moveLegs[dstChain]`, a price per destination with 0 = closed,
+  never below `tradeLegs`; `quoteMove(dstChain)`. Tested for all twenty
+  (source, destination) pairs of a five-chain universe: the tank never
+  falls.
+- **F-15 — a ceiling on the launch fan-out cannot also be the ceiling on
+  requests.** One cap per chain looked enough. But a dear chain (Ethereum)
+  is meant to be left OUT of the fan-out — its ceiling sits below its
+  ordinary price — and opened per token by those who pay; the same ceiling
+  on opens and incoming moves would then refuse them all. With no ceiling
+  on them, a price spike lets anyone drain the tank through opens and
+  moves that prepaid yesterday's price (a 5× spike: the tank loses four
+  times what each request brought). RESOLVED: `requestCap`, a second
+  ceiling per chain for messages their requester prepaid, always enforced
+  (0 = closed), set to what such a request prepays.
+- **F-16 — a payout forwarded to a chain being added would be addressed to
+  nobody.** `_move` forwards to `gateways[dst]`. Between the moment the
+  hub adapter gets a new chain's route and the moment the pad learns its
+  gateway (two timelocked steps), `gateways[dst]` is `bytes32(0)` while the
+  send would succeed — a PAYOUT to no contract, reverting on that chain
+  for good. RESOLVED: a destination without a gateway is refused before
+  any send and the claim goes home (tested with exactly that wiring). Same
+  family as F-11: an unset value that a user-influenced input can reach.
+- **F-17 — a quote can be starved like a send (F-13 again).** Pricing a
+  message before sending it puts a second call under `try`. After a
+  failed quote on the last chain of a fan-out, or on an `OP_OPEN`, only an
+  event remains to be emitted — so the gas of a delivery could again
+  decide whether a chain gets its replica. The mock endpoint hid it (its
+  quote costs almost nothing; a real one walks the send library, the
+  DVNs and a price feed). RESOLVED: the same floor after a failed quote
+  (`_notStarved`); the mock can now charge a realistic quote
+  (`setQuoteWork`) and `v72.test.js` fails without the floor. The same
+  work corrected the floor's stated margin (§4, "A correction to (1)").

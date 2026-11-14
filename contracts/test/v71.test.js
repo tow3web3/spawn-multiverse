@@ -104,6 +104,14 @@ async function universe({
     await (await dollar.mint(who.address, T(dollars))).wait()
     await (await dollar.connect(who).approve(usd.target, ethers.MaxUint256)).wait()
   }
+  /** Leaves `who` holding `dollars` of oUSD, backed: the vault's agent (the
+   * gateway) takes the dollars in and hands their value back as a claim.
+   * (v7.2: `OmniUSDLocal` has no `wrap`; this works on both vaults.) */
+  u.claim = async (who, dollars) => {
+    const agent = await as(gateway.target)
+    await (await usd.connect(agent).depositFor(who.address, T(dollars))).wait()
+    await (await usd.connect(agent).bridgeMint(who.address, T(dollars) * u.SCALE)).wait()
+  }
   u.lastToken = async () => pad.allTokens((await pad.tokensLength()) - 1n)
   u.spawn = async (dev, { devBuy = 0, mode = 0, name = 'GLOOP', symbol = 'GLP' } = {}) => {
     await (await gateway.connect(dev).spawnTokenUsdc(name, symbol, '{}', T(devBuy), mode)).wait()
@@ -384,7 +392,7 @@ describe('Protocol v7.1', () => {
       })
 
       it('the oUSD-denominated buy has the same guarantee', async () => {
-        await (await u.usd.connect(user).wrap(u.T(300))).wait()
+        await u.claim(user, 300)
         const out = await peek(async () => {
           const rep = await u.replica(token)
           await (await u.gateway.connect(user).buyToken(token, E(120))).wait()
@@ -458,7 +466,7 @@ describe('Protocol v7.1', () => {
       })
 
       it('a dev buy paid in oUSD has the same dust floor as a buy (and zero still means "no dev buy")', async () => {
-        await (await u.usd.connect(user).wrap(u.T(50))).wait()
+        await u.claim(user, 50)
         const held = await u.usd.balanceOf(user.address)
         expect(held).to.equal(E(50))
         const count = await u.pad.tokensLength()
@@ -847,16 +855,18 @@ describe('Protocol v7.1', () => {
       expect(await supplyOf(w, token)).to.equal(BILLION)
       expect(await supplyOf(w, token2)).to.equal(BILLION)
 
-      // only the operator may spend the hub tank on a SYNC, and only for a real token on a real chain
-      await expect(w.pad.connect(stranger).resync(token, ARB)).to.be.revertedWith('ROLES: not operator')
+      // a resync is only for a real token on a real chain
       await expect(w.pad.resync(stranger.address, ARB)).to.be.revertedWith('PAD: unknown')
       await expect(w.pad.resync(token, 9)).to.be.revertedWith('PAD: unknown')
       await expect(w.pad.resync(token, 0)).to.be.revertedWith('PAD: unknown')
-      // while the leg is still dead, a resync fails loudly (it is the operator's own call)
+      // while the leg is still dead, a resync fails loudly — the operator's, or anyone's
       await expect(w.pad.resync(token, ARB)).to.be.revertedWith('LZM: no gas limit')
+      await expect(w.pad.connect(stranger).resync(token, ARB, { value: E(1) })).to.be.revertedWith('LZM: no gas limit')
 
-      // the leg is repaired; the operator re-sends both SYNCs, paid by the hub tank
+      // the leg is repaired. Only the operator may spend the hub tank on a SYNC: anyone else
+      // pays for theirs (v7.2 — test/v72.test.js); the operator re-sends both, on the tank
       await (await w.hubMessenger.setDestination(ARB, GAS_TO_SPOKE, 0)).wait()
+      await expect(w.pad.connect(stranger).resync(token, ARB)).to.be.revertedWith('PAD: fee')
       await (await w.pad.setOperator(dev.address)).wait()
       const tank = await bal(w.hubMessenger)
       await expect(w.pad.connect(dev).resync(token, ARB)).to.emit(w.pad, 'Resynced').withArgs(token, ARB)

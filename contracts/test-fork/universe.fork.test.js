@@ -52,7 +52,7 @@ run(`${name} universe on its mainnet fork — after launch.sh and finish.sh`, fu
     timelock = await ethers.getContractAt('SpawnTimelock', s.timelock)
   })
 
-  it('is a v7.1 deployment on the right chain, over the real dollar and the real endpoint', async () => {
+  it('is a deployment of the current generation on the right chain, over the real dollar and the real endpoint', async () => {
     expect(Number((await ethers.provider.getNetwork()).chainId)).to.equal(cfg.chainId)
     expect(s.transport).to.equal(GENERATION)
     expect(s.usdc).to.equal(cfg.usdc)

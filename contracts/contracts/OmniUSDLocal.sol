@@ -8,36 +8,61 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Roles} from "./Roles.sol";
 
-/// @title OmniUSDLocal — the settlement dollar of a SINGLE-CHAIN universe,
-/// 1:1 backed by one local dollar token of any decimals from 6 to 18.
-/// @notice This is `OmniUSD` for a universe that lives on one chain and
-/// settles in a dollar Circle does not issue there (BNB Chain: BSC-USD /
-/// USDT, 18 decimals). It is the vault of that chain's gateway and nothing
-/// else: the hub's books stay in a ledger-mode `OmniUSD`, exactly as on the
-/// USDC universe, and every other contract is reused unchanged.
+/// @title OmniUSDLocal — the vault of a chain that settles in a dollar Circle
+/// does not issue there: 1:1 backed by one local dollar token of any decimals
+/// from 6 to 18, with no CCTP.
+/// @notice Since v7.2 this is the SPOKE VAULT OF BNB CHAIN INSIDE THE SHARED
+/// UNIVERSE (BSC-USD / USDT, 18 decimals), behind that chain's remote
+/// `SpawnGateway`: the hub's books stay in the one ledger-mode `OmniUSD` on
+/// the hub chain, the other chains keep their USDC vaults, and every other
+/// contract is reused unchanged. (It also still serves a universe that lives
+/// on a single chain; nothing below depends on which.)
 ///
 /// It keeps `OmniUSD`'s external surface wherever the gateway, the fee
 /// distributor, the scripts and the frontend touch it — same selectors, same
 /// events, same revert strings — so a `SpawnGateway` compiled against the
-/// `OmniUSD` type runs against this contract as is. Three things differ:
+/// `OmniUSD` type runs against this contract as is. Four things differ:
 ///
 ///  1. SCALE is derived from the token's decimals (`10 ** (18 - decimals)`:
 ///     1e12 for a 6-decimal dollar, 1 for an 18-decimal one) instead of being
 ///     the constant 1e12. With SCALE == 1 there is no sub-unit dust at all.
-///  2. There is NO CCTP, no peer and no `rebalance`: a single-chain universe
-///     has nowhere to move liquidity to. The surface is absent, not disabled —
-///     this contract has NO function that sends the dollar token anywhere but
-///     to a user redeeming their own oUSD or to a protocol payout.
+///  2. There is NO CCTP, no peer and no `rebalance`: nothing can level this
+///     vault with the USDC ones. The surface is absent, not disabled — this
+///     contract has NO function that sends the dollar token anywhere but to
+///     a user redeeming their own oUSD or to a protocol payout.
 ///  3. There is no ledger mode: this contract is always a vault.
+///  4. THERE IS NO `wrap` (v7.2). A claim is portable across the universe
+///     (`SpawnGateway.moveClaim`): oUSD minted here can be paid out of a USDC
+///     vault. If anyone could mint oUSD against this dollar at will, the
+///     vaults would be an exchange of this dollar for USDC at par — any
+///     size, one step, no cost — at the expense of every USDC holder the
+///     day this dollar slips its peg. So oUSD only comes to exist here the
+///     way a claim does: a payout this vault could not make (it is short,
+///     or the issuer froze the recipient), sub-unit dust of a payout, and
+///     holder fees dropped into the distributor. Dollars enter through the
+///     gateway only (`depositFor`), bound to a trade. `unwrap` stays:
+///     redeeming a claim is an exit.
+///     WHAT THIS DOES NOT DO: it does not separate the two dollars. Fees
+///     paid here on trades are owed wherever their owner asks for them (a
+///     dev claims on any chain; a holder's share can be moved as a claim),
+///     so this dollar still turns into USDC at par at the rate fees are
+///     paid — and the other way round `OmniUSD.wrap` + `moveClaim` turns
+///     USDC into this dollar at par, up to what this vault holds. The
+///     deposit cap and the guardian's deposit pause are the brakes.
 ///
 /// The getter is still called `usdc()` — read it as "the dollar token". It
 /// is the name the immutable gateway calls.
 ///
-/// BACKING INVARIANT (single chain — nothing is ever in flight):
-///   dollar tokens held here × SCALE
-///     == oUSD totalSupply here + oUSD totalSupply of the hub ledger.
-/// Every function below preserves it: tokens in ⇄ oUSD minted (or carried by
-/// message), tokens out ⇄ oUSD burned (or consumed from a message).
+/// BACKING INVARIANT — a GLOBAL one, exactly `OmniUSD`'s (modulo value in
+/// flight between chains):
+///   Σ over every vault of dollar tokens held × that vault's SCALE
+///     == Σ over ALL instances (hub ledger included) of oUSD totalSupply.
+/// Every function below preserves it: tokens in ⇄ value carried away by a
+/// message, tokens out ⇄ oUSD burned (or consumed from a message). It is
+/// NOT a per-chain equality, and here less than anywhere: what this vault
+/// holds and what this chain is owed drift apart with every cross-chain
+/// trade, and no rebalance brings them back. A holder of a claim this vault
+/// cannot pay takes it to a chain that can (`moveClaim`).
 ///
 /// WHO CAN DO WHAT (see Roles):
 ///  - ADMIN names the agent, once. That is its only power here.
@@ -74,11 +99,10 @@ contract OmniUSDLocal is ERC20, ReentrancyGuard, Roles {
     /// deposit. Starts at 0: deposits are closed until the operator opens
     /// them (guarded launch).
     uint256 public depositCap;
-    /// The guardian's stop for NEW money (`wrap`, `depositFor`). Exits
-    /// (`unwrap`, `payout`) ignore it.
+    /// The guardian's stop for NEW money (`depositFor`). Exits (`unwrap`,
+    /// `payout`) ignore it.
     bool public depositsPaused;
 
-    event Wrapped(address indexed account, uint256 usdcIn, uint256 minted);
     event Unwrapped(address indexed account, uint256 usdcOut);
     event Deposited(address indexed from, uint256 usdcIn, uint256 amount);
     /// `minted` is the part of a payout that could not leave as tokens: the
@@ -129,12 +153,7 @@ contract OmniUSDLocal is ERC20, ReentrancyGuard, Roles {
 
     /* ------------------------------ users ------------------------------ */
 
-    /// Dollar tokens in, oUSD out, 1:1.
-    function wrap(uint256 units) external nonReentrant returns (uint256 amount18) {
-        amount18 = _pull(msg.sender, units);
-        _mint(msg.sender, amount18);
-        emit Wrapped(msg.sender, amount18 / SCALE, amount18);
-    }
+    // No `wrap`: see the contract header, point 4.
 
     /// oUSD in, dollar tokens out, 1:1. Only whole token units burn —
     /// sub-SCALE dust stays with the caller (there is none when SCALE == 1).
@@ -156,8 +175,9 @@ contract OmniUSDLocal is ERC20, ReentrancyGuard, Roles {
     /* ------------------------------ agent ------------------------------ */
 
     /// Takes `units` from `from` WITHOUT minting oUSD: the value is about to
-    /// ride a protocol message (≡ wrap + bridgeBurn in one step). Returns the
-    /// 18-decimal amount the message must carry.
+    /// ride a protocol message (the vault keeps the tokens, the message
+    /// carries their value). Returns the 18-decimal amount the message
+    /// must carry.
     function depositFor(address from, uint256 units)
         external
         onlyAgent

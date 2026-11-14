@@ -17,10 +17,10 @@ import {
 /// transaction — exactly like the real network, where DVNs verify and an
 /// executor lands the message seconds later.
 ///
-/// It also models the three parts of the real fee that the adapter's fee
-/// logic depends on: a flat per-message fee (DVNs + executor floor), an
-/// optional per-byte fee (message size), and the executor's native-value
-/// option — the sender pays `value` on top, and delivery hands exactly that
+/// It also models the parts of the real fee that the fee logic depends on:
+/// a flat per-message fee (DVNs + executor floor), an optional per-byte fee
+/// (message size), an optional per-destination fee (a dear pathway), and
+/// the executor's native-value option — the sender pays `value` on top, and delivery hands exactly that
 /// `value` to the receiver's payable `lzReceive`. A delivery that reverts
 /// leaves the packet queued, like LayerZero's retryable failed messages.
 contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
@@ -92,6 +92,35 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
         maxMessageSize[dstEid] = max;
     }
 
+    /// Extra fee toward ONE destination (0 unless a test sets it). The real
+    /// fee is priced per pathway — an Ethereum L1 leg costs many times an
+    /// L2 one, and its gas price can jump tenfold in a block.
+    mapping(uint32 => uint256) public dstFee;
+    /// A destination whose `send` reverts while its `quote` still answers —
+    /// a leg that can be priced and still cannot be used.
+    mapping(uint32 => bool) public sendBlocked;
+
+    /// Gas a `quote` burns before it answers (0 unless a test sets it). The
+    /// real endpoint's quote walks the send library, every DVN and the
+    /// executor's price feed — some 100-200k gas, several calls deep — where
+    /// this mock's costs almost nothing. A caller that treats a FAILED quote
+    /// as "this leg is closed" must tell a quote that was refused from one
+    /// that was starved of gas, and that only shows with a quote that costs
+    /// something. (Burnt to within ~50k: see `quote`.)
+    uint256 public quoteWork;
+
+    function setDstFee(uint32 dstEid, uint256 fee) external {
+        dstFee[dstEid] = fee;
+    }
+
+    function setQuoteWork(uint256 gas_) external {
+        quoteWork = gas_;
+    }
+
+    function setSendBlocked(uint32 dstEid, bool on) external {
+        sendBlocked[dstEid] = on;
+    }
+
     function _fee(MessagingParams calldata p)
         internal
         view
@@ -102,10 +131,23 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
         uint128 v;
         (gas, v) = _lzReceiveOption(p.options);
         value = v;
-        fee = mockFee + byteFee * p.message.length + value;
+        fee = mockFee + dstFee[p.dstEid] + byteFee * p.message.length + value;
     }
 
     function quote(MessagingParams calldata p, address) external view returns (MessagingFee memory) {
+        uint256 work = quoteWork;
+        if (work != 0) {
+            // burnt as memory growth, 32 KB at a time: a dozen steps instead
+            // of thousands (the test node traces every step of a revert)
+            uint256 start = gasleft();
+            while (start - gasleft() < work) {
+                assembly {
+                    let p_ := add(mload(0x40), 0x8000)
+                    mstore(p_, 0)
+                    mstore(0x40, p_)
+                }
+            }
+        }
         (uint256 fee, , ) = _fee(p);
         return MessagingFee(fee, 0);
     }
@@ -117,6 +159,7 @@ contract MockLZEndpointV2 is ILayerZeroEndpointV2 {
     {
         uint32 srcEid = eidOfAdapter[msg.sender];
         require(srcEid != 0, "ENDPOINT: unknown adapter");
+        require(!sendBlocked[p.dstEid], "ENDPOINT: send blocked");
         (uint256 fee, uint128 gas, uint256 value) = _fee(p);
         require(msg.value >= fee, "ENDPOINT: fee");
         lastNonce++;
