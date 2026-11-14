@@ -25,20 +25,26 @@ export const padAbi = parseAbi([
   // the token simply has no replica there until the operator resyncs it.
   'event SyncFailed(address indexed token, uint32 indexed chain)',
   'event Resynced(address indexed token, uint32 indexed chain)',
+  // v7.2: what the hub may front for a request toward a chain (an open's
+  // SYNC, a moved claim's PAYOUT), in hub-native wei; its gateways and its
+  // adapter, to price that SYNC before an open is offered.
+  'function requestCap(uint32 chain) view returns (uint256)',
+  'function syncCap(uint32 chain) view returns (uint256)',
+  'function gateways(uint32 chain) view returns (bytes32)',
+  'function messenger() view returns (address)',
+  // v7.2: a claim burned on srcChain was forwarded to (dstChain, to) — or,
+  // `forwarded` false, sent back home to (srcChain, from)
+  'event Moved(uint32 indexed srcChain, uint32 indexed dstChain, bytes32 indexed from, bytes32 to, uint256 amount, bool forwarded)',
 ])
 
-/** `Refused.reason` — must match SpawnPad's R_* constants. */
-export const REFUSAL: Record<number, string> = {
-  1: 'the hub is paused',
-  2: 'the hub does not know this token',
-  3: 'bad fee mode',
-  4: 'only the dev can claim',
-  5: 'nothing to pay out',
-  6: 'the market refused the trade (dust)',
-}
+/** The hub's messaging adapter: what a message to a chain costs right now. */
+export const messengerAbi = parseAbi([
+  'function quote(uint32 dstChain, bytes32 dstAddr, bytes payload, uint256 returnLegs) view returns (uint256)',
+])
 
-/** Wire opcodes as they appear in `Refused.op`. */
-export const OP = { SPAWN: 1, BUY: 2, SELL: 3, CLAIM: 4, PULL: 5 } as const
+/** `Refused.reason` and the wire opcodes live with the logic that reads
+ * them (lib/v72: dependency-free, unit-tested). */
+export { OP, REFUSAL } from '../lib/v72'
 
 export const gatewayAbi = parseAbi([
   // v7: every action is payable — msg.value is the messaging fee (see quotes)
@@ -47,9 +53,11 @@ export const gatewayAbi = parseAbi([
   'function buyToken(address hubToken, uint256 usdIn) payable',
   'function buyTokenUsdc(address hubToken, uint256 usdcIn) payable',
   'function sellToken(address hubToken, uint256 tokens) payable',
-  // v7.1, hub-chain gateway only: the whole trade reverts ("GW: min out")
-  // unless the caller received at least the minimum in this transaction.
-  // On a remote gateway they always revert — never call them there.
+  // Price protection. v7.1: where the hub answers in the same transaction,
+  // the trade reverts ("GW: min out") unless the minimum arrived. v7.2
+  // (second round): the minimum rides the message to the hub, which refuses
+  // a trade under it and sends it back whole — the same signatures, now on
+  // every chain. Before v7.2 a remote gateway always reverts them.
   'function buyTokenUsdcMin(address hubToken, uint256 usdcIn, uint256 minTokensOut) payable',
   'function buyTokenMin(address hubToken, uint256 usdIn, uint256 minTokensOut) payable',
   'function sellTokenMin(address hubToken, uint256 tokens, uint256 minDollarsOut) payable',
@@ -61,6 +69,14 @@ export const gatewayAbi = parseAbi([
   'function quoteClaim() view returns (uint256)',
   'function quotePull() view returns (uint256)',
   'function quoteSpawn(string name, string symbol, string metaURI, bool withDevBuy) view returns (uint256)',
+  // v7.2: ask the hub for this chain's replica of a token it never got
+  // (prepays the SYNC back), and send a dollar claim to another chain
+  'function openToken(address hubToken) payable',
+  'function moveClaim(uint32 dstChain, bytes32 to, uint256 amount) payable',
+  'function quoteOpen() view returns (uint256)',
+  // reverts "GW: route closed" for a destination with no price
+  'function quoteMove(uint32 dstChain) view returns (uint256)',
+  'function chainLabel() view returns (uint32)',
   'function replicaOf(address hubToken) view returns (address)',
   'function pendingDelivery(address hubToken, address account) view returns (uint256)',
   'function distributor() view returns (address)',
@@ -78,12 +94,13 @@ export const FEE_MODE_INDEX = { holders: 0, split: 1, dev: 2, burn: 3 } as const
 
 /** The vault (OmniUSD over USDC, OmniUSDLocal over a local dollar): holds
  * this chain's dollar token AND is the 18-decimal claim on it. Same surface
- * on both for everything the site calls. */
+ * on both for everything the site calls. `wrap` is deliberately absent: the
+ * site never mints a claim on demand, and the BNB vault (OmniUSDLocal) has
+ * no such function at all (v7.2) — a USDT→USDC exchange at par. */
 export const usdAbi = parseAbi([
   'function balanceOf(address) view returns (uint256)',
   // oUSD wei per smallest unit of the dollar token: 1e12 for 6 decimals, 1 for 18
   'function SCALE() view returns (uint256)',
-  'function wrap(uint256 units) returns (uint256)',
   'function unwrap(uint256 amount18) returns (uint256)',
   'function liquidity() view returns (uint256)',
   'function depositCap() view returns (uint256)',
@@ -91,9 +108,9 @@ export const usdAbi = parseAbi([
   'event PaidOut(address indexed to, uint256 usdcOut, uint256 minted)',
 ])
 
-/** The dollar token — Circle's USDC or BSC USDT on mainnet, a mock with an
- * open `mint` on testnets. The name `usdc` is historical: it is whatever
- * dollar the universe settles in. */
+/** A chain's dollar token — Circle's USDC, or Binance USDT on BNB Chain; a
+ * mock with an open `mint` on testnets. The name `usdc` is historical: it is
+ * whatever dollar THAT chain settles in. */
 export const usdcAbi = parseAbi([
   'function balanceOf(address) view returns (uint256)',
   'function decimals() view returns (uint8)',
@@ -127,16 +144,25 @@ export interface ManifestChain {
   /** Guarded-launch cap on this chain's vault, in the dollar's smallest
    * units (informative; the vault's own `depositCap()` is the truth). */
   depositCap?: number | string
+  /** v7.2: `cctp` — a USDC vault levelled with Circle CCTP; `local` — a
+   * vault over a dollar Circle does not issue there (BNB: USDT), no wrap. */
+  vault?: 'cctp' | 'local'
+  /** v7.2: this chain's dollar when it differs from the manifest's. */
+  dollar?: { symbol: string; decimals: number }
 }
 
 export interface Manifest {
   /** 'mainnet' flips the site into guarded real-money mode. */
   network?: 'mainnet' | 'testnet' | 'local'
-  /** Mainnet: which independent universe this deployment is (default core). */
-  universe?: 'core' | 'bnb' | 'ethereum'
-  /** The settlement dollar. Informative: the token's own `decimals()` and
-   * the vault's `SCALE()` are the truth, and a mismatch refuses to boot. */
+  /** The protocol generation the deployment runs ("v7.2": one universe on
+   * six chains, a dollar per chain, opens, moves, protection everywhere). */
+  generation?: string
+  /** The default dollar (each chain may declare its own). Informative: the
+   * token's own `decimals()` and the vault's `SCALE()` are the truth, and a
+   * mismatch refuses to boot. */
   dollar?: { symbol: string; decimals: number }
+  /** v7.2: the hub's messaging adapter (prices an open's SYNC). */
+  hubMessenger?: `0x${string}`
   /** Hub chain id + RPC (the pad lives here). */
   chainId: number
   rpc: string

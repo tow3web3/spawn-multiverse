@@ -415,15 +415,19 @@ export type TradeResult =
       ok: false
       reason: string
       /** `min-out`: a protected trade reverted because the price moved past
-       * the tolerance — nothing was spent, and trying again is the remedy. */
-      code?: 'min-out'
+       * the tolerance — nothing was spent, and trying again is the remedy.
+       * `returned`: a trade from another chain reached the hub and was
+       * refused there (under its minimum, typically) — it came back WHOLE:
+       * the dollars refunded, or the tokens re-delivered. Not an error. */
+      code?: 'min-out' | 'returned'
     }
 
 /** What a trade will do right now, computed with the hub's own arithmetic
  * (fees, FAIR GENESIS tax and cap included). On-chain modes only. */
 export interface TradeExpectation {
-  /** The trade reverts unless at least `min` arrives (hub-chain gateway of a
-   * v7.1 deployment). Cross-chain trades cannot be protected yet. */
+  /** The trade fills only if at least `min` arrives: on the hub chain it
+   * reverts before signing, from another chain (v7.2) the hub refuses it
+   * and sends it back whole. */
   protected: boolean
   /** Buy: tokens expected. Sell: dollars expected, net of the fee. */
   expected: number
@@ -445,8 +449,17 @@ export interface ChainInfo {
   id: string
   /** The hub chain's own gateway: one-transaction trades, no messaging fee. */
   local: boolean
-  /** The wallet's dollars here: the universe's dollar token (USDC, USDT —
-   * the field keeps its historical name), plus oUSD claims on this chain's vault. */
+  /** The dollar THIS chain settles in: USDC (6 decimals) on Base,
+   * Optimism, Arbitrum and Ethereum, Binance USDT (18) on BNB Chain — read
+   * from the chain itself. */
+  dollar: { symbol: string; decimals: number }
+  /** `cctp`: a USDC vault levelled with Circle; `local`: a vault over a
+   * dollar of its own (BNB's USDT) — no wrap there, ever. */
+  vault: 'cctp' | 'local'
+  /** The gateway has the v7.2 actions: open a token here, move a claim. */
+  v72: boolean
+  /** The wallet's dollars here: this chain's dollar token (the field keeps
+   * its historical name), plus oUSD claims on this chain's vault. */
   usdc: number
   ousd: number
   /** Trades from this chain are price-protected (see TradeExpectation). */
@@ -461,8 +474,27 @@ export interface ChainInfo {
   /** The gateway refuses new buys and launches (sells stay open). */
   paused: boolean
   /** Native messaging fee each action must attach (0 when sponsored). */
-  fee: { buy: number; sell: number; claim: number; pull: number }
+  fee: { buy: number; sell: number; claim: number; pull: number; open: number }
 }
+
+/** Can a token be opened on a chain right now (v7.2)? Checked against the
+ * hub's live price for that SYNC and its ceiling, before any fee is taken. */
+export type OpenCheck =
+  | { ok: true; fee: number }
+  | { ok: false; reason: string; tooDear?: boolean }
+
+/** Where a claim on one chain can be moved, and what the move costs. */
+export interface MoveOption {
+  chain: string
+  /** Native fee (the source chain's gas coin), headroom included. */
+  fee: number
+  /** What the destination vault holds, in its own dollar. */
+  liquidity: number
+}
+
+export type ActionResult =
+  | { ok: true; pending: boolean; text: string }
+  | { ok: false; reason: string; code?: 'returned' }
 
 /** Holder fees of one creature for the connected wallet (v7: accrue, then pull). */
 export interface HolderFees {
@@ -495,12 +527,8 @@ export interface StoreValue {
     status: 'connecting' | 'ready' | 'offline'
     /** Local devnet, public testnet (play money) or mainnet (real dollars). */
     network: NetworkProfile
-    /** Mainnet only: which independent universe this is. Its tokens exist
-     * nowhere else. `single`: one chain, no cross-chain trading. */
-    universe?: { id: 'core' | 'bnb' | 'ethereum'; name: string; line: string; single: boolean }
-    /** The settlement dollar of this deployment (USDC with 6 decimals, BSC
-     * USDT with 18…) — read from the chain, never assumed. */
-    dollar: { symbol: string; decimals: number }
+    /** The protocol generation of this deployment ("v7.2"…). */
+    generation?: string
     /** The protocol's tank pays every message (testnets): no fee to attach. */
     sponsored: boolean
     /** Mints play dollars on every chain the wallet has gas on — testnets and
@@ -537,9 +565,19 @@ export interface StoreValue {
     /** The price tolerance of protected trades, in basis points. */
     slippage?: { bps: number; set: (bps: number) => void }
     /** Chains where a token cannot be traded yet: creature num -> chain ->
-     * `arriving` (its replica is still on its way) or `failed` (its creation
-     * message could not be sent; the operator has to send it again). */
-    unavailable?: Record<number, Record<string, 'arriving' | 'failed'>>
+     * `arriving` (its replica is still on its way), `closed` (it will not
+     * come by itself — open it from that chain) or `failed` (the same on a
+     * pre-v7.2 gateway: only the hub can resend it). */
+    unavailable?: Record<number, Record<string, 'arriving' | 'closed' | 'failed'>>
+    /** v7.2: would the hub open this token on `chain` right now, and at what fee? */
+    checkOpen?: (num: number, chain: string) => Promise<OpenCheck>
+    /** v7.2: ask the hub for this token's replica on `chain`. */
+    openToken?: (num: number, chain: string) => Promise<ActionResult>
+    /** v7.2: the chains a claim of `amount` dollars on `from` can be moved to. */
+    moveOptions?: (from: string, amount: number) => Promise<MoveOption[]>
+    /** v7.2: move `amount` dollars of claim from `from` to `to` (another
+     * chain), paid to `recipient` there (the wallet itself by default). */
+    moveClaim?: (from: string, to: string, amount: number, recipient?: string) => Promise<ActionResult>
     /** The native fee a launch from `chain` must attach right now. */
     quoteSpawnFee?: (input: SpawnInput, chain: string) => Promise<number>
     /** Mainnet only: the one-time risk notice gating every transaction. */

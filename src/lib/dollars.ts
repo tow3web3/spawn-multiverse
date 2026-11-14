@@ -1,6 +1,6 @@
 /**
- * The dollar of a universe is a parameter: USDC (6 decimals) in the core
- * universe and on Ethereum, BSC USDT (18 decimals) on BNB Chain. Everything
+ * The dollar is a parameter OF EACH CHAIN: USDC (6 decimals) on Base,
+ * Optimism, Arbitrum and Ethereum, Binance USDT (18) on BNB Chain. Everything
  * that turns an amount into the token's smallest units — or back — goes
  * through this file, so no place can quietly assume six decimals.
  *

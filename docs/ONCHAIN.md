@@ -47,7 +47,7 @@ sending the same messages. This slot is the whole visibility strategy
 | `ICurveVenue.sol` / `InternalCurveVenue.sol` | The price-discovery slot. The internal venue is the genesis curve (constant-product, virtual reserves, 800M/1B on the curve) + ascension to the omnipool. Pure accounting — the pad keeps custody — so it swaps for a Raydium LaunchLab / Meteora DBC adapter without touching settlement or gateways. |
 | `SpawnGateway.sol` | One per chain. Users `spawnToken` / `buyToken` / `sellToken` here with **no approvals**. Forwards everything to the pad as omnichain messages; mints deliveries and payouts coming back. |
 | `SpawnToken.sol` | The creature. Hub instance pre-mints the whole 1B supply to the pad; spoke replicas are minted/burned as tokens cross chains. **Sum of supplies across chains ≡ 1B, always** (tested). |
-| `OmniUSD.sol` | Demo settlement currency, one instance per chain, moved by burn/mint. The production slot for this is **USDC via Circle CCTP** — the exact same pattern. |
+| `OmniUSD.sol` / `OmniUSDLocal.sol` | Each chain's dollar vault: it holds that chain's dollar (USDC, levelled with Circle CCTP; Binance USDT on BNB Chain, `OmniUSDLocal`, no wrap) and is the 18-decimal oUSD claim on it. A short vault pays in claims, which can be moved to another chain (v7.2). The hub's instance is a pure ledger. |
 | `OmniMessenger.sol` | The transport abstraction. Contracts only know `IOmniMessenger` / `IOmniReceiver`. Locally, `LocalOmniMessenger` hosts all logical chains on one node and delivers synchronously. |
 | `lz/LayerZeroOmniMessenger.sol` | The production transport: one adapter per chain over the real LayerZero V2 endpoint signatures (`lz/ILayerZeroV2.sol`), peered, with a native-fee gas tank. Tested against `lz/MockLZEndpointV2.sol`, which queues packets and lands them in **separate transactions** — the async reality of testnet/mainnet. |
 
@@ -86,19 +86,75 @@ global curve, supply conservation (including under burns), value conservation,
 ascension + refund, fee routing + dev claim + buyback&burn, message
 authentication.
 
+## One universe, six chains (v7.2) — what the site does
+
+Since 2026-11-14 SPAWN! is ONE universe on six chains: Base (the hub),
+Optimism, Arbitrum, Ethereum, BNB Chain and Solana. The five EVM chains open
+first; Solana joins when its program is deployed. The site reads ONE mainnet
+manifest (`public/onchain/mainnet.json`, written by the deployment tooling,
+`generation: "v7.2"`) and offers trading only on the chains it lists.
+
+- **A dollar per chain.** USDC (6 decimals) on Base, Optimism, Arbitrum and
+  Ethereum; Binance USDT (18 decimals) on BNB Chain, behind `OmniUSDLocal`
+  (no `wrap`, ever). The manifest declares each chain's dollar
+  (`chains[].dollar`, `chains[].vault: "cctp" | "local"`); the site checks
+  the token's `decimals()` and the vault's `SCALE()` on that chain and
+  refuses to boot on a mismatch. Labels, approvals and amounts follow the
+  chain the user is on.
+- **Price protection everywhere.** Every trade goes through `buyTokenUsdcMin`
+  / `buyTokenMin` / `sellTokenMin` with the user's tolerance. On the hub
+  chain an order under its minimum reverts before it is signed; from another
+  chain the hub refuses it minutes later and sends it back whole (`Refused`),
+  which the site says in plain words. (This leans on the second v7.2 contract
+  round, where the minimum rides the message; a pre-v7.2 manifest keeps the
+  v7.1 behaviour: protection only where the hub answers in the same
+  transaction.)
+- **Open a token on your chain.** A token with no replica on a chain (its
+  SYNC was skipped at launch, or the chain joined later) offers `openToken`
+  instead of a trade — only after the site has checked that the hub would
+  send the SYNC (the hub adapter's live `quote` for that leg ≤
+  `pad.requestCap(chain)`); otherwise it says the chain is too expensive
+  right now and takes no fee.
+- **Move your dollars.** A claim the local vault cannot pay (`liquidity()`)
+  can be sent with `moveClaim` to any chain whose vault can pay it, priced by
+  `quoteMove(dst)` (a closed route is not offered).
+
+The decisions behind these (reading hub events, the open verdict, which
+chains a claim can go to) live in `src/lib/v72.ts` and are unit-tested on
+bare node (`npm run test:units`), including the minutes-later outcomes the
+synchronous local world cannot show.
+
 ## Running locally
 
 ```bash
 npm run chain          # terminal 1 — local node (hardhat)
-npm run chain:deploy   # terminal 2 — deploy + seed 6 creatures with real trades
-npm run chain:bots     # terminal 2 — optional: live bot market (real txs)
-npm run dev            # terminal 3 — frontend, flip the nav toggle to ⛓ ONCHAIN
+npm run chain:deploy   # terminal 2 — deploy the local v7.2 world + seed 6 tokens
+npm run dev            # terminal 3 — frontend, flip the mode switch to LOCAL
 ```
 
+`contracts/scripts/deploy-local.js` builds one universe on the five EVM
+chains behind the synchronous `LocalOmniMessenger` (every message and its
+replies land in the sender's transaction), in the shape the mainnet
+manifest has:
+
+- Base is the hub chain's own gateway; BNB settles in an 18-decimal mock
+  USDT behind `OmniUSDLocal`; the others in mock USDC behind `OmniUSD`;
+- every message is paid (a flat fee per message), and opens and moves are
+  priced (`openLegs`, `moveLegs`, `requestCap`);
+- `PICKL` never reached Ethereum (its launch SYNC was skipped by a
+  `syncCap`), so it can be opened there;
+- the BNB vault is left short: Hardhat account #19 holds an oUSD claim on BNB
+  that the vault cannot pay — load its key as the burner (the script prints
+  the `localStorage` line) to find it waiting in the portfolio with MOVE IT.
+
+`npm run chain:bots` predates this world (it assumes 6-decimal dollars and
+free messages) and does not run against it.
+
 On-chain mode uses a **burner wallet** (key in localStorage), funded with gas
-by the local dev account and with oUSD by the faucet (`AIRDROP` button =
-$1,337 on each chain). Every buy/sell/spawn is a real transaction; charts,
-tape, holders and per-chain supply come from contract events.
+by the local dev account and with play dollars by the `MINT` button ($1,337
+on each chain, in that chain's own dollar). Every buy/sell/spawn/open/move is
+a real transaction; charts, tape, holders and per-chain supply come from
+contract events.
 
 Two honest demo shortcuts, both with clear production equivalents:
 

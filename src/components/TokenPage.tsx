@@ -11,7 +11,7 @@ import {
   type FeeMode,
 } from '../store'
 import { CHAINS } from '../lib/chains'
-import { useChainSet, useDollar } from '../lib/liveChains'
+import { chainName, dollarOn, useChainSet } from '../lib/liveChains'
 import { LINK_META, linkHref } from '../lib/links'
 import {
   creatureNum,
@@ -27,6 +27,7 @@ import {
 import { CreatureArt } from './CreatureCard'
 import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 import { PriceChart } from './PriceChart'
+import { OpenToken } from './OpenToken'
 
 const QUICK_USD = [10, 50, 100]
 const QUICK_PCT = [25, 50, 75, 100]
@@ -50,12 +51,12 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
 
   const [side, setSide] = useState<Side>('buy')
   const [chain, setChain] = useState('solana')
-  // a deployment runs the chains its manifest lists (mainnet v1: three)
+  // a deployment runs the chains its manifest lists — never more
   const chainSet = useChainSet()
   const liveChains = chainSet.live
   const info = onchain?.chainInfo
-  const dollar = useDollar()
-  const universe = onchain?.universe
+  // the dollar of the SELECTED chain: labels, decimals and approvals follow it
+  const dollar = dollarOn(chain, info)
   useEffect(() => {
     if (!liveChains.length || liveChains.some((c) => c.id === chain)) return
     // start from the hub chain's own gateway when there is one: it is instant
@@ -64,7 +65,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
   }, [onchain?.chains?.join(), chain])
   const [usdStr, setUsdStr] = useState('50')
   const [pct, setPct] = useState(50)
-  const [msg, setMsg] = useState<{ ok: boolean; text: string; retry?: boolean } | null>(null)
+  /** `neutral`: it came back whole (refused at its minimum) — not an error. */
+  const [msg, setMsg] = useState<{ ok: boolean; text: string; retry?: boolean; neutral?: boolean } | null>(null)
   const [busy, setBusy] = useState(false)
   const [customBps, setCustomBps] = useState('')
   const [claimBusy, setClaimBusy] = useState(false)
@@ -187,12 +189,18 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
         const head = r.pending
           ? `${side === 'buy' ? 'BUY' : 'SELL'} SENT FROM ${chain.toUpperCase()} (≈ ${fmtTokens(r.tokens)} $${c.ticker})`
           : side === 'buy'
-            ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
-            : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}`
+            ? `BOUGHT ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${onchain ? ` ${dollar.symbol}` : ''}${r.ascended ? ' — IT ASCENDED! ⬆' : ''}`
+            : `SOLD ${fmtTokens(r.tokens)} $${c.ticker} ON ${chain.toUpperCase()} FOR ${fmtUsd(r.usd)}${onchain ? ` ${dollar.symbol}` : ''}`
         setMsg({ ok: true, text: r.note ? `${head} · ${r.note}` : head })
       } else {
-        // the protection doing its job: nothing moved, offer to go again
-        setMsg({ ok: false, text: r.reason.toUpperCase(), retry: r.code === 'min-out' })
+        // the protection doing its job: nothing moved (or it came back
+        // whole from the hub) — said plainly, with a retry
+        setMsg({
+          ok: false,
+          text: r.reason.toUpperCase(),
+          retry: r.code === 'min-out' || r.code === 'returned',
+          neutral: r.code === 'min-out' || r.code === 'returned',
+        })
       }
     } catch {
       setMsg({ ok: false, text: 'TRANSACTION FAILED — IS THE CHAIN RUNNING?' })
@@ -297,21 +305,6 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   🛡 FAIR GENESIS {fgCountdown}
                 </span>
               )}
-              {/* a token lives in ONE universe: say which, where its name is */}
-              {universe && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-full border-2 border-ink bg-tang px-2.5 py-1 font-mono text-[9px] font-bold shadow-brutal-sm"
-                  title={`This token exists only in the ${universe.name} universe (${universe.line}). It does not exist in the other universes.`}
-                  data-testid="token-universe"
-                >
-                  <span className="flex items-center -space-x-1">
-                    {liveChains.map((ch) => (
-                      <ChainLogo key={ch.id} id={ch.id} size={11} />
-                    ))}
-                  </span>
-                  ◉ {universe.name} UNIVERSE ONLY
-                </span>
-              )}
             </div>
             <div className="mt-1.5 flex flex-wrap items-center gap-2">
               <span className="font-mono text-[12px] font-bold opacity-50">${c.ticker}</span>
@@ -364,7 +357,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
           <div className="rounded-2xl border-3 border-ink bg-void p-4 text-white shadow-brutal">
             <p className="font-mono text-[10px] font-bold tracking-[0.15em] text-lime">
               <span className="mr-1.5 inline-block h-2 w-2 animate-blink rounded-full bg-lime align-middle" />
-              GLOBAL PRICE — ONE CURVE, {chainSet.word} CHAIN{chainSet.count === 1 ? '' : 'S'} · LIVE
+              GLOBAL PRICE — ONE CURVE, EVERY CHAIN · LIVE
             </p>
             <div className="mt-2">
               <PriceChart points={market.history} ascendedAt={market.ascendedAt} dark height="h-64" />
@@ -632,15 +625,20 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 className="text-right font-mono text-[10px] font-bold opacity-55"
                 title={
                   ci
-                    ? `${fmtUsd(ci.usdc)} ${dollar.symbol} + ${fmtUsd(ci.ousd)} oUSD on ${chain.toUpperCase()}${chainSet.single ? '' : ` · ${fmtUsd(wallet?.balance ?? 0)} across all chains`}`
+                    ? `${fmtUsd(ci.usdc)} ${dollar.symbol} + ${fmtUsd(ci.ousd)} oUSD on ${chain.toUpperCase()}${chainSet.single ? '' : ` · ${fmtUsd(wallet?.balance ?? 0)} across every chain, each in its own dollar`}`
                     : undefined
                 }
               >
-                {!wallet
-                  ? 'NO WALLET'
-                  : ci
-                    ? `${fmtUsd(chainUsd)} ON ${chain.toUpperCase()}`
-                    : `BAL ${fmtUsd(wallet.balance)}`}
+                {!wallet ? (
+                  'NO WALLET'
+                ) : ci ? (
+                  <span className="inline-flex items-center gap-1">
+                    <CoinLogo id={dollar.coin} size={12} />
+                    {fmtUsd(chainUsd)} {dollar.symbol} ON {chain.toUpperCase()}
+                  </span>
+                ) : (
+                  `BAL ${fmtUsd(wallet.balance)}`
+                )}
               </span>
             </div>
 
@@ -654,12 +652,12 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                     onClick={() => setChain(ch.id)}
                     title={
                       na
-                        ? na === 'failed'
-                          ? `${ch.label} — not available yet: the token's creation message did not reach this chain`
-                          : `${ch.label} — not available yet: the token is still arriving here`
-                        : info?.[ch.id]?.local
-                          ? `${ch.label} — instant, no cross-chain wait`
-                          : ch.label
+                        ? na === 'closed'
+                          ? `${ch.label} — not open yet: open it there for a small network fee`
+                          : na === 'failed'
+                            ? `${ch.label} — not available yet: the token's creation message did not reach this chain`
+                            : `${ch.label} — not available yet: the token is still arriving here`
+                        : `${ch.label} — trades in ${dollarOn(ch.id, info).symbol}${info?.[ch.id]?.local ? ', instant, no cross-chain wait' : ''}`
                     }
                     aria-pressed={chain === ch.id}
                     data-chain={ch.id}
@@ -677,7 +675,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                     </span>
                     <span className={chain === ch.id ? '' : 'opacity-50 group-hover:opacity-100'}>
                       {ch.label}
-                      {na ? ' · NOT YET' : info?.[ch.id]?.local ? ' ⚡' : ''}
+                      {na === 'closed' ? ' · OPEN IT' : na ? ' · NOT YET' : info?.[ch.id]?.local ? ' ⚡' : ''}
                     </span>
                   </button>
                 )
@@ -692,7 +690,11 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 : ''}
               {ci?.protected ? ' · PRICE-PROTECTED 🛡' : ''}
             </p>
-            {unavailableHere && (
+            {/* v7.2: not open here — offer the open instead of a refused trade */}
+            {unavailableHere === 'closed' && (
+              <OpenToken num={num} chain={chain} ticker={c.ticker} onOpened={(text) => setMsg({ ok: true, text })} />
+            )}
+            {unavailableHere && unavailableHere !== 'closed' && (
               <p className="mt-1.5 font-mono text-[9px] font-bold tracking-wide text-down" data-testid="unavailable-here">
                 {unavailableHere === 'failed'
                   ? `${c.ticker} IS NOT AVAILABLE ON ${chain.toUpperCase()} YET — ITS CREATION MESSAGE DID NOT REACH THAT CHAIN. THE OPERATOR HAS TO SEND IT AGAIN; PICK ANOTHER CHAIN MEANWHILE.`
@@ -700,16 +702,22 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               </p>
             )}
 
+            {/* nothing to trade on a chain where the token is not open: the
+                open panel above is the whole offer there */}
+            {unavailableHere !== 'closed' && (
+            <>
             {side === 'buy' ? (
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <div className="flex items-center gap-1 rounded-xl border-3 border-ink bg-cream/60 px-3 py-2">
+                  {/* the amount is in the selected chain's own dollar */}
+                  {onchain && <CoinLogo id={dollar.coin} size={15} />}
                   <span className="font-mono text-[13px] font-bold opacity-50">$</span>
                   <input
                     value={usdStr}
                     onChange={(e) => setUsdStr(e.target.value.replace(/[^0-9.]/g, ''))}
                     inputMode="decimal"
                     className="w-24 bg-transparent font-mono text-[13px] font-bold outline-none"
-                    aria-label="USD amount"
+                    aria-label={`Amount in ${dollar.symbol}`}
                   />
                 </div>
                 {QUICK_USD.map((v) => (
@@ -772,7 +780,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   ? `≈ ${fmtTokens(exp.expected)} $${c.ticker}${q ? ` · IMPACT ${(q.impact * 100).toFixed(2)}%` : ''}${
                       exp.feeRate && exp.feeRate > FEE_RATE + 0.0001 ? ` · FEE ${(exp.feeRate * 100).toFixed(1)}%` : ''
                     }${(exp.clamped ?? 0) > 0.005 ? ` · ONLY ${fmtUsd(exp.spend ?? 0)} GOES IN (FAIR GENESIS CAP)` : ''}`
-                  : `≈ ${fmtUsd(exp.expected)} BACK${q ? ` · IMPACT ${(q.impact * 100).toFixed(2)}%` : ''}`
+                  : `≈ ${fmtUsd(exp.expected)} ${dollar.symbol} BACK${q ? ` · IMPACT ${(q.impact * 100).toFixed(2)}%` : ''}`
                 : q && amount > 0
                   ? side === 'buy'
                     ? `≈ ${fmtTokens(q.tokens)} $${c.ticker} · IMPACT ${(q.impact * 100).toFixed(2)}%${q.usd < usd - 0.01 ? ` · ONLY ${fmtUsd(q.usd)} FITS THE CURVE` : ''}`
@@ -792,9 +800,11 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                     <p className="font-mono text-[9px] font-bold tracking-wide">
                       🛡 YOU RECEIVE AT LEAST{' '}
                       <span data-testid="min-out">
-                        {side === 'buy' ? `${fmtTokens(exp.min)} $${c.ticker}` : fmtUsd(exp.min)}
+                        {side === 'buy' ? `${fmtTokens(exp.min)} $${c.ticker}` : `${fmtUsd(exp.min)} ${dollar.symbol}`}
                       </span>{' '}
-                      — OR THE TRADE CANCELS ITSELF AND NOTHING IS SPENT{onchain.network === 'mainnet' ? ' BUT GAS' : ''}.
+                      {instant
+                        ? `— OR THE TRADE CANCELS ITSELF AND NOTHING IS SPENT${onchain.network === 'mainnet' ? ' BUT GAS' : ''}.`
+                        : `— OR THE HUB REFUSES IT AND ${side === 'buy' ? `YOUR ${dollar.symbol}` : 'YOUR TOKENS'} COME BACK WHOLE: ALL OR NOTHING, ONLY THE NETWORK FEE IS SPENT.`}
                     </p>
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       <span className="font-mono text-[9px] font-bold opacity-55">TOLERANCE</span>
@@ -836,9 +846,10 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 ) : (
                   <p className="font-mono text-[9px] font-bold tracking-wide text-down">
                     {instant
-                      ? // a one-transaction trade on a gateway older than v7.1 (today's testnet)
+                      ? // a one-transaction trade on a gateway older than v7.1
                         '⚠ THIS DEPLOYMENT HAS NO PRICE PROTECTION YET (PRE-7.1 GATEWAY): THE TRADE FILLS AT THE PRICE THE CURVE HAS WHEN IT EXECUTES.'
-                      : `⚠ NO PRICE PROTECTION ON CROSS-CHAIN TRADES YET: FROM ${chain.toUpperCase()} THE TRADE FILLS AT THE PRICE THE CURVE HAS WHEN IT LANDS ON THE HUB, MINUTES FROM NOW.${
+                      : // a pre-v7.2 deployment (today's public testnet)
+                        `⚠ THIS DEPLOYMENT PREDATES CROSS-CHAIN PRICE PROTECTION: FROM ${chain.toUpperCase()} THE TRADE FILLS AT THE PRICE THE CURVE HAS WHEN IT LANDS ON THE HUB, MINUTES FROM NOW.${
                           liveChains.some((ch) => info?.[ch.id]?.protected)
                             ? ` TRADE FROM ${liveChains
                                 .filter((ch) => info?.[ch.id]?.protected)
@@ -849,6 +860,32 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   </p>
                 )}
               </div>
+            )}
+            {/* what this chain means for the user, said where they decide */}
+            {onchain && ci && (
+              <ul className="mt-1.5 space-y-0.5 font-mono text-[9px] font-bold leading-relaxed tracking-wide" data-testid="chain-notes">
+                {!instant && (
+                  <li>
+                    ⏱ FROM {chain.toUpperCase()} THE TRADE CROSSES TO THE HUB AND BACK: A FEW MINUTES, ALL OR NOTHING AT THE
+                    MINIMUM YOU SET.
+                  </li>
+                )}
+                {chain === 'bnb' && (
+                  <li data-testid="bnb-note">
+                    <CoinLogo id="usdt" size={11} className="-mt-0.5" /> BNB CHAIN TRADES IN BINANCE USDT, POOLED WITH THE USDC
+                    OF THE OTHER CHAINS: IF USDT LOST ITS PEG, EVERYONE WOULD SHARE THE LOSS — BOUNDED BY THE BNB VAULT'S CAP
+                    {ci.depositCap > 0 && ci.depositCap < 1e8
+                      ? ` (${fmtMoney(ci.depositCap)} USDT)`
+                      : ''}
+                    .
+                  </li>
+                )}
+                {chain === 'ethereum' && (
+                  <li data-testid="eth-note">
+                    ⛽ ETHEREUM: EVERY ACTION PAYS L1 GAS (DOLLARS, NOT CENTS), AND A TOKEN MAY NEED OPENING HERE FIRST.
+                  </li>
+                )}
+              </ul>
             )}
             {fgActive && side === 'buy' && (
               <p className="mt-1 font-mono text-[9px] font-bold tracking-wide text-down">
@@ -894,6 +931,8 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                 </span>
               </p>
             )}
+            </>
+            )}
             {buyBlocked && (
               <p className="mt-1 font-mono text-[9px] font-bold tracking-wide text-down">
                 ⏸ {onchain?.hubPaused ? 'THE HUB IS PAUSED' : `${chain.toUpperCase()} IS PAUSED`} — NEW BUYS ARE
@@ -931,7 +970,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
             {msg && (
               <p
                 className={`mt-2 text-center font-mono text-[10px] font-bold tracking-wide ${
-                  msg.ok ? 'text-up' : 'text-down'
+                  msg.ok ? 'text-up' : msg.neutral ? 'rounded-lg border-2 border-ink bg-cream px-2 py-1.5' : 'text-down'
                 }`}
                 data-testid="trade-msg"
               >
@@ -1024,9 +1063,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
           {/* chain sync grid */}
           <div className={card}>
             <p className={label}>
-              ONE GLOBAL PRICE · {liveChains.length === 6 ? 'SIX' : liveChains.length} NATIVE DEPLOYMENT
-              {liveChains.length === 1 ? '' : 'S'}
-              {universe ? ` · ${universe.name} UNIVERSE` : ''}
+              ONE GLOBAL PRICE · {chainSet.word} LIVE CHAIN{liveChains.length === 1 ? '' : 'S'}
             </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-2">
               {liveChains.map((ch) => {
@@ -1037,32 +1074,42 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                     className={`flex items-center gap-2 rounded-lg border-2 bg-cream/60 px-2 py-1.5 ${
                       na ? 'border-dashed border-ink/30 opacity-70' : 'border-ink/20'
                     }`}
-                    title={na ? 'Not available on this chain yet' : undefined}
+                    title={
+                      na === 'closed'
+                        ? `Not open on ${chainName(ch.id)} yet — anyone there can open it`
+                        : na
+                          ? 'Not available on this chain yet'
+                          : undefined
+                    }
                   >
                     <span className={na ? 'grayscale' : ''}>
                       <ChainLogo id={ch.id} size={20} />
                     </span>
                     <span className="font-mono text-[10px] font-bold">{na ? '—' : fmtPrice(c.price)}</span>
-                    <span className={`ml-auto font-mono text-[8px] font-bold ${na ? 'text-down' : 'text-up'}`}>
-                      {na ? 'NOT YET' : '✓'}
-                    </span>
+                    {na === 'closed' ? (
+                      <button
+                        type="button"
+                        onClick={() => setChain(ch.id)}
+                        className="ml-auto rounded border border-ink bg-white px-1 font-mono text-[8px] font-bold hover:bg-lime"
+                      >
+                        OPEN IT
+                      </button>
+                    ) : (
+                      <span className={`ml-auto font-mono text-[8px] font-bold ${na ? 'text-down' : 'text-up'}`}>
+                        {na ? 'NOT YET' : '✓'}
+                      </span>
+                    )}
                   </div>
                 )
               })}
             </div>
-            {universe && (
-              <p className="mt-2 font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-45">
-                THIS TOKEN EXISTS ONLY IN THE {universe.name} UNIVERSE ({universe.line.toUpperCase()}). IT
-                DOES NOT EXIST IN THE OTHER UNIVERSES.
-              </p>
-            )}
           </div>
 
           <p className="text-center font-mono text-[9px] font-bold tracking-wide opacity-40">
             {mode === 'sim'
               ? 'DEMO MARKET — REAL CURVE MATH, FICTIONAL MONEY. NO TRANSACTION IS SUBMITTED.'
               : onchain?.network === 'mainnet'
-                ? `${universe ? `${universe.name} UNIVERSE` : 'MAINNET'} — REAL ${dollar.symbol}${universe?.id === 'bnb' ? ' (BINANCE-PEG)' : ''}, UNAUDITED CONTRACTS, CAPPED VAULTS${universe?.id === 'ethereum' ? ', L1 GAS ON EVERY ACTION' : ''}. ONLY WHAT YOU CAN LOSE.`
+                ? 'MAINNET GUARDED BETA — REAL DOLLARS, UNAUDITED CONTRACTS, CAPPED VAULTS. ONLY WHAT YOU CAN LOSE.'
                 : onchain?.network === 'testnet'
                   ? 'PUBLIC TESTNET — REAL CONTRACTS AND REAL TRANSACTIONS, PLAY MONEY.'
                   : 'LOCAL DEVNET — REAL CONTRACTS ON YOUR OWN NODE, PLAY MONEY.'}

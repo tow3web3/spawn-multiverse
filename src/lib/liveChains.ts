@@ -1,76 +1,87 @@
 import { useStore } from '../store'
 import { CHAINS, DESIGN_CHAINS, type Chain } from './chains'
-import { COMING_CHAINS } from './universes'
-import { coinOf, type CoinLogoId } from '../components/ChainLogos'
+import { designDollar } from './v72'
+import { CHAIN_NAME, coinOf, isChainLogoId, type CoinLogoId } from '../components/ChainLogos'
 
-/** The dollar the page is denominated in: the deployment's settlement token
- * on-chain (USDC, USDT…), plain USDC in the simulation. */
-export function useDollar(): { symbol: string; decimals: number; coin: CoinLogoId } {
+export interface DollarView {
+  symbol: string
+  decimals: number
+  coin: CoinLogoId
+}
+
+type DollarInfo = Record<string, { dollar: { symbol: string; decimals: number } }>
+
+/** The dollar a chain settles in: what the chain itself reported (on-chain
+ * modes), else the design's — Binance USDT on BNB Chain, USDC elsewhere. */
+export function dollarOn(chainId: string | undefined, info?: DollarInfo): DollarView {
+  const d = (chainId && info?.[chainId]?.dollar) || designDollar(chainId ?? '')
+  return { symbol: d.symbol, decimals: d.decimals, coin: coinOf(d.symbol) ?? 'usdc' }
+}
+
+/** The dollar of ONE chain — never of the page: labels, decimals and
+ * approvals follow the chain the user is on. */
+export function useChainDollar(chainId: string | undefined): DollarView {
   const { onchain } = useStore()
-  const symbol = onchain?.dollar.symbol ?? 'USDC'
-  return { symbol, decimals: onchain?.dollar.decimals ?? 6, coin: coinOf(symbol) ?? 'usdc' }
+  return dollarOn(chainId, onchain?.chainInfo)
+}
+
+/** Every distinct dollar the live chains settle in (USDC, USDT). */
+export function useDollars(): DollarView[] {
+  const { live } = useChainSet()
+  const { onchain } = useStore()
+  const out: DollarView[] = []
+  for (const c of live) {
+    const d = dollarOn(c.id, onchain?.chainInfo)
+    if (!out.some((x) => x.symbol === d.symbol)) out.push(d)
+  }
+  return out
 }
 
 const WORDS = ['ZERO', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE', 'SIX']
 const LOWER = ['zero', 'one', 'two', 'three', 'four', 'five', 'six']
 
+/** "Base", "BNB Chain"… the full name of a chain. */
+export const chainName = (id: string) => (isChainLogoId(id) ? CHAIN_NAME[id] : id)
+
+/** "Base, Optimism and Arbitrum". */
+export function listNames(chains: Chain[]): string {
+  const labels = chains.map((c) => chainName(c.id))
+  return labels.length <= 1 ? (labels[0] ?? '') : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`
+}
+
 export interface ChainSet {
-  /** Chains users can actually trade from in the current mode. */
+  /** Chains a user can actually trade on in the current mode: the
+   * manifest's list on-chain (never more), the six in the simulation. */
   live: Chain[]
-  /** Chains announced for THIS deployment and not live on it yet. Never the
-   * chains of another universe: Ethereum and BNB are worlds of their own. */
-  soon: Chain[]
+  /** The six chains of the universe — for the concept copy only. */
+  design: Chain[]
   count: number
-  /** "SIX", "THREE"… for display copy. */
+  /** "FIVE", "SIX"… for display copy. */
   word: string
-  /** "six", "three"… for sentence copy. */
+  /** "five", "six"… for sentence copy. */
   lower: string
-  /** "Base, Optimism and Arbitrum" */
+  /** "Base, Optimism and Arbitrum" — the live chains. */
   names: string
   /** One chain only: there is nothing to cross, no message, no message fee. */
   single: boolean
 }
 
-const title = (s: string) => s.charAt(0) + s.slice(1).toLowerCase()
-
 /**
- * The chain set the page may honestly talk about.
- *  - The simulation runs the full six-chain design.
- *  - A local devnet runs what its manifest lists; the rest of the six-chain
- *    design is "soon".
- *  - A mainnet UNIVERSE (and the public testnet that rehearses the omnichain
- *    one) runs what its manifest lists. The omnichain universe still has
- *    chains to come (Solana, Robinhood); a single-chain universe (BNB,
- *    Ethereum) is complete as it is.
+ * The chains the page may honestly say something about. The concept (one
+ * universe, six chains) is `design`; anything that says what can be traded
+ * NOW is `live` — the manifest's chains, nothing greyed, nothing promised.
  */
 export function useChainSet(): ChainSet {
   const { onchain } = useStore()
   const ids = onchain?.chains
   const live = ids ? CHAINS.filter((c) => ids.includes(c.id)) : DESIGN_CHAINS
-  let soon: Chain[] = []
-  if (ids) {
-    if (onchain?.network === 'local') {
-      // the devnet simulates the six-chain design: whatever it leaves out
-      soon = DESIGN_CHAINS.filter((c) => !ids.includes(c.id))
-    } else if (!onchain?.universe?.single && live.length > 1) {
-      // mainnet's omnichain universe and the public testnet that rehearses
-      // it: the chains still to join are Solana and Robinhood. Ethereum and
-      // BNB are never "coming" here — they are universes of their own.
-      soon = CHAINS.filter((c) => (COMING_CHAINS as readonly string[]).includes(c.id) && !ids.includes(c.id))
-    }
-  }
-  const labels = live.map((c) => (c.id === 'bnb' ? 'BNB' : title(c.label)))
-  const names =
-    labels.length <= 1
-      ? (labels[0] ?? '')
-      : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`
   return {
     live,
-    soon,
+    design: DESIGN_CHAINS,
     count: live.length,
     word: WORDS[live.length] ?? String(live.length),
     lower: LOWER[live.length] ?? String(live.length),
-    names,
+    names: listNames(live),
     single: live.length === 1,
   }
 }

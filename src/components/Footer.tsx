@@ -18,11 +18,7 @@ export function Footer({ onOpenLab }: { onOpenLab: () => void }) {
             {!onchain
               ? 'Simulation. Every price, trade and holder on this page is simulated demo data. No blockchain transactions are submitted, no financial advice is dispensed, and no creatures were harmed in any dimension.'
               : onchain.network === 'mainnet'
-                ? `Guarded beta on mainnet${onchain.universe ? ` — the ${onchain.universe.name} universe (${onchain.universe.line})` : ''}. These contracts are unaudited and hold real ${onchain.dollar.symbol}${
-                    onchain.universe?.id === 'bnb' ? ' (a Binance-custodied peg)' : ''
-                  } under ${onchain.universe?.single ? '' : 'per-chain '}deposit caps; a bug can lose funds for good.${
-                    onchain.universe?.id === 'ethereum' ? ' Every action pays Ethereum L1 gas.' : ''
-                  }${onchain.universe ? ' A token launched in one universe does not exist in another.' : ''} Tokens here are launched by anyone and can go to zero. Nothing on this page is financial advice. Use it only where that is legal, and only with money you can lose.`
+                ? `Guarded beta on mainnet — one universe, each chain trading in its own dollar (USDC; Binance USDT on BNB Chain, pooled with the rest). These contracts are unaudited and hold real money under per-chain deposit caps; a bug can lose funds for good. On Ethereum every action pays L1 gas. Tokens here are launched by anyone and can go to zero. Nothing on this page is financial advice. Use it only where that is legal, and only with money you can lose.`
                 : onchain.network === 'testnet'
                   ? 'Public testnet. Real contracts and real transactions on test networks, paid for with play money that has no value. No financial advice is dispensed, and no creatures were harmed in any dimension.'
                   : 'Local devnet. Real contracts on your own node, play money, no value. No creatures were harmed in any dimension.'}

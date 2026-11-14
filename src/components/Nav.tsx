@@ -1,9 +1,8 @@
 import { useState } from 'react'
 import { useStore, shortAddr, type WalletSource } from '../store'
 import { fmtUsd } from '../lib/format'
-import { useDollar } from '../lib/liveChains'
-import { universeOfMode, type AppMode, type UniverseDef } from '../lib/universes'
-import { PUBLIC_DEMO } from '../App'
+import { useDollars } from '../lib/liveChains'
+import { PUBLIC_DEMO, type AppMode } from '../App'
 import { GuardedBanner } from './Guarded'
 import { ChainLogo, CoinLogo } from './ChainLogos'
 
@@ -36,14 +35,13 @@ function LogoBlob() {
   )
 }
 
-/** The non-mainnet modes of the switch. A mainnet universe is labelled by
- * its own definition (tab + chain logos). */
-const MODE_LABEL: Record<Exclude<AppMode, UniverseDef['mode']>, string> = {
+/** The play modes of the switch. Mainnet wears the logos of its live chains. */
+const MODE_LABEL: Record<Exclude<AppMode, 'mainnet'>, string> = {
   sim: 'SIM',
   testnet: '⛓ TESTNET',
   chain: 'LOCAL',
 }
-const MODE_TITLE: Record<Exclude<AppMode, UniverseDef['mode']>, string> = {
+const MODE_TITLE: Record<Exclude<AppMode, 'mainnet'>, string> = {
   sim: 'Simulated market — nothing is real',
   testnet: 'Real contracts on public testnets, play money',
   chain: 'Local on-chain deployment',
@@ -52,30 +50,29 @@ const MODE_TITLE: Record<Exclude<AppMode, UniverseDef['mode']>, string> = {
 export function Nav({
   mode,
   setMode,
-  universes,
+  mainnet,
   onOpenLab,
   onFreshSpawns,
   onHome,
 }: {
   mode: AppMode
   setMode: (m: AppMode) => void
-  /** The mainnet universes whose manifest is published — each is a mode. */
-  universes: UniverseDef[]
+  /** Mainnet's live chain ids once its manifest is published, else null. */
+  mainnet: string[] | null
   onOpenLab: () => void
   onFreshSpawns: () => void
   onHome: () => void
 }) {
   const { wallet, onchain } = useStore()
-  const dollar = useDollar()
+  const dollars = useDollars()
   const [minting, setMinting] = useState(false)
-  // every live universe first, then SIM, TESTNET; LOCAL only outside the public build
+  // mainnet first once it is live, then SIM, TESTNET; LOCAL only outside the public build
   const modes: AppMode[] = [
-    ...universes.map((u) => u.mode),
+    ...(mainnet ? (['mainnet'] as const) : []),
     'sim',
     'testnet',
     ...(PUBLIC_DEMO ? [] : (['chain'] as const)),
   ]
-  const current = universeOfMode(mode)
 
   // The bar carries a mode switch, a mint button and a wallet pill next to
   // the links: nothing may wrap, so the less essential links only appear
@@ -114,17 +111,17 @@ export function Nav({
           </button>
         </nav>
 
-        {/* market mode switch: one tab per live mainnet universe, then the
-            play worlds. A universe tab wears the logos of the chains it runs. */}
+        {/* market mode switch: mainnet (once live — wearing the logos of
+            its live chains), then the play worlds */}
         <div
           className="flex shrink-0 overflow-hidden rounded-full border-2 border-ink font-mono text-[10px] font-bold"
           role="tablist"
           aria-label="Market"
         >
           {modes.map((m, i) => {
-            const u = universeOfMode(m)
-            const title = u
-              ? `${u.name} universe — ${u.line}. Real money. Tokens launched here exist only here.`
+            const real = m === 'mainnet' && mainnet
+            const title = real
+              ? 'Mainnet — real money, one universe. Each chain trades in its own dollar.'
               : MODE_TITLE[m as keyof typeof MODE_TITLE]
             return (
               <button
@@ -138,14 +135,14 @@ export function Nav({
                 } ${i > 0 ? 'border-l-2 border-ink' : ''}`}
                 title={title}
               >
-                {u ? (
+                {real ? (
                   <>
                     <span className="flex items-center -space-x-1">
-                      {u.logos.map((id) => (
+                      {mainnet.map((id) => (
                         <ChainLogo key={id} id={id} size={12} />
                       ))}
                     </span>
-                    ◉ {u.tab}
+                    ◉ MAINNET
                   </>
                 ) : (
                   MODE_LABEL[m as keyof typeof MODE_LABEL]
@@ -169,7 +166,7 @@ export function Nav({
           {onchain
             ? onchain.status === 'ready'
               ? onchain.network === 'mainnet'
-                ? `${onchain.universe?.name ?? 'MAINNET'} LIVE`
+                ? 'MAINNET LIVE'
                 : onchain.network === 'testnet'
                   ? 'TESTNET LIVE'
                   : 'CHAIN LIVE'
@@ -188,11 +185,15 @@ export function Nav({
                 .finally(() => setMinting(false))
             }}
             disabled={minting}
-            title={`Mint 1,337 play ${dollar.symbol} on every chain your wallet has gas on`}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border-2 border-ink bg-lime px-3 py-2 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:opacity-60"
+            title={`Mint 1,337 play dollars on every chain your wallet has gas on — each in that chain's own dollar (${dollars.map((d) => d.symbol).join(', ')})`}
+            className="hidden shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border-2 border-ink bg-lime px-3 py-2 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:opacity-60 sm:inline-flex"
           >
-            <CoinLogo id={dollar.coin} size={15} />
-            {minting ? 'MINTING…' : `MINT ${dollar.symbol}`}
+            <span className="flex items-center -space-x-1">
+              {dollars.map((d) => (
+                <CoinLogo key={d.symbol} id={d.coin} size={15} />
+              ))}
+            </span>
+            {minting ? 'MINTING…' : dollars.length > 1 ? 'MINT PLAY CASH' : `MINT ${dollars[0]?.symbol ?? 'USDC'}`}
           </button>
         )}
 
@@ -203,8 +204,8 @@ export function Nav({
         <div className="border-t-2 border-ink bg-down px-4 py-1.5 text-center font-mono text-[10px] font-bold tracking-wide text-white">
           {onchain.status === 'connecting'
             ? '⛓ CONNECTING TO THE CHAIN…'
-            : current
-              ? `⛓ THE ${current.name} UNIVERSE IS UNREACHABLE RIGHT NOW — CHECK YOUR CONNECTION, OR FLIP TO ANOTHER MARKET.`
+            : mode === 'mainnet'
+              ? '⛓ MAINNET IS UNREACHABLE RIGHT NOW — CHECK YOUR CONNECTION, OR FLIP TO ANOTHER MARKET.'
               : mode === 'testnet'
                 ? '⛓ TESTNET DEPLOYMENT NOT LIVE YET — THE MULTIVERSE IS BEING WIRED. FLIP BACK TO SIM FOR NOW.'
                 : '⛓ LOCAL CHAIN OFFLINE — RUN `npm run chain` THEN `npm run chain:deploy`, OR FLIP BACK TO SIM.'}
@@ -226,7 +227,7 @@ export function Nav({
  * the pill opens a small menu showing the source and a DISCONNECT. */
 function ConnectButton() {
   const { wallet, connect, onchain } = useStore()
-  const dollar = useDollar()
+  const dollars = useDollars()
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState<WalletSource | 'any' | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -270,7 +271,7 @@ function ConnectButton() {
         data-testid="wallet-pill"
         title={
           wallet && onchainMode
-            ? `${fmtUsd(wallet.balance)} in ${dollar.symbol} and oUSD claims across this universe's chains`
+            ? `${fmtUsd(wallet.balance)} across the live chains — each chain's own dollar (${dollars.map((d) => d.symbol).join(', ')}) plus oUSD claims`
             : undefined
         }
         className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl border-3 border-ink bg-ink px-4 py-2.5 font-mono text-[11px] font-bold tracking-wide text-white shadow-brutal-sm transition hover:-translate-y-0.5 hover:shadow-brutal active:translate-y-0 active:shadow-brutal-sm"
@@ -280,8 +281,14 @@ function ConnectButton() {
             <span>
               {onchain?.walletSource === 'injected' ? '🦊' : '●'} {shortAddr(wallet.address)}
             </span>
-            {/* on-chain the wallet's dollars are the universe's dollar; the simulation's are not */}
-            {onchainMode && <CoinLogo id={dollar.coin} size={15} />}
+            {/* on-chain the wallet's dollars are the chains' dollars; the simulation's are not */}
+            {onchainMode && (
+              <span className="flex items-center -space-x-1">
+                {dollars.map((d) => (
+                  <CoinLogo key={d.symbol} id={d.coin} size={15} />
+                ))}
+              </span>
+            )}
             <span className="text-lime">{fmtUsd(wallet.balance)}</span>
           </>
         ) : busy ? (

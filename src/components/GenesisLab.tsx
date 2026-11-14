@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks, type FeeMode } from '../store'
-import { useChainSet, useDollar } from '../lib/liveChains'
+import { dollarOn, useChainSet } from '../lib/liveChains'
 import { fmtNum, fmtPrice } from '../lib/format'
 import { cleanLinks, LINK_META } from '../lib/links'
 import { processImage, uploadTokenImage } from '../lib/tokenImage'
@@ -21,8 +21,6 @@ export function GenesisLab({
   const chainSet = useChainSet()
   const liveChains = chainSet.live
   const info = onchain?.chainInfo
-  const dollar = useDollar()
-  const universe = onchain?.universe
   const [name, setName] = useState('')
   const [ticker, setTicker] = useState('')
   const [image, setImage] = useState<string | null>(null)
@@ -58,6 +56,8 @@ export function GenesisLab({
         liveChains[0])
       : undefined
   const fromInfo = from ? info?.[from.id] : undefined
+  /** The dev buy is paid in the launch chain's own dollar. */
+  const dollar = dollarOn(from?.id, info)
   const fromInstant = !!onchain && (onchain.network === 'local' || !!fromInfo?.local)
   const feeCoin = coinOf(fromInfo?.nativeSymbol ?? 'ETH')
   const devBuyNum = Number.parseFloat(devBuyStr) || 0
@@ -355,43 +355,28 @@ export function GenesisLab({
             <p className={`${label} mt-7`}>
               05 — {chainSet.single ? `BORN ON ${chainSet.names.toUpperCase()}` : 'ALL CHAINS SPAWN TOGETHER'}
             </p>
+            {/* the chains it is born on: exactly the live ones */}
             <div className="mt-3 flex items-center justify-between rounded-xl border-3 border-white/20 bg-void px-4 py-3">
               <div className="flex flex-wrap gap-1.5">
                 {liveChains.map((ch) => (
                   <ChainChip key={ch.id} id={ch.id} size={30} />
                 ))}
-                {/* chains announced for this universe: shown, greyed, not promised */}
-                {chainSet.soon.map((ch) => (
-                  <ChainChip key={ch.id} id={ch.id} size={30} dim />
-                ))}
               </div>
               <span className="font-mono text-[11px] font-bold text-lime">
-                {liveChains.length} / {liveChains.length + chainSet.soon.length} ACTIVATED ✓
+                {liveChains.length === 1 ? '1 CHAIN' : `${chainSet.word} CHAINS`} ✓
               </span>
             </div>
-            {/* which universe the token is born in — it will exist nowhere else */}
-            {universe && (
-              <p
-                className="mt-2 rounded-lg border-2 border-tang/60 bg-tang/10 px-3 py-2 font-mono text-[10px] leading-relaxed text-tang"
-                data-testid="lab-universe"
-              >
-                ◉ This token is born in the <span className="font-bold">{universe.name} UNIVERSE</span> (
-                {universe.line}). It will exist only there — not in the other universes, which have
-                their own tokens and their own dollar.
-              </p>
-            )}
-            {chainSet.soon.length > 0 && (
-              <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
-                Live on this deployment: {chainSet.names}. Coming:{' '}
-                {chainSet.soon.map((c) => c.label).join(', ')} — your token will not exist
-                there until they are switched on.
+            {onchain && !chainSet.single && (
+              <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40" data-testid="lab-open-note">
+                🚪 A chain that is too expensive at the moment of launch — usually Ethereum — can be skipped by
+                the launch. Your token is not lost there: anyone on that chain can open it later for a small
+                network fee.
               </p>
             )}
             {chainSet.single ? (
               <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
                 💡 One chain, one transaction: the launch lands on {chainSet.names} in the
                 block it is mined, with no message to pay for.
-                {universe?.id === 'ethereum' ? ' It pays Ethereum gas.' : ''}
               </p>
             ) : (
               <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40">
@@ -431,7 +416,7 @@ export function GenesisLab({
                     ? onchain.network === 'local'
                       ? 'Local devnet: the launch lands in one transaction.'
                       : chainSet.single
-                        ? `${from.label} is the only chain of this universe: your token exists in one transaction.`
+                        ? `${from.label} is the only live chain: your token exists in one transaction.`
                         : `${from.label} is the hub chain: your token exists there in one transaction, and reaches the other chains a minute or two later.`
                     : `From ${from.label} the launch crosses LayerZero to the hub first: allow 1–3 minutes before it appears.`}{' '}
                   <span className="text-lime">
@@ -495,7 +480,7 @@ export function GenesisLab({
             <p className={`${label} mt-7`}>07 — SNIPE YOUR OWN SPAWN (OPTIONAL)</p>
             <div className="mt-3 flex items-center gap-3 rounded-xl border-3 border-white/20 bg-void px-4 py-3">
               <span className="inline-flex items-center gap-1.5 font-mono text-[13px] font-bold text-white/50">
-                {/* on-chain the dev buy is paid in the universe's dollar; the simulation's are not */}
+                {/* on-chain the dev buy is paid in the launch chain's dollar; the simulation's are not */}
                 {onchain && <CoinLogo id={dollar.coin} size={16} />}
                 DEV BUY $
               </span>
@@ -583,7 +568,7 @@ export function GenesisLab({
                 : !onchain
                   ? 'Simulation — demo money only, no transaction is submitted.'
                   : onchain.network === 'mainnet'
-                    ? `${universe ? `${universe.name} UNIVERSE` : 'MAINNET'} — this submits a real transaction and spends real ${dollar.symbol}${universe?.id === 'bnb' ? ' (Binance-Peg)' : ''} and ${universe?.id === 'ethereum' ? 'Ethereum L1 gas' : 'gas'}. Unaudited contracts: only what you can lose.`
+                    ? `MAINNET — this submits a real transaction and spends real ${dollar.symbol}${from?.id === 'bnb' ? ' (Binance USDT, pooled with the USDC of the other chains)' : ''} and ${from?.id === 'ethereum' ? 'Ethereum L1 gas' : 'gas'}. Unaudited contracts: only what you can lose.`
                     : onchain.network === 'testnet'
                       ? 'Public testnet — real transactions, play money.'
                       : 'Local devnet — real transactions against your own node, play money.'}

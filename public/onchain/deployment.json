@@ -1,49 +1,27 @@
 {
+  "generation": "v7.2",
   "chainId": 31337,
   "rpc": "http://127.0.0.1:8545",
   "messenger": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-  "pad": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-  "venue": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
-  "hubUsd": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+  "hubMessenger": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "pad": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9",
+  "venue": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+  "hubUsd": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  "dollar": {
+    "symbol": "USDC",
+    "decimals": 6
+  },
   "fromBlock": 0,
   "chains": [
     {
-      "label": 1,
-      "id": "solana",
-      "gateway": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
-      "usd": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853",
-      "chainId": 31337,
-      "rpc": "http://127.0.0.1:8545"
-    },
-    {
-      "label": 2,
-      "id": "ethereum",
-      "gateway": "0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82",
-      "usd": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
-      "chainId": 31337,
-      "rpc": "http://127.0.0.1:8545"
-    },
-    {
       "label": 3,
       "id": "base",
-      "gateway": "0x68B1D87F95878fE05B998F19b66F4baba5De1aed",
-      "usd": "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
-      "chainId": 31337,
-      "rpc": "http://127.0.0.1:8545"
-    },
-    {
-      "label": 4,
-      "id": "bnb",
-      "gateway": "0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44",
-      "usd": "0x4ed7c70F96B99c776995fB64377f0d4aB3B0e1C1",
-      "chainId": 31337,
-      "rpc": "http://127.0.0.1:8545"
-    },
-    {
-      "label": 5,
-      "id": "arbitrum",
-      "gateway": "0xc5a5C42992dECbae36851359345FE25997F5C42d",
-      "usd": "0x09635F643e140090A9A8Dcd712eD6285858ceBef",
+      "gateway": "0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82",
+      "usd": "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
+      "usdc": "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318",
+      "dist": "0x959922bE3CAee4b8Cd9a407cc3ac1C251C2007B1",
+      "vault": "cctp",
+      "local": true,
       "chainId": 31337,
       "rpc": "http://127.0.0.1:8545"
     },
@@ -51,10 +29,50 @@
       "label": 6,
       "id": "optimism",
       "gateway": "0x9E545E3C0baAB3E08CdfD552C960A1050f373042",
-      "usd": "0x84eA74d481Ee0A5332c457a4d796187F6Ba67fEB",
+      "usd": "0xc3e53F4d16Ae77Db1c982e75a937B9f60FE63690",
+      "usdc": "0x67d269191c92Caf3cD7723F116c85e6E9bf55933",
+      "dist": "0x851356ae760d987E095750cCeb3bC6014560891C",
+      "vault": "cctp",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
+    },
+    {
+      "label": 5,
+      "id": "arbitrum",
+      "gateway": "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575",
+      "usd": "0x1291Be112d480055DaFd8a610b7d1e203891C274",
+      "usdc": "0x809d550fca64d94Bd9F66E60752A544199cfAC3D",
+      "dist": "0x2bdCC0de6bE1f7D2ee689a0342D76F52E8EFABa3",
+      "vault": "cctp",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
+    },
+    {
+      "label": 2,
+      "id": "ethereum",
+      "gateway": "0x2E2Ed0Cfd3AD2f1d34481277b3204d807Ca2F8c2",
+      "usd": "0x4C4a2f8c81640e47606d3fd77B353E87Ba015584",
+      "usdc": "0xdbC43Ba45381e02825b14322cDdd15eC4B3164E6",
+      "dist": "0x51A1ceB83B83F1985a81C295d1fF28Afef186E02",
+      "vault": "cctp",
+      "chainId": 31337,
+      "rpc": "http://127.0.0.1:8545"
+    },
+    {
+      "label": 4,
+      "id": "bnb",
+      "gateway": "0x367761085BF3C12e5DA2Df99AC6E1a824612b8fb",
+      "usd": "0xC9a43158891282A2B1475592D5719c001986Aaec",
+      "usdc": "0x46b142DD1E924FAb83eCc3c08e4D46E82f005e0E",
+      "dist": "0x49fd2BE640DB2910c2fAb69bB8531Ab6E76127ff",
+      "vault": "local",
+      "dollar": {
+        "symbol": "USDT",
+        "decimals": 18
+      },
       "chainId": 31337,
       "rpc": "http://127.0.0.1:8545"
     }
   ],
-  "deployedAt": 1794253025184
+  "deployedAt": 1794624698625
 }

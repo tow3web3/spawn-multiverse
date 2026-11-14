@@ -73,9 +73,10 @@ export function DevDashboard({
       <p className="mt-2 max-w-xl font-mono text-[11px] font-bold leading-relaxed opacity-55">
         YOUR LAUNCHES, YOUR FEE STREAMS, YOUR CLAIMS.{' '}
         {chainSet.single
-          ? `EVERYTHING HERE LIVES ON ${chainSet.names.toUpperCase()}${onchain?.universe ? ` — THE ${onchain.universe.name} UNIVERSE` : ''}.`
-          : `REMEMBER: YOU LAUNCHED FROM ONE CHAIN WITH ONE GAS TOKEN — SPAWN! DEPLOYED TO ALL ${chainSet.word}.`}
-        {onchain?.universe && !chainSet.single ? ` ${onchain.universe.name} UNIVERSE ONLY.` : ''}
+          ? `EVERYTHING HERE LIVES ON ${chainSet.names.toUpperCase()}.`
+          : onchain
+            ? `REMEMBER: YOU LAUNCHED FROM ONE CHAIN WITH ONE GAS TOKEN — SPAWN! DEPLOYED TO EVERY LIVE CHAIN (${chainSet.names.toUpperCase()}).`
+            : 'REMEMBER: YOU LAUNCHED FROM ONE CHAIN WITH ONE GAS TOKEN — SPAWN! DEPLOYED TO ALL SIX.'}
       </p>
 
       {!wallet ? (
@@ -224,8 +225,8 @@ export function DevDashboard({
           {mode === 'chain' && (
             <p className="mt-4 text-center font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-45">
               {chainSet.single
-                ? `A CLAIM IS ONE TRANSACTION ON ${chainSet.names.toUpperCase()} AND PAYS OUT THERE IN ${onchain?.dollar.symbol ?? 'USDC'}.`
-                : `A CLAIM IS SENT FROM THE FIRST CHAIN YOUR WALLET HAS GAS ON (THE HUB CHAIN FIRST: IT IS INSTANT) AND PAYS OUT THERE IN ${onchain?.dollar.symbol ?? 'USDC'}.`}
+                ? `A CLAIM IS ONE TRANSACTION ON ${chainSet.names.toUpperCase()} AND PAYS OUT THERE IN ITS DOLLAR.`
+                : 'A CLAIM IS SENT FROM THE FIRST CHAIN YOUR WALLET HAS GAS ON (THE HUB CHAIN FIRST: IT IS INSTANT) AND PAYS OUT THERE, IN THAT CHAIN’S DOLLAR.'}
               {onchain?.sponsored || chainSet.single
                 ? ''
                 : ' FROM ANOTHER CHAIN IT CROSSES LAYERZERO — A FEW MINUTES AND A NETWORK FEE.'}

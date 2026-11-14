@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { useStore, shortAddr } from '../store'
 import { fmtChange, fmtPrice, fmtTokens, fmtUsd } from '../lib/format'
 import { CHAINS } from '../lib/chains'
-import { useChainSet, useDollar } from '../lib/liveChains'
+import { dollarOn, useChainSet } from '../lib/liveChains'
 import { CreatureArt } from './CreatureCard'
 import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
+import { MoveClaim } from './MoveClaim'
 
 const label = 'font-mono text-[10px] font-bold tracking-[0.15em] opacity-60'
 
@@ -17,10 +18,10 @@ export function PortfolioPage({
 }) {
   const { creatures, wallet, connect, onchain } = useStore()
   const chainSet = useChainSet()
-  const dollar = useDollar()
-  const sym = dollar.symbol
   const [busy, setBusy] = useState(false)
   const [unwrapping, setUnwrapping] = useState<string | null>(null)
+  /** The chain whose claim is being moved (v7.2), if any. */
+  const [moving, setMoving] = useState<string | null>(null)
   const [cashMsg, setCashMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   // holder fee rewards claimable right now, summed across tokens + chains
@@ -34,6 +35,7 @@ export function PortfolioPage({
 
   const doUnwrap = async (chainId: string) => {
     if (unwrapping || !onchain?.unwrap) return
+    const sym = dollarOn(chainId, onchain.chainInfo).symbol
     setUnwrapping(chainId)
     setCashMsg(null)
     try {
@@ -91,9 +93,12 @@ export function PortfolioPage({
       </h1>
       <p className="mt-2 max-w-lg font-mono text-[11px] font-bold leading-relaxed opacity-55">
         EVERY TOKEN YOU TRADED THROUGH SPAWN!
-        {chainSet.single ? ` ON ${chainSet.names.toUpperCase()}` : `, ACROSS ALL ${chainSet.word} CHAINS`}, IN
-        ONE PLACE.
-        {onchain?.universe ? ` ${onchain.universe.name} UNIVERSE ONLY — OTHER UNIVERSES HAVE THEIR OWN BAGS.` : ''}
+        {chainSet.single
+          ? ` ON ${chainSet.names.toUpperCase()}`
+          : onchain
+            ? `, ACROSS EVERY LIVE CHAIN (${chainSet.word})`
+            : ', ACROSS ALL SIX CHAINS'}
+        , IN ONE PLACE.
       </p>
 
       {!wallet ? (
@@ -139,9 +144,15 @@ export function PortfolioPage({
               <p className={label}>YOUR DOLLARS, CHAIN BY CHAIN</p>
               <div className="mt-2 divide-y divide-ink/10">
                 {cash.map((c) => {
+                  const d = dollarOn(c.id, onchain?.chainInfo)
+                  const sym = d.symbol
                   const canUnwrap = c.ousd >= 0.01 && c.liquidity > 0
+                  // v7.2: a claim this vault cannot pay in full can leave for
+                  // a chain whose vault can — never a `wrap`, on any chain
+                  const stuck = c.v72 && c.ousd >= 0.01 && c.liquidity < c.ousd
                   return (
-                    <div key={c.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 py-2">
+                    <div key={c.id} className="py-2">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
                       <ChainLogo id={c.id} size={24} />
                       <span className="w-24 font-mono text-[11px] font-bold">
                         {c.label}
@@ -151,13 +162,13 @@ export function PortfolioPage({
                         className="inline-flex items-center gap-1.5 font-mono text-[12px] font-bold"
                         data-testid={`cash-${c.id}`}
                       >
-                        <CoinLogo id={dollar.coin} size={16} />
+                        <CoinLogo id={d.coin} size={16} />
                         {fmtUsd(c.usdc)} {sym}
                       </span>
                       {c.ousd >= 0.01 && (
                         <span
                           className="font-mono text-[11px] font-bold opacity-60"
-                          title={`oUSD: a 1:1 claim on this chain's ${sym} vault. It comes from holder rewards, or from a payout made while the vault was short.`}
+                          title={`oUSD: a 1:1 claim on this chain's ${sym} vault. It comes from holder rewards, or from a payout made while the vault was short. The vault holds ${fmtUsd(c.liquidity)} ${sym} right now.`}
                           data-testid={`ousd-${c.id}`}
                         >
                           + {fmtUsd(c.ousd)} oUSD
@@ -182,9 +193,35 @@ export function PortfolioPage({
                           data-testid={`unwrap-${c.id}`}
                           className="ml-auto rounded-lg border-2 border-ink bg-lime px-3 py-1.5 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-40"
                         >
-                          {unwrapping === c.id ? '✳ UNWRAPPING…' : canUnwrap ? `UNWRAP → ${sym}` : 'VAULT SHORT'}
+                          {unwrapping === c.id
+                            ? '✳ UNWRAPPING…'
+                            : canUnwrap
+                              ? c.liquidity < c.ousd
+                                ? `UNWRAP ${fmtUsd(c.liquidity)} → ${sym}`
+                                : `UNWRAP → ${sym}`
+                              : 'VAULT EMPTY'}
                         </button>
                       )}
+                      {stuck && (
+                        <button
+                          onClick={() => setMoving((m) => (m === c.id ? null : c.id))}
+                          aria-expanded={moving === c.id}
+                          data-testid={`move-open-${c.id}`}
+                          className="rounded-lg border-2 border-ink bg-candy px-3 py-1.5 font-mono text-[10px] font-bold shadow-brutal-sm transition hover:-translate-y-0.5"
+                        >
+                          {moving === c.id ? 'CLOSE' : 'MOVE IT →'}
+                        </button>
+                      )}
+                    </div>
+                    {moving === c.id && (
+                      <MoveClaim
+                        from={c.id}
+                        onDone={(text) => {
+                          setMoving(null)
+                          setCashMsg({ ok: true, text })
+                        }}
+                      />
+                    )}
                     </div>
                   )
                 })}
@@ -196,8 +233,8 @@ export function PortfolioPage({
               )}
               <p className="mt-2 font-mono text-[9px] font-bold leading-relaxed tracking-wide opacity-40">
                 {chainSet.single
-                  ? `A BUY SPENDS YOUR ${sym}${onchain?.universe?.id === 'bnb' ? ' (BINANCE-PEG)' : ''}; SELLS PAY ${sym} BACK, OR AN oUSD CLAIM WHEN THE VAULT IS SHORT.`
-                  : `A BUY SPENDS THE DOLLARS OF THE CHAIN YOU BUY FROM. SELLS PAY ${sym} ON THE CHAIN YOU SELL FROM.`}
+                  ? 'A BUY SPENDS THIS CHAIN’S DOLLAR; SELLS PAY IT BACK, OR AN oUSD CLAIM WHEN THE VAULT IS SHORT.'
+                  : 'EACH CHAIN HAS ITS OWN DOLLAR: A BUY SPENDS THE DOLLARS OF THE CHAIN YOU BUY FROM, A SELL PAYS IN THE DOLLAR OF THE CHAIN YOU SELL FROM — OR AN oUSD CLAIM WHEN ITS VAULT IS SHORT, WHICH YOU CAN UNWRAP LATER OR MOVE TO A CHAIN THAT CAN PAY IT.'}
               </p>
             </div>
           )}

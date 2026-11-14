@@ -1,5 +1,3 @@
-import { useChainSet } from '../lib/liveChains'
-
 function Band({
   phrase,
   className,
@@ -35,25 +33,20 @@ function Band({
   )
 }
 
+/** The concept, said plainly: one universe, six chains. */
+const PHRASE = [
+  'ONE MEME',
+  'SIX CHAINS',
+  'ONE GLOBAL SUPPLY',
+  'PRICE-PROTECTED EVERYWHERE',
+  'OPEN IT ON YOUR CHAIN',
+  'MOVE YOUR DOLLARS',
+  'BLOCK 0 DOES NOT EXIST',
+  'SPAWN IT',
+]
+
 export function MarqueeBand() {
-  const { word, count, single, names } = useChainSet()
-  const phrase = single
-    ? [
-        'ONE MEME',
-        names.toUpperCase(),
-        'ONE GLOBAL SUPPLY',
-        'PRICE-PROTECTED TRADES',
-        'BLOCK 0 DOES NOT EXIST',
-        'SPAWN IT',
-      ]
-    : [
-        'ONE MEME',
-        `${word} CHAIN${count === 1 ? '' : 'S'}`,
-        'ONE GLOBAL SUPPLY',
-        'EVERYWHERE AT ONCE',
-        'BLOCK 0 DOES NOT EXIST',
-        'SPAWN IT',
-      ]
+  const phrase = PHRASE
   return (
     <div className="relative my-10 h-24 overflow-visible">
       <div className="absolute inset-x-[-2%] top-6 rotate-[1.2deg]">
