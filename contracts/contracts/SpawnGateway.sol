@@ -71,7 +71,12 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     uint256 public constant MIN_AMOUNT = 1e12;
     /// Sanity bounds on what a user can be asked to prepay.
     uint8 public constant MAX_TRADE_LEGS = 4;
-    uint8 public constant MAX_SPAWN_LEGS = 32;
+    /// (128 since v7.2: a SYNC toward Ethereum costs seven or eight times
+    /// one toward an L2 and some 10 of an L2's reply units — measured on
+    /// forks — so a launch that reaches it needs 15–30 of the origin's
+    /// legs, and more as executor gas per kind of message shrinks the
+    /// unit.)
+    uint8 public constant MAX_SPAWN_LEGS = 128;
     uint8 public constant MAX_OPEN_LEGS = 8;
     /// A move is answered on ANOTHER chain, which can cost hundreds of this
     /// chain's reply units (an L1 seen from an L2).
@@ -314,14 +319,14 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         require(usdIn >= MIN_AMOUNT, "GW: dust");
         _requireKnown(hubToken);
         usd.bridgeBurn(msg.sender, usdIn);
-        _sendBuy(hubToken, usdIn);
+        _sendBuy(hubToken, usdIn, 0);
     }
 
     /// Buy with USDC (6 decimals), pulled into this chain's vault.
     function buyTokenUsdc(address hubToken, uint256 usdcIn) external payable nonReentrant whenNotPaused {
         require(usdcIn > 0, "GW: zero");
         _requireKnown(hubToken);
-        _sendBuy(hubToken, usd.depositFor(msg.sender, usdcIn));
+        _sendBuy(hubToken, usd.depositFor(msg.sender, usdcIn), 0);
     }
 
     /// A message about a token id the hub does not know can do nothing
@@ -332,21 +337,26 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         require(address(replicaOf[hubToken]) != address(0), "GW: unknown token");
     }
 
-    function _sendBuy(address hubToken, uint256 usdIn) internal {
+    /// `minTokensOut` rides the wire (v7.2): the hub refuses the buy whole,
+    /// and sends every dollar home, if it would fill for less. 0 = any fill.
+    function _sendBuy(address hubToken, uint256 usdIn, uint256 minTokensOut) internal {
         // token id + buyer ride as bytes32 (wire convention)
         messenger.send{value: msg.value}(
             HUB_CHAIN,
             _b32(pad),
-            abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn)),
+            abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn, minTokensOut)),
             tradeLegs
         );
     }
 
     function sellToken(address hubToken, uint256 tokens) external payable nonReentrant {
-        _sell(hubToken, tokens);
+        _sell(hubToken, tokens, 0);
     }
 
-    function _sell(address hubToken, uint256 tokens) internal {
+    /// `minUsdOut` rides the wire (v7.2): what the seller must be PAID, net
+    /// of the fee, in 18-decimal dollars — or the hub refuses the sale and
+    /// sends the bag back. 0 = any price.
+    function _sell(address hubToken, uint256 tokens, uint256 minUsdOut) internal {
         require(tokens > 0, "GW: zero");
         require(tokens >= MIN_AMOUNT, "GW: dust");
         SpawnToken rep = replicaOf[hubToken];
@@ -356,7 +366,7 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         messenger.send{value: msg.value}(
             HUB_CHAIN,
             _b32(pad),
-            abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens)),
+            abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens, minUsdOut)),
             tradeLegs
         );
     }
@@ -417,36 +427,43 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         if (legs < tradeLegs) legs = tradeLegs;
     }
 
-    /* ------------------ slippage protection (v7.1) ------------------ */
+    /* -------------- slippage protection (v7.1, v7.2) -------------- */
 
-    /// ALL-OR-NOTHING TRADES — ONLY WHERE THE HUB ANSWERS IN THE SAME
-    /// TRANSACTION. A plain buy or sell takes whatever price the curve has
-    /// when it executes, so on a public mempool it can be sandwiched. Where
-    /// the messenger is a loopback (the hub chain's own gateway, a
-    /// single-chain universe), the hub's reply — the DELIVER or the PAYOUT —
-    /// has ALREADY been executed when `messenger.send` returns. These three
-    /// functions do exactly what `buyToken`, `buyTokenUsdc` and `sellToken`
-    /// do, then look at what the caller actually received and revert the
-    /// whole transaction if it is less than the minimum they named. Nothing
-    /// can be stranded: the deposit, the burn, the trade on the curve and
-    /// the reply all happened in this one transaction and unwind together.
+    /// ALL-OR-NOTHING TRADES, ON EVERY CHAIN (v7.2). A plain buy or sell
+    /// names no price: it takes what the curve gives when it executes. Across
+    /// chains that is minutes after the order became public on its source
+    /// chain, and anyone may deliver it — so it can be sandwiched inside ONE
+    /// hub-chain transaction (buy, deliver the victim's message, sell). These
+    /// three functions do exactly what `buyToken`, `buyTokenUsdc` and
+    /// `sellToken` do, and put the caller's minimum ON THE WIRE: the hub
+    /// enforces it where the price is, and under it the trade does not
+    /// happen at all — a buy's dollars come home whole, a sold bag is
+    /// delivered back. A fill cut down by FAIR GENESIS or by the end of the
+    /// curve is under the minimum too: all or nothing.
     ///
-    /// What counts as received is a BALANCE the caller holds when the call
-    /// returns: replica tokens for a buy; for a sell, the vault's dollar
-    /// token plus any oUSD claim (a short vault pays in claims), in
-    /// 18-decimal dollars. So a fill cut down by FAIR GENESIS, a buy bounced
-    /// in the launch block or by a paused hub, a delivery that had to be
-    /// parked and a sell the curve refused all fall under the minimum and
-    /// revert — the caller keeps what they came with.
+    /// WHERE THE HUB ANSWERS IN THIS VERY TRANSACTION (the hub chain's own
+    /// gateway: the messenger is a loopback, so the DELIVER or the PAYOUT has
+    /// ALREADY been executed when `messenger.send` returns) the call does
+    /// more, as it did in v7.1: it looks at what the caller actually holds
+    /// when it returns and REVERTS THE WHOLE TRANSACTION ("GW: min out") if
+    /// that rose by less than the minimum. What counts is a BALANCE: replica
+    /// tokens for a buy; for a sell, the vault's dollar token plus any oUSD
+    /// claim (a short vault pays in claims), in 18-decimal dollars. So a
+    /// trade the hub refused, a buy bounced in the launch block or by a
+    /// paused hub, and a delivery that had to be parked all revert — the
+    /// caller keeps what they came with, and a wallet sees it in simulation.
     ///
-    /// NOT FOR A REMOTE CHAIN: there the reply lands minutes later, so the
-    /// check can never pass and the call always reverts (atomically — the
-    /// LayerZero send unwinds with it). Cross-chain trades stay unprotected
-    /// until the wire carries a minimum. A minimum of 0 is refused: it would
-    /// make these the unprotected functions under another name.
+    /// ON A REMOTE CHAIN the reply lands minutes later, so there is nothing
+    /// to look at: the call returns once the message is sent, and the hub's
+    /// refusal — not a revert here — is what protects the trade. The caller
+    /// then gets their dollars (or their bag) back by the reply instead of
+    /// never having parted with them; the messaging fee is spent.
+    ///
+    /// A minimum of 0 is refused: it would make these the unprotected
+    /// functions under another name.
 
-    /// Buy with USDC (6 decimals), or revert unless at least `minTokensOut`
-    /// replica tokens reach the caller in this transaction.
+    /// Buy with USDC (6 decimals) for at least `minTokensOut` tokens, or not
+    /// at all.
     function buyTokenUsdcMin(address hubToken, uint256 usdcIn, uint256 minTokensOut)
         external
         payable
@@ -455,8 +472,8 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     {
         require(usdcIn > 0, "GW: zero");
         (SpawnToken rep, uint256 bag) = _bagBefore(hubToken, minTokensOut);
-        _sendBuy(hubToken, usd.depositFor(msg.sender, usdcIn));
-        require(rep.balanceOf(msg.sender) >= bag + minTokensOut, "GW: min out");
+        _sendBuy(hubToken, usd.depositFor(msg.sender, usdcIn), minTokensOut);
+        _requireBag(rep, bag, minTokensOut);
     }
 
     /// Buy with oUSD already held (18 decimals), same guarantee.
@@ -470,22 +487,41 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         require(usdIn >= MIN_AMOUNT, "GW: dust");
         (SpawnToken rep, uint256 bag) = _bagBefore(hubToken, minTokensOut);
         usd.bridgeBurn(msg.sender, usdIn);
-        _sendBuy(hubToken, usdIn);
-        require(rep.balanceOf(msg.sender) >= bag + minTokensOut, "GW: min out");
+        _sendBuy(hubToken, usdIn, minTokensOut);
+        _requireBag(rep, bag, minTokensOut);
     }
 
-    /// Sell, or revert unless at least `minDollarsOut` (18-decimal dollars:
-    /// dollar tokens × SCALE, plus oUSD claims) reach the caller in this
-    /// transaction. Like every exit, it ignores the pause.
+    /// Sell for at least `minDollarsOut` — what the seller is PAID, net of
+    /// the fee, in 18-decimal dollars (dollar tokens × SCALE, plus oUSD
+    /// claims) — or not at all. Like every exit, it ignores the pause.
     function sellTokenMin(address hubToken, uint256 tokens, uint256 minDollarsOut)
         external
         payable
         nonReentrant
     {
         require(minDollarsOut > 0, "GW: zero min");
-        uint256 before = _dollarsOf(msg.sender);
-        _sell(hubToken, tokens);
-        require(_dollarsOf(msg.sender) >= before + minDollarsOut, "GW: min out");
+        bool answersNow = _hubAnswersNow();
+        uint256 before = answersNow ? _dollarsOf(msg.sender) : 0;
+        _sell(hubToken, tokens, minDollarsOut);
+        if (answersNow) _requireRise(before, _dollarsOf(msg.sender), minDollarsOut);
+    }
+
+    /// True where the hub's reply has already been executed when
+    /// `messenger.send` returns: the hub lives on this chain.
+    function _hubAnswersNow() internal view returns (bool) {
+        return messenger.isLocal(HUB_CHAIN);
+    }
+
+    /// Where the hub has already answered: the caller's bag must have grown
+    /// by `min`, or the whole transaction is undone.
+    function _requireBag(SpawnToken rep, uint256 bag, uint256 min) internal view {
+        if (_hubAnswersNow()) _requireRise(bag, rep.balanceOf(msg.sender), min);
+    }
+
+    /// `"GW: min out"` unless `afterwards` is at least `before + min` —
+    /// written so that no minimum, however large, is an overflow instead.
+    function _requireRise(uint256 before, uint256 afterwards, uint256 min) internal pure {
+        require(afterwards >= before && afterwards - before >= min, "GW: min out");
     }
 
     /// The caller's bag of `hubToken` on this chain before a protected buy.
@@ -528,15 +564,16 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
 
     /// The native fee each action requires right now — call before signing
     /// and attach the result as msg.value. BUY, SELL, CLAIM and PULL
-    /// payloads have a fixed size, so a placeholder payload quotes exactly;
+    /// payloads have a fixed size (with or without a minimum: the word is
+    /// always there), so a placeholder payload quotes exactly;
     /// a SPAWN's size depends on its strings, so its quote takes them.
 
     function quoteBuy() external view returns (uint256) {
-        return _quote(abi.encode(OP_BUY, abi.encode(bytes32(0), bytes32(0), uint256(0))), tradeLegs);
+        return _quote(abi.encode(OP_BUY, abi.encode(bytes32(0), bytes32(0), uint256(0), uint256(0))), tradeLegs);
     }
 
     function quoteSell() external view returns (uint256) {
-        return _quote(abi.encode(OP_SELL, abi.encode(bytes32(0), bytes32(0), uint256(0))), tradeLegs);
+        return _quote(abi.encode(OP_SELL, abi.encode(bytes32(0), bytes32(0), uint256(0), uint256(0))), tradeLegs);
     }
 
     function quoteClaim() external view returns (uint256) {

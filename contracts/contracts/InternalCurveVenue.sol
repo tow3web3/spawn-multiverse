@@ -49,7 +49,7 @@ contract InternalCurveVenue is ICurveVenue {
         _curves[token] = Curve(V_BASE_0, V_TOKENS_0, 0, false);
     }
 
-    function execBuy(address token, uint256 usdIn)
+    function execBuy(address token, uint256 usdIn, uint256 minOut)
         external
         onlyPad
         returns (uint256 out, uint256 spend, bool ascendedNow)
@@ -72,6 +72,9 @@ contract InternalCurveVenue is ICurveVenue {
                 if (spend > usdIn) spend = usdIn;
             }
             require(out > 0, "VENUE: dust");
+            // all or nothing: a fill under the minimum — the cap just above
+            // included — is no fill
+            require(out >= minOut, "VENUE: min out");
             c.vBase += spend;
             c.vTokens -= out;
             c.sold += out;
@@ -84,12 +87,13 @@ contract InternalCurveVenue is ICurveVenue {
             }
         } else {
             require(out > 0, "VENUE: dust");
+            require(out >= minOut, "VENUE: min out");
             c.vBase += spend;
             c.vTokens -= out;
         }
     }
 
-    function execSell(address token, uint256 tokensIn) external onlyPad returns (uint256 usdOut) {
+    function execSell(address token, uint256 tokensIn, uint256 minOut) external onlyPad returns (uint256 usdOut) {
         Curve storage c = _curves[token];
         require(c.vTokens > 0, "VENUE: unknown token");
         require(tokensIn > 0, "VENUE: zero sell");
@@ -97,6 +101,7 @@ contract InternalCurveVenue is ICurveVenue {
         uint256 k = c.vBase * c.vTokens;
         usdOut = c.vBase - _ceilDiv(k, c.vTokens + tokensIn);
         require(usdOut > 0, "VENUE: dust");
+        require(usdOut >= minOut, "VENUE: min out");
         c.vBase -= usdOut;
         c.vTokens += tokensIn;
         if (!c.ascended) {

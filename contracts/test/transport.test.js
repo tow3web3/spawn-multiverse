@@ -26,7 +26,7 @@ const opts = (gas, value = 0n) =>
 
 /** The protocol opcode riding a queued packet. */
 function opOf(pkt) {
-  const [, , payload] = coder.decode(['bytes32', 'bytes32', 'bytes'], pkt.message)
+  const [, , payload] = coder.decode(['bytes32', 'bytes32', 'bytes', 'uint256'], pkt.message)
   return Number(coder.decode(['uint8', 'bytes'], payload)[0])
 }
 
@@ -610,7 +610,7 @@ describe('Transport economics (protocol v7)', () => {
     it('the loopback vouches for exactly what a peered adapter would: a registered sender and its own label', async () => {
       const payload = coder.encode(
         ['uint8', 'bytes'],
-        [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [ethers.ZeroHash, b32(user.address), E(100)])],
+        [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [ethers.ZeroHash, b32(user.address), E(100), 0n])],
       )
       // not registered: cannot send at all
       await expect(w.hubMessenger.connect(stranger).send(0, b32(w.pad.target), payload, 0)).to.be.revertedWith(

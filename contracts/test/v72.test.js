@@ -1,277 +1,10 @@
 const { expect } = require('chai')
 const { ethers, artifacts } = require('hardhat')
-const { time, impersonateAccount, setBalance, takeSnapshot } = require('@nomicfoundation/hardhat-network-helpers')
-const { deployWorld, deployWorldAsync, deployDistributor, setV72Legs, fundUsdc, fundUsd, backing, U, GAS_TO_SPOKE, MOCK_GAS_TO_HUB } = require('../scripts/lib-deploy')
-
-const E = (n) => ethers.parseEther(String(n))
-const b32 = (a) => ethers.zeroPadValue(a, 32)
-const coder = ethers.AbiCoder.defaultAbiCoder()
-const bal = (who) => ethers.provider.getBalance(who.target ?? who.address ?? who)
-const pastGenesis = () => time.increase(601)
-const BILLION = E(1_000_000_000)
-
-/** What the mock endpoint charges for one message, to any chain. */
-const FEE = E('0.001')
-/** A cheap chain's reply unit: one reply to it, plus a margin. */
-const UNIT = E('0.0012')
-const EID = (label) => 30_000 + label
-/** A 32-byte identity that is not an address (a Solana key, say). */
-const WIDE = '0x' + 'ab'.repeat(32)
-
-/* Wire payloads, as the pad and the gateways build them. */
-const op = (code, types, values) => coder.encode(['uint8', 'bytes'], [code, coder.encode(types, values)])
-const syncOf = (token, name, symbol) => op(10, ['bytes32', 'string', 'string'], [b32(token), name, symbol])
-const moveOf = (from, to, amount, dstChain) => op(7, ['bytes32', 'bytes32', 'uint256', 'uint32'], [from, to, amount, dstChain])
-/** A queued packet's protocol opcode and its inner tuple. */
-function unpack(pkt) {
-  const [, , payload] = coder.decode(['bytes32', 'bytes32', 'bytes'], pkt.message)
-  const [code, data] = coder.decode(['uint8', 'bytes'], payload)
-  return { op: Number(code), data }
-}
-
-/** Runs `fn`, returns what it returns, and puts the chain back as it was. */
-async function peek(fn) {
-  const snap = await takeSnapshot()
-  try {
-    return await fn()
-  } finally {
-    await snap.restore()
-  }
-}
-
-async function as(address) {
-  await impersonateAccount(address)
-  await setBalance(address, E(10))
-  return ethers.getSigner(address)
-}
-
-/** Label 3 is the hub chain's own gateway: it reaches the pad by loopback. */
-const HOME = 3
-const LAYOUT = [
-  { label: 3, id: 'base', dollar: 'USDC' },
-  { label: 6, id: 'optimism', dollar: 'USDC' },
-  { label: 5, id: 'arbitrum', dollar: 'USDC' },
-  { label: 2, id: 'ethereum', dollar: 'USDC' },
-  { label: 4, id: 'bnb', dollar: 'USDT' },
-]
-
-/**
- * THE MIXED UNIVERSE (v7.2) — one hub, five user-facing EVM chains, two
- * dollars, in the mainnet topology and with the mainnet fee setting (nobody
- * is sponsored but the pad: every user call attaches its quoted fee):
- *
- *   label 3  base      the hub chain's own gateway (loopback)   USDC   OmniUSD
- *   label 6  optimism  remote                                   USDC   OmniUSD
- *   label 5  arbitrum  remote                                   USDC   OmniUSD
- *   label 2  ethereum  remote — the dear leg                    USDC   OmniUSD
- *   label 4  bnb       remote                                   USDT   OmniUSDLocal (18 decimals, SCALE 1, no CCTP)
- *
- * all over the mock endpoint, which charges FEE per message (plus what a
- * test adds for one destination). Every remote chain prepays UNIT per reply
- * leg; the hub's ceiling for a request toward a remote chain is that UNIT.
- * `homePool: false` leaves the hub chain's gateway without its holder pool,
- * so that its SYNC fails at launch; `homeDollar` swaps the hub chain's USDC
- * for a test token (one with a transfer hook).
- */
-async function deployMixed({ homePool = true, homeDollar = 'MockUSDC' } = {}) {
-  const [funder] = await ethers.getSigners()
-  const endpoint = await ethers.deployContract('MockLZEndpointV2', [FEE])
-  const hubMessenger = await ethers.deployContract('LayerZeroOmniMessenger', [endpoint.target, EID(0)])
-  await (await endpoint.registerAdapter(hubMessenger.target, EID(0))).wait()
-  // the hub tank's float
-  await (await funder.sendTransaction({ to: hubMessenger.target, value: E(1) })).wait()
-
-  const hubUsd = await ethers.deployContract('OmniUSD', [0, ethers.ZeroAddress, ethers.ZeroAddress])
-  const pad = await ethers.deployContract('SpawnPad', [hubMessenger.target, hubUsd.target])
-  const venue = await ethers.deployContract('InternalCurveVenue', [pad.target])
-  await (await pad.setVenue(venue.target)).wait()
-  await (await hubUsd.setAgent(pad.target)).wait()
-  await (await hubMessenger.register(pad.target, 0)).wait()
-  await (await hubMessenger.setSponsored(pad.target, true)).wait()
-  await (await hubMessenger.setLocal(0, true)).wait()
-  await (await hubMessenger.setLocal(HOME, true)).wait()
-  // what a user of the hub chain's gateway prepays per leg the hub must send for them
-  await (await hubMessenger.setDestination(0, 0, UNIT)).wait()
-
-  const labels = LAYOUT.map((c) => c.label)
-  const remotes = labels.filter((l) => l !== HOME).length
-  const chains = []
-  for (const c of LAYOUT) {
-    const local = c.label === HOME
-    let messenger = hubMessenger
-    if (!local) {
-      // a spoke adapter with an EMPTY tank: nothing here is paid by anyone but the user
-      messenger = await ethers.deployContract('LayerZeroOmniMessenger', [endpoint.target, EID(c.label)])
-      await (await endpoint.registerAdapter(messenger.target, EID(c.label))).wait()
-    }
-    let dollar, usd, decimals
-    if (c.dollar === 'USDT') {
-      decimals = 18
-      dollar = await ethers.deployContract('MockDollar', ['Tether USD', 'USDT', decimals])
-      usd = await ethers.deployContract('OmniUSDLocal', [c.label, dollar.target])
-    } else {
-      decimals = 6
-      // (`homeDollar`: the hub chain's dollar as a token with a transfer hook — tests only)
-      dollar =
-        c.label === HOME && homeDollar !== 'MockUSDC'
-          ? await ethers.deployContract(homeDollar, [decimals])
-          : await ethers.deployContract('MockUSDC')
-      const cctp = await ethers.deployContract('MockTokenMessenger')
-      usd = await ethers.deployContract('OmniUSD', [c.label, dollar.target, cctp.target])
-    }
-    const T = (n) => ethers.parseUnits(String(n), decimals)
-    await (await usd.setDepositCap(T(1_000_000_000))).wait()
-    const gateway = await ethers.deployContract('SpawnGateway', [messenger.target, usd.target, c.label, pad.target])
-    await (await usd.setAgent(gateway.target)).wait()
-    await (await messenger.register(gateway.target, c.label)).wait()
-    if (!local) {
-      await (await messenger.setRoute(0, EID(0), b32(hubMessenger.target))).wait()
-      await (await hubMessenger.setRoute(c.label, EID(c.label), b32(messenger.target))).wait()
-      await (await messenger.setDestination(0, MOCK_GAS_TO_HUB, UNIT)).wait()
-      await (await hubMessenger.setDestination(c.label, GAS_TO_SPOKE, 0)).wait()
-    }
-    const chain = { ...c, local, dollar, usd, gateway, messenger, decimals, T, SCALE: await usd.SCALE() }
-    chain.wirePool = async () => {
-      chain.dist = await deployDistributor(usd, gateway)
-    }
-    if (!local || homePool) await chain.wirePool()
-    await (await pad.setGateway(c.label, b32(gateway.target))).wait()
-    if (local) await (await pad.setAutoDrop(c.label, true)).wait()
-    await (await gateway.setLegs(local ? 0 : 1, remotes)).wait()
-    // v7.2: an open prepays one leg (none at home), a move one leg to any other chain;
-    // on the hub, a request toward a remote chain may cost up to what it prepaid
-    await setV72Legs(gateway, { local, labels, self: c.label })
-    if (!local) await (await pad.setRequestCap(c.label, UNIT)).wait()
-    chains.push(chain)
-  }
-
-  const w = { endpoint, hubMessenger, hubUsd, pad, venue, chains, labels }
-  w.at = (label) => chains.find((c) => c.label === label)
-  w.tank = () => bal(hubMessenger)
-  w.deliverAll = async () => {
-    while ((await endpoint.pending()) > 0n) await (await endpoint.deliverAll(32)).wait()
-  }
-  /** Gives `who` `dollars` of `c`'s dollar token, approved to its vault. */
-  w.fund = async (c, who, dollars) => {
-    await (await c.dollar.mint(who.address, c.T(dollars))).wait()
-    await (await c.dollar.connect(who).approve(c.usd.target, ethers.MaxUint256)).wait()
-  }
-  /** Leaves `who` holding `dollars` of oUSD on `c`, backed — the way a claim
-   * comes to exist: the gateway took the dollars in, their value came back
-   * as oUSD. (The USDT vault has no `wrap`; this works on both.) */
-  w.claim = async (c, who, dollars) => {
-    await w.fund(c, who, dollars)
-    const agent = await as(c.gateway.target)
-    await (await c.usd.connect(agent).depositFor(who.address, c.T(dollars))).wait()
-    await (await c.usd.connect(agent).bridgeMint(who.address, E(dollars))).wait()
-  }
-  /** Everything `who` holds in `c`'s dollars, in oUSD wei: tokens + claims. */
-  w.worth = async (c, who) => (await c.dollar.balanceOf(who.address)) * c.SCALE + (await c.usd.balanceOf(who.address))
-  /** Both sides of the GLOBAL backing invariant: every vault's dollars at
-   * that vault's SCALE, and oUSD supply over every instance, ledger included. */
-  w.backing = async () => {
-    let held = 0n
-    let supply = await hubUsd.totalSupply()
-    for (const c of chains) {
-      held += (await c.dollar.balanceOf(c.usd.target)) * c.SCALE
-      supply += await c.usd.totalSupply()
-    }
-    return { held, supply }
-  }
-  w.tokens = async () => {
-    const n = Number(await pad.tokensLength())
-    const out = []
-    for (let i = 0; i < n; i++) out.push(await pad.allTokens(i))
-    return out
-  }
-  w.lastToken = async () => pad.allTokens((await pad.tokensLength()) - 1n)
-  w.replica = async (c, token) => ethers.getContractAt('SpawnToken', await c.gateway.replicaOf(token))
-  /** The labels that hold a replica of `token`, sorted. */
-  w.replicated = async (token) => {
-    const have = []
-    for (const c of chains) if ((await c.gateway.replicaOf(token)) !== ethers.ZeroAddress) have.push(c.label)
-    return have.sort((a, b) => a - b)
-  }
-  /** What must hold whenever nothing is in flight. `parked`: tokens the hub
-   * delivered that wait in a gateway for their replica. */
-  w.check = async ({ parked = 0n } = {}) => {
-    expect(await endpoint.pending(), 'messages in flight').to.equal(0n)
-    const b = await w.backing()
-    expect(b.held, 'Σ vault dollars × SCALE == Σ oUSD supply').to.equal(b.supply)
-    for (const t of await w.tokens()) {
-      let total = await (await ethers.getContractAt('SpawnToken', t)).totalSupply()
-      for (const c of chains) {
-        const rep = await c.gateway.replicaOf(t)
-        const there = rep === ethers.ZeroAddress ? 0n : await (await ethers.getContractAt('SpawnToken', rep)).totalSupply()
-        // S2: the hub's ledger of where the supply lives is what the chain holds
-        if (parked === 0n) expect(await pad.supplyByChain(t, c.label), `supplyByChain ${c.id}`).to.equal(there)
-        total += there
-      }
-      expect(total + parked, 'token supply').to.equal(BILLION - (await pad.feesOf(t)).burnedTokens)
-    }
-  }
-  /** One step of a scenario: the transaction, every message it causes, then
-   * the invariants — and the hub tank, which a prepaid step never lowers. */
-  w.step = async (send, { tankMayFall = false, parked = 0n } = {}) => {
-    const tank = await w.tank()
-    const rc = await (await send()).wait()
-    await w.deliverAll()
-    await w.check({ parked })
-    if (!tankMayFall) expect(await w.tank(), 'hub tank').to.be.gte(tank)
-    return rc
-  }
-  /* user actions, each with its quoted fee attached */
-  w.spawn = async (c, who, { name = 'GLOOP', symbol = 'GLP', meta = '{}', devBuy = 0, mode = 0 } = {}) =>
-    c.gateway.connect(who).spawnTokenUsdc(name, symbol, meta, c.T(devBuy), mode, {
-      value: await c.gateway.quoteSpawn(name, symbol, meta, devBuy > 0),
-    })
-  w.buy = async (c, who, token, dollars) =>
-    c.gateway.connect(who).buyTokenUsdc(token, c.T(dollars), { value: await c.gateway.quoteBuy() })
-  w.sell = async (c, who, token, tokens) =>
-    c.gateway.connect(who).sellToken(token, tokens, { value: await c.gateway.quoteSell() })
-  w.open = async (c, who, token) => c.gateway.connect(who).openToken(token, { value: await c.gateway.quoteOpen() })
-  w.move = async (c, who, dst, to, amount) =>
-    c.gateway.connect(who).moveClaim(dst, to, amount, { value: await c.gateway.quoteMove(dst) })
-  /** What the hub's adapter asks the pad for `token`'s SYNC to `label`. */
-  w.syncQuote = async (token, label) => {
-    const m = await pad.metas(token)
-    return hubMessenger
-      .connect(ethers.provider)
-      .quote(label, await pad.gateways(label), syncOf(token, m.name, m.symbol), 0, { from: pad.target })
-  }
-  return w
-}
-
-/**
- * Makes Ethereum the dear leg it is: a message to it costs `times` what a
- * message to an L2 does. Its own users prepay their replies at that price
- * (+20%), a claim moved there prepays it in the sender's cheap units, and
- * the hub's ceiling for a request toward it follows.
- */
-async function dearEthereum(w, times = 10n) {
-  const eth = w.at(2)
-  await (await w.endpoint.setDstFee(EID(2), FEE * (times - 1n))).wait()
-  const l1 = FEE * times
-  const unit = (l1 * 12n) / 10n
-  await (await eth.messenger.setDestination(0, MOCK_GAS_TO_HUB, unit)).wait()
-  await (await w.pad.setRequestCap(2, unit)).wait()
-  for (const c of w.chains) if (c.label !== 2) await (await c.gateway.setMoveLegs(2, unit / UNIT)).wait()
-  return { l1, unit }
-}
-
-/** The parsed `name` events of `contract` in a receipt. */
-function events(rc, contract, name) {
-  return rc.logs
-    .filter((l) => l.address === contract.target)
-    .map((l) => {
-      try {
-        return contract.interface.parseLog(l)
-      } catch {
-        return null
-      }
-    })
-    .filter((e) => e?.name === name)
-}
+const { deployWorld, deployWorldAsync, fundUsdc, fundUsd, backing, U, GAS_TO_SPOKE, MOCK_GAS_TO_HUB } = require('../scripts/lib-deploy')
+const {
+  E, b32, coder, bal, pastGenesis, FEE, UNIT, EID, WIDE, HOME,
+  op, syncOf, moveOf, unpack, peek, as, events, deployMixed, dearEthereum,
+} = require('./mixed-world')
 
 describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
   let admin, dev, alice, bob, carol, stranger, operator, guardian
@@ -439,7 +172,7 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
 
       // the ceiling is a price: the operator's, nobody else's
       await expect(w.pad.connect(stranger).setSyncCap(2, 1n)).to.be.revertedWith('ROLES: not operator')
-      await expect(w.pad.connect(stranger).setRequestCap(2, 1n)).to.be.revertedWith('ROLES: not operator')
+      await expect(w.pad.connect(stranger).setRequestCap(2, 10, 1n)).to.be.revertedWith('ROLES: not operator')
       await (await w.pad.setOperator(operator.address)).wait()
       await (await w.pad.setGuardian(guardian.address)).wait()
       await expect(w.pad.connect(guardian).setSyncCap(2, 1n)).to.be.revertedWith('ROLES: not operator')
@@ -603,7 +336,7 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
 
       // with NO launch ceiling on a chain nothing is priced, the launcher's chain included: as before v7.2
       await (await w.pad.setSyncCap(2, 0)).wait()
-      await (await w.pad.setRequestCap(2, 0)).wait()
+      await (await w.pad.setRequestCap(2, 10, 0)).wait()
       await w.step(() => w.spawn(eth, dev, { name: 'PLAIN', symbol: 'PLN' }), { tankMayFall: true })
       expect(await w.replicated(await w.lastToken())).to.deep.equal([2, 3, 4, 5, 6])
     })
@@ -740,10 +473,12 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       await (await w.messenger.register(arb.gateway.target, 5)).wait()
       const flat = E('0.002')
       await (await w.messenger.setFlatFee(flat)).wait()
-      await expect(w.pad.connect(stranger).resync(token, 5, { value: flat - 1n })).to.be.revertedWith('PAD: fee')
-      await (await w.pad.connect(stranger).resync(token, 5, { value: flat })).wait()
+      // (the simulated messenger prices a leg like a message, and a SYNC carries one — the native
+      // value a chain may need to create the replica: twice the flat fee)
+      await expect(w.pad.connect(stranger).resync(token, 5, { value: 2n * flat - 1n })).to.be.revertedWith('PAD: fee')
+      await (await w.pad.connect(stranger).resync(token, 5, { value: 2n * flat })).wait()
       expect(await arb.gateway.replicaOf(token)).to.not.equal(ethers.ZeroAddress)
-      expect(await bal(w.messenger)).to.equal(flat)
+      expect(await bal(w.messenger)).to.equal(2n * flat)
       await (await w.pad.resync(token, 5)).wait() // the operator (here the admin): no value
     })
   })
@@ -968,7 +703,7 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       // the gateway refuses a destination nobody priced — so this takes an operator's mistake
       await expect(bnb.gateway.connect(alice).moveClaim(9, b32(alice.address), E(40), { value: E(1) })).to.be.revertedWith('GW: route closed')
       await (await bnb.gateway.setMoveLegs(9, 1)).wait()
-      await (await w.pad.setRequestCap(9, E(1))).wait()
+      await (await w.pad.setRequestCap(9, 12, E(1))).wait()
       const usdt = await bnb.dollar.balanceOf(alice.address)
       const r = await moved(w, bnb, 9, b32(alice.address), E(40))
       expect(r.forwarded).to.equal(false)
@@ -1008,9 +743,9 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
         ['no executor gas: the quote reverts', () => w.hubMessenger.setDestination(5, 0, 0), () => w.hubMessenger.setDestination(5, GAS_TO_SPOKE, 0)],
         ['the send reverts', () => w.endpoint.setSendBlocked(EID(5), true), () => w.endpoint.setSendBlocked(EID(5), false)],
         ['twice the price a move prepays', () => w.endpoint.setDstFee(EID(5), FEE), () => w.endpoint.setDstFee(EID(5), 0)],
-        ['a ceiling of nothing', () => w.pad.setRequestCap(5, 0), () => w.pad.setRequestCap(5, UNIT)],
+        ['a ceiling of nothing', () => w.pad.setRequestCap(5, 12, 0), () => w.pad.setRequestCap(5, 12, UNIT)],
         // (the ceiling is inclusive: at exactly the price the move goes — see the end of this test)
-        ['a ceiling one wei under the price', () => w.pad.setRequestCap(5, FEE - 1n), () => w.pad.setRequestCap(5, FEE)],
+        ['a ceiling one wei under the price', () => w.pad.setRequestCap(5, 12, FEE - 1n), () => w.pad.setRequestCap(5, 12, FEE)],
       ]
       for (const [what, breakIt, repair] of breaks) {
         await (await breakIt()).wait()
@@ -1146,7 +881,7 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       expect(await (await w.replica(base, token)).balanceOf(base.dollar.target)).to.be.gt(0n)
     })
 
-    it('a destination that is not an EVM chain takes a wide recipient as it is', async () => {
+    it('a destination that is not an EVM chain takes a wide recipient as it is — and refuses one shaped like an address', async () => {
       const { w, bnb } = await holder()
       // a gateway whose id is a 32-byte key (a Solana OApp store), reached over a route of its own
       const STORE = '0x' + 'c1'.repeat(32)
@@ -1154,7 +889,7 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       await (await w.hubMessenger.setRoute(1, EID(1), PEER)).wait()
       await (await w.hubMessenger.setDestination(1, 200_000, 0)).wait()
       await (await w.pad.setGateway(1, STORE)).wait()
-      await (await w.pad.setRequestCap(1, UNIT)).wait()
+      await (await w.pad.setRequestCap(1, 12, UNIT)).wait()
       await (await bnb.gateway.setMoveLegs(1, 1)).wait()
 
       await (await w.move(bnb, alice, 1, WIDE, E(15))).wait()
@@ -1165,15 +900,31 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       const pkt = await w.endpoint.peek(0)
       expect(pkt.dstEid).to.equal(BigInt(EID(1)))
       expect(pkt.receiver).to.equal(PEER)
-      const [src, dst] = coder.decode(['bytes32', 'bytes32', 'bytes'], pkt.message)
+      const [src, dst] = coder.decode(['bytes32', 'bytes32', 'bytes', 'uint256'], pkt.message)
       expect([src, dst]).to.deep.equal([b32(w.pad.target), STORE])
       expect(unpack(pkt)).to.deep.equal({ op: 12, data: coder.encode(['bytes32', 'uint256'], [WIDE, E(15)]) })
       // in flight to a chain this test has no program on: the two sides differ by exactly that
       const b = await w.backing()
       expect(b.held - b.supply).to.equal(E(15))
-      // an address-shaped recipient is forwarded there too: it is that chain's business what a key is
+      // The likeliest slip of someone moving a claim out of an EVM wallet: their own address, left-
+      // padded. A 32-byte chain would take it for a key — one nobody holds — and book the claim
+      // there for good. The shape of the recipient must match the shape of the chain: it comes home.
+      const worth = await w.worth(bnb, alice)
       await (await w.move(bnb, alice, 1, b32(alice.address), E(15))).wait()
-      await expect(w.endpoint.deliverAt(1)).to.emit(w.pad, 'Moved').withArgs(4, 1, b32(alice.address), b32(alice.address), E(15), true)
+      await expect(w.endpoint.deliverAt(1)).to.emit(w.pad, 'Moved').withArgs(4, 1, b32(alice.address), b32(alice.address), E(15), false)
+      expect(await w.endpoint.pending()).to.equal(2n) // the first PAYOUT (undeliverable here), and the way home
+      await (await w.endpoint.deliverAt(1)).wait()
+      expect(await w.worth(bnb, alice)).to.equal(worth)
+      // any 20-byte value is refused the same way, the smallest and the largest included
+      for (const narrow of [ethers.zeroPadValue('0x01', 32), ethers.zeroPadValue('0x' + 'ff'.repeat(20), 32)]) {
+        await (await w.move(bnb, alice, 1, narrow, E(5))).wait()
+        await expect(w.endpoint.deliverAt(1)).to.emit(w.pad, 'Moved').withArgs(4, 1, b32(alice.address), narrow, E(5), false)
+        await (await w.endpoint.deliverAt(1)).wait()
+      }
+      // …and the first key with anything above its 20 low bytes is a key
+      const barelyWide = '0x' + '00'.repeat(11) + '01' + '00'.repeat(20)
+      await (await w.move(bnb, alice, 1, barelyWide, E(5))).wait()
+      await expect(w.endpoint.deliverAt(1)).to.emit(w.pad, 'Moved').withArgs(4, 1, b32(alice.address), barelyWide, E(5), true)
     })
   })
 
@@ -1400,6 +1151,55 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       await gasOf('MOVE turned back (hub)')
       await w.deliverAll()
 
+      // REFUSED AND THEN ANSWERED. A leg that will not take the message after pricing it: the pad
+      // must still hold the floor (200,000) once the send has failed, then log the miss — or, for a
+      // move, send the claim home. The LEAST gas each such delivery lands with is what the executor
+      // gas of that kind of message has to cover (on a real endpoint: plus a real quote and a real
+      // send, which the mock undercharges and overcharges respectively).
+      /** The least gas the oldest queued packet can be delivered with. */
+      const least = async (label) => {
+        const lands = (gas) =>
+          peek(async () => {
+            try {
+              await (await w.endpoint.deliverAtWithGas(0, gas, { gasLimit: 15_000_000 })).wait()
+              return true
+            } catch {
+              return false
+            }
+          })
+        let lo = 20_000
+        let hi = 3_000_000
+        expect(await lands(hi), label).to.equal(true)
+        while (hi - lo > 200) {
+          const mid = Math.floor((lo + hi) / 2)
+          if (await lands(mid)) hi = mid
+          else lo = mid
+        }
+        used[`least gas: ${label}`] = BigInt(hi)
+        return BigInt(hi)
+      }
+      await w.step(() => w.spawn(base, dev, { name: 'ANOTHER', symbol: 'ANO' }))
+      const another = await w.lastToken()
+      await (await w.open(eth, alice, another)).wait()
+      const openAnswered = await least('OPEN answered (a quote, a SYNC sent)')
+      await (await w.endpoint.setSendBlocked(EID(2), true)).wait()
+      const openRefused = await least('OPEN refused (a quote, a send that fails, the floor)')
+      const refusal = await w.endpoint.deliverNext()
+      await expect(refusal).to.emit(w.pad, 'SyncFailed').withArgs(another, 2)
+      await (await w.endpoint.setSendBlocked(EID(2), false)).wait()
+
+      await (await w.move(bnb, alice, 6, b32(alice.address), E(10))).wait()
+      const moveForwarded = await least('MOVE forwarded (a quote, a PAYOUT sent)')
+      await (await w.endpoint.setSendBlocked(EID(6), true)).wait()
+      const moveHome = await least('MOVE refused and sent home (a quote, a send that fails, the floor, the send home)')
+      await expect(w.endpoint.deliverNext()).to.emit(w.pad, 'Moved').withArgs(4, 6, b32(alice.address), b32(alice.address), E(10), false)
+      await (await w.endpoint.setSendBlocked(EID(6), false)).wait()
+      await w.deliverAll()
+      // the floor is in force on the refused paths, and neither costs anywhere near a spawn
+      expect(openRefused).to.be.gt(200_000n)
+      expect(moveHome).to.be.gt(200_000n)
+      for (const g of [openAnswered, openRefused, moveForwarded, moveHome]) expect(g).to.be.lt(1_000_000n)
+
       expect(used['OPEN (hub)']).to.be.lt(1_500_000n)
       expect(used['MOVE to a remote chain (hub)']).to.be.lt(1_500_000n)
       expect(used['MOVE to the hub chain (hub)']).to.be.lt(1_500_000n)
@@ -1612,7 +1412,7 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       ]
       // …and exactly what v7.2 adds
       expect(
-        split(names(pad, 'function'), ['requestCap(uint32)', 'setRequestCap(uint32,uint256)', 'setSyncCap(uint32,uint256)', 'syncCap(uint32)']),
+        split(names(pad, 'function'), ['requestCap(uint32,uint8)', 'setRequestCap(uint32,uint8,uint256)', 'setSyncCap(uint32,uint256)', 'syncCap(uint32)']),
       ).to.deep.equal(PAD_V71)
       expect(
         split(names(gw, 'function'), [
@@ -1621,18 +1421,18 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
         ]),
       ).to.deep.equal(GW_V71)
       expect(
-        split(names(pad, 'event'), ['Moved(uint32,uint32,bytes32,bytes32,uint256,bool)', 'RequestCapSet(uint32,uint256)', 'SyncCapSet(uint32,uint256)']),
+        split(names(pad, 'event'), ['Moved(uint32,uint32,bytes32,bytes32,uint256,bool)', 'RequestCapSet(uint32,uint8,uint256)', 'SyncCapSet(uint32,uint256)']),
       ).to.have.length(21)
       expect(
         split(names(gw, 'event'), ['ClaimMoved(address,uint32,bytes32,uint256)', 'MoveLegsSet(uint32,uint16)', 'OpenLegsSet(uint8)']),
       ).to.have.length(13)
       // new
       expect(sig(pad, 'syncCap')).to.equal('function syncCap(uint32) view returns (uint256)')
-      expect(sig(pad, 'requestCap')).to.equal('function requestCap(uint32) view returns (uint256)')
+      expect(sig(pad, 'requestCap')).to.equal('function requestCap(uint32, uint8) view returns (uint256)')
       expect(sig(pad, 'setSyncCap')).to.equal('function setSyncCap(uint32 chain, uint256 cap)')
-      expect(sig(pad, 'setRequestCap')).to.equal('function setRequestCap(uint32 chain, uint256 cap)')
+      expect(sig(pad, 'setRequestCap')).to.equal('function setRequestCap(uint32 chain, uint8 op, uint256 cap)')
       expect(pad.getEvent('SyncCapSet').format('full')).to.equal('event SyncCapSet(uint32 indexed chain, uint256 cap)')
-      expect(pad.getEvent('RequestCapSet').format('full')).to.equal('event RequestCapSet(uint32 indexed chain, uint256 cap)')
+      expect(pad.getEvent('RequestCapSet').format('full')).to.equal('event RequestCapSet(uint32 indexed chain, uint8 indexed op, uint256 cap)')
       expect(pad.getEvent('Moved').format('full')).to.equal(
         'event Moved(uint32 indexed srcChain, uint32 indexed dstChain, bytes32 indexed from, bytes32 to, uint256 amount, bool forwarded)',
       )
