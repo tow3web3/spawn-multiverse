@@ -43,10 +43,22 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// for the failure to count as the leg's refusal rather than as
     /// starvation (see `_notStarved`). A starved call leaves 1/64 of what it
     /// was given, and each frame between here and the one that ran dry
-    /// hands back another 1/64 of its own: under this floor for any send
-    /// that needs less than ~6.3M gas divided by its call depth (about 1M
-    /// through a real LayerZero send, which needs a quarter of that).
-    uint256 internal constant SYNC_GAS_FLOOR = 100_000;
+    /// hands back another 1/64 of its own: what is left behind is about
+    /// depth/64 of what the call needed.
+    ///
+    /// MEASURED on forks of the five chains, through the real EndpointV2
+    /// (829 deliveries of a worst-case spawn traced, 485 of them starving a
+    /// send or a quote): a LayerZero send costs 0.21–0.28M gas and a quote
+    /// 0.12–0.23M, seven frames below the pad (adapter, endpoint, send
+    /// library, executor or DVN, fee library, price feed). The dearest
+    /// call under `try` is not one of those: it is the hub chain's OWN
+    /// replica SYNC, a loopback that deploys a contract — 0.77M, three
+    /// frames deep. The most a starved call was seen to leave is about
+    /// 34,300 gas. This floor is 5.8 times that, and about 6.5 times what a
+    /// starved LayerZero send leaves. It is a constant of an immutable
+    /// contract: no call the pad makes under `try` may ever need more gas
+    /// than this margin allows for (64 × 200,000 / depth).
+    uint256 internal constant SYNC_GAS_FLOOR = 200_000;
 
     /// FAIR GENESIS (v6) — the anti-snipe opening. For GENESIS_WINDOW seconds
     /// after spawn every buy pays FEE_BPS plus a snipe tax that starts at
@@ -139,14 +151,20 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// the spawn came FROM, the ceiling is the larger of the two.)
     mapping(uint32 => uint256) public syncCap;
     /// `requestCap` — a message someone ASKED for toward this chain and
-    /// prepaid themselves: the SYNC of an OP_OPEN, the PAYOUT an OP_MOVE
-    /// forwards. Always quoted, so 0 lets through only a leg that costs
-    /// nothing (the hub chain's own gateway): a remote chain is closed to
-    /// opens and to incoming moves until the operator prices it — at what
-    /// such a request prepays. It can sit far above `syncCap`: a dear chain
-    /// (an L1) is then left out of every launch and opened token by token,
-    /// by those who want it there and pay for it.
-    mapping(uint32 => uint256) public requestCap;
+    /// prepaid themselves, per KIND of message (chain label -> the op the
+    /// hub sends -> ceiling): `OP_SYNC_TOKEN` (10) for the SYNC of an
+    /// OP_OPEN, `OP_PAYOUT` (12) for the PAYOUT an OP_MOVE forwards. No
+    /// other key is ever read. Always quoted, so 0 lets through only a leg
+    /// that costs nothing (the hub chain's own gateway): a remote chain is
+    /// closed to opens, and to incoming moves, until the operator prices
+    /// each — at what such a request prepays. Per kind because the two do
+    /// not cost the same once the adapter buys executor gas per kind of
+    /// message (a replica deployment against a payout): one ceiling for
+    /// both would leave the cheaper one covered far above what it prepaid.
+    /// It can sit far above `syncCap`: a dear chain (an L1) is then left
+    /// out of every launch and opened token by token, by those who want it
+    /// there and pay for it.
+    mapping(uint32 => mapping(uint8 => uint256)) public requestCap;
 
     address[] public allTokens;
     mapping(address => Meta) public metas;
@@ -209,7 +227,7 @@ contract SpawnPad is IOmniReceiver, Roles {
     event GatewaySet(uint32 indexed chain, bytes32 gateway);
     event AutoDropSet(uint32 indexed chain, bool on);
     event SyncCapSet(uint32 indexed chain, uint256 cap);
-    event RequestCapSet(uint32 indexed chain, uint256 cap);
+    event RequestCapSet(uint32 indexed chain, uint8 indexed op, uint256 cap);
     /// A token's SYNC was not sent to `chain` — at spawn, or when that chain
     /// asked for it (OP_OPEN): the send failed, or its fee was above the
     /// chain's ceiling (`syncCap` at spawn, `requestCap` for an open). The
@@ -282,9 +300,9 @@ contract SpawnPad is IOmniReceiver, Roles {
         emit SyncCapSet(chain, cap);
     }
 
-    function setRequestCap(uint32 chain, uint256 cap) external onlyOperator {
-        requestCap[chain] = cap;
-        emit RequestCapSet(chain, cap);
+    function setRequestCap(uint32 chain, uint8 op, uint256 cap) external onlyOperator {
+        requestCap[chain][op] = cap;
+        emit RequestCapSet(chain, op, cap);
     }
 
     /* ----------------------- circuit breaker ----------------------- */
@@ -401,10 +419,18 @@ contract SpawnPad is IOmniReceiver, Roles {
         emit Refused(op, srcChain, token, actor, amount, reason);
     }
 
+    /// The one place `Trade` is emitted from, with the price the trade left
+    /// behind (three call sites: a buy, a sell, a buyback).
+    function _trade(address token, uint32 chain, bytes32 trader, bool isBuy, uint256 usd, uint256 tokens) internal {
+        emit Trade(token, chain, trader, isBuy, usd, tokens, venue.spotPrice(token), uint64(block.timestamp));
+    }
+
     /// A REPLY: a message that carries a user's value to a chain, paid out
-    /// of the tank its cause prepaid into (`returnLegs` is always 0 — see
-    /// FEES below). A reply is never skipped: if it cannot be sent, the
-    /// message that caused it reverts and stays retryable.
+    /// of the tank its cause prepaid into (`returnLegs` is 0 — see FEES
+    /// below: its recipient is someone who already acted on that chain,
+    /// so it has nothing to create there). A reply is never skipped: if it
+    /// cannot be sent, the message that caused it reverts and stays
+    /// retryable.
     function _reply(uint32 chain, uint8 op, bytes memory data) internal {
         messenger.send(chain, gateways[chain], abi.encode(op, data), 0);
     }
@@ -423,12 +449,14 @@ contract SpawnPad is IOmniReceiver, Roles {
         _reply(chain, OP_DELIVER, abi.encode(_b32(token), to, tokens, refund));
     }
 
-    /// FEES (v7): the pad never attaches value and never prepays a reply —
-    /// every `messenger.send` passes `returnLegs = 0`. Its messages ARE the
-    /// replies: the user who caused them prepaid them into the hub adapter's
-    /// tank, and the pad rides that tank as a sponsored sender. Since the
-    /// holder-fee fan-out became a user-paid pull, that is true of EVERY
-    /// remote message the pad sends.
+    /// FEES (v7): the pad never attaches value of its own (`resync` only
+    /// hands on its caller's) and never prepays a REPLY to its messages:
+    /// there is none. Its messages ARE the replies: the user who caused
+    /// them prepaid them into the hub adapter's tank, and the pad rides
+    /// that tank as a sponsored sender. Since the holder-fee fan-out became
+    /// a user-paid pull, that is true of EVERY remote message the pad
+    /// sends. A reply that carries a user's value home passes `returnLegs =
+    /// 0` (`_reply`); a message the pad is free to skip passes 1 (below).
     function onOmniMessage(uint32 srcChain, bytes32 srcSender, bytes calldata payload) external {
         require(msg.sender == address(messenger), "PAD: not messenger");
         // an UNSET gateway (bytes32(0)) is never a match: label 0 can have
@@ -446,8 +474,13 @@ contract SpawnPad is IOmniReceiver, Roles {
             ) = abi.decode(data, (bytes32, string, string, string, uint256, uint8));
             _spawn(srcChain, creator, name, symbol, metaURI, devBuyUsd, feeMode);
         } else if (op == OP_BUY || op == OP_SELL) {
-            // one tuple for both: (token, buyer, usdIn) / (token, seller, tokensIn)
-            (bytes32 tokenB, bytes32 actor, uint256 amount) = abi.decode(data, (bytes32, bytes32, uint256));
+            // one tuple for both: (token, buyer, usdIn, minTokensOut) /
+            // (token, seller, tokensIn, minUsdOut). THE MINIMUM RIDES THE
+            // WIRE (v7.2): 0 = none; under it the trade is refused whole.
+            (bytes32 tokenB, bytes32 actor, uint256 amount, uint256 minOut) = abi.decode(
+                data,
+                (bytes32, bytes32, uint256, uint256)
+            );
             (bool ok, address token) = _known(tokenB);
             if (!ok) {
                 _refuse(op, srcChain, tokenB, actor, amount, R_UNKNOWN_TOKEN);
@@ -455,9 +488,9 @@ contract SpawnPad is IOmniReceiver, Roles {
                 // unknown id names nothing a spoke could have burned to sell.)
                 if (op == OP_BUY) _sendHome(srcChain, actor, amount);
             } else if (op == OP_BUY) {
-                _buy(srcChain, token, actor, amount, false);
+                _buy(srcChain, token, actor, amount, minOut, false);
             } else {
-                _sell(srcChain, token, actor, amount);
+                _sell(srcChain, token, actor, amount, minOut);
             }
         } else if (op == OP_CLAIM) {
             (bytes32 tokenB, bytes32 claimer) = abi.decode(data, (bytes32, bytes32));
@@ -477,7 +510,7 @@ contract SpawnPad is IOmniReceiver, Roles {
                 // not exposure.
                 Meta storage m = metas[token];
                 bytes memory sync = _syncPayload(token, m.name, m.symbol);
-                if (_within(srcChain, sync, requestCap[srcChain]) && _trySend(srcChain, sync)) {
+                if (_within(srcChain, sync, requestCap[srcChain][OP_SYNC_TOKEN]) && _trySend(srcChain, sync)) {
                     emit Resynced(token, srcChain);
                 } else {
                     emit SyncFailed(token, srcChain);
@@ -539,13 +572,17 @@ contract SpawnPad is IOmniReceiver, Roles {
         for (uint256 i = 0; i < chainLabels.length; i++) {
             uint32 ch = chainLabels[i];
             uint256 cap = syncCap[ch];
-            if (ch == srcChain && cap != 0 && requestCap[ch] > cap) cap = requestCap[ch];
+            if (ch == srcChain && cap != 0) {
+                uint256 own = requestCap[ch][OP_SYNC_TOKEN];
+                if (own > cap) cap = own;
+            }
             if (!((cap == 0 || _within(ch, sync, cap)) && _trySend(ch, sync))) emit SyncFailed(address(token), ch);
         }
 
         // The dev buy is part of the spawn itself — the one disclosed FAIR
-        // GENESIS exemption (no block-0 rule, no tax, no cap).
-        if (devBuyUsd > 0) _buy(srcChain, address(token), creator, devBuyUsd, true);
+        // GENESIS exemption (no block-0 rule, no tax, no cap). It names no
+        // minimum: it is the first trade of a curve born one line above.
+        if (devBuyUsd > 0) _buy(srcChain, address(token), creator, devBuyUsd, 0, true);
     }
 
     /// MESSAGES THE PAD IS FREE TO SKIP — a token's SYNC (at spawn, or asked
@@ -565,10 +602,26 @@ contract SpawnPad is IOmniReceiver, Roles {
     ///    leaves plenty. Revert in the first case (the message is retried
     ///    with enough gas): otherwise whoever delivers a message could pick
     ///    the gas that skips a chain, or that turns a move back.
+    ///
+    /// ONE LEG OF NATIVE VALUE RIDES WITH THEM (`returnLegs = 1`, here and
+    /// in `resync`). These are the messages that make their destination
+    /// CREATE something for someone who may never have been there: a
+    /// replica, an account for the recipient of a moved claim. On an EVM
+    /// chain that costs the executor's gas and nothing else, and the hub
+    /// adapter's `returnUnit` for every EVM label is 0 — nothing is
+    /// attached, nothing changes. On a chain where an account is paid for
+    /// in the chain's own coin (Solana: rent), the adapter attaches that
+    /// chain's `returnUnit`, so the message arrives with what it costs
+    /// instead of drawing on a tank over there that nobody funds — and
+    /// that anyone could spend, from any chain, by launching or by moving a
+    /// micro-dollar to a fresh address. The quote includes the value: the
+    /// ceilings bound it and whoever caused the message prepaid it, like
+    /// the rest of the fee. A reply that carries a user's value home
+    /// (`_reply`) creates nothing new and passes 0.
 
     /// Sends `payload` to `ch`; false if the leg would not take it.
     function _trySend(uint32 ch, bytes memory payload) internal returns (bool sent) {
-        try messenger.send(ch, gateways[ch], payload, 0) {
+        try messenger.send(ch, gateways[ch], payload, 1) {
             sent = true;
         } catch {
             _notStarved();
@@ -578,7 +631,7 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// True if sending `payload` to `ch` costs the tank at most `cap` right
     /// now. A leg that costs nothing (a loopback) is within any ceiling.
     function _within(uint32 ch, bytes memory payload, uint256 cap) internal view returns (bool ok) {
-        try messenger.quote(ch, gateways[ch], payload, 0) returns (uint256 fee) {
+        try messenger.quote(ch, gateways[ch], payload, 1) returns (uint256 fee) {
             ok = fee <= cap;
         } catch {
             _notStarved();
@@ -599,19 +652,26 @@ contract SpawnPad is IOmniReceiver, Roles {
     ///
     /// The value goes back to (`srcChain`, `from`) instead — never into the
     /// void — when the destination has no gateway; when it names nobody;
-    /// when it is an EVM chain (a gateway id that fits an address) and `to`
-    /// is not an address, which an EVM gateway's PAYOUT handler would
-    /// revert on for good; when the forward leg costs more than the
-    /// destination's `requestCap` (what a mover prepays for it); or when
-    /// that leg will not take the message. The way home is a reply like
-    /// any other: it is never skipped.
+    /// when the recipient is not SHAPED like an account of the destination;
+    /// when the forward leg costs more than the destination's `requestCap`
+    /// (what a mover prepays for it); or when that leg will not take the
+    /// message. The way home is a reply like any other: it is never
+    /// skipped.
+    ///
+    /// THE SHAPE: a gateway id that fits an address is an EVM chain, and
+    /// its recipients are addresses (top 12 bytes zero); a wide gateway id
+    /// is a 32-byte chain, and its recipients are 32-byte keys. An EVM
+    /// gateway's PAYOUT handler reverts on a wide recipient, for good. A
+    /// 32-byte chain would accept a left-padded address without a murmur —
+    /// the likeliest slip of someone moving a claim out of an EVM wallet —
+    /// and book it for a key nobody holds, for good. Both come home.
     function _move(uint32 srcChain, bytes32 from, bytes32 to, uint256 amount, uint32 dstChain) internal {
         bytes32 gw = gateways[dstChain];
         bytes memory payout = abi.encode(OP_PAYOUT, abi.encode(to, amount));
         bool forwarded = gw != bytes32(0) &&
             to != bytes32(0) &&
-            (uint256(gw) >> 160 != 0 || uint256(to) >> 160 == 0) &&
-            _within(dstChain, payout, requestCap[dstChain]) &&
+            (uint256(gw) >> 160 != 0) == (uint256(to) >> 160 != 0) &&
+            _within(dstChain, payout, requestCap[dstChain][OP_PAYOUT]) &&
             _trySend(dstChain, payout);
         if (!forwarded) _sendHome(srcChain, from, amount);
         emit Moved(srcChain, dstChain, from, to, amount, forwarded);
@@ -647,9 +707,9 @@ contract SpawnPad is IOmniReceiver, Roles {
         require(m.spawnedAt != 0 && gw != bytes32(0), "PAD: unknown");
         bytes memory sync = _syncPayload(token, m.name, m.symbol);
         if (msg.sender != operator && msg.sender != admin) {
-            require(msg.value >= messenger.quote(chain, gw, sync, 0), "PAD: fee");
+            require(msg.value >= messenger.quote(chain, gw, sync, 1), "PAD: fee");
         }
-        messenger.send{value: msg.value}(chain, gw, sync, 0);
+        messenger.send{value: msg.value}(chain, gw, sync, 1);
         emit Resynced(token, chain);
     }
 
@@ -678,7 +738,16 @@ contract SpawnPad is IOmniReceiver, Roles {
         if (spendable > 0) genesisSpent[token][buyer] = spent + spendable;
     }
 
-    function _buy(uint32 srcChain, address token, bytes32 buyer, uint256 usdIn, bool genesisBuy) internal {
+    /// ALL OR NOTHING (v7.2). `minOut` is the least tokens the buyer will
+    /// take for `usdIn` (0 = any). The venue enforces it where the price is
+    /// and reverts under it — a fill cut down by FAIR GENESIS or by the end
+    /// of the curve included — and the catch below does what it does for any
+    /// refusal: the genesis accounting is undone and the WHOLE `usdIn` rides
+    /// home in the DELIVER. This is what a cross-chain buy has against
+    /// whoever delivers it between two trades of their own.
+    function _buy(uint32 srcChain, address token, bytes32 buyer, uint256 usdIn, uint256 minOut, bool genesisBuy)
+        internal
+    {
         uint256 spendable;
         uint256 snipeBps;
         if (paused) {
@@ -697,7 +766,7 @@ contract SpawnPad is IOmniReceiver, Roles {
         uint256 fee;
         if (spendable > 0) {
             uint256 feeIn = (spendable * feeRate) / 10_000;
-            try venue.execBuy(token, spendable - feeIn) returns (uint256 o, uint256 s, bool ascendedNow) {
+            try venue.execBuy(token, spendable - feeIn, minOut) returns (uint256 o, uint256 s, bool ascendedNow) {
                 out = o;
                 spend = s;
                 // If the curve capped the buy, the fee shrinks with it.
@@ -726,18 +795,35 @@ contract SpawnPad is IOmniReceiver, Roles {
             emit GenesisGuard(token, buyer, snipeBps, (fee * snipeBps) / feeRate, guarded);
         }
         if (spend + fee > 0) {
-            emit Trade(token, srcChain, buyer, true, spend + fee, out, venue.spotPrice(token), uint64(block.timestamp));
+            _trade(token, srcChain, buyer, true, spend + fee, out);
         }
         _accrueFee(token, fee);
     }
 
-    function _sell(uint32 srcChain, address token, bytes32 seller, uint256 tokensIn) internal {
+    /// `minNet` is the least the seller will be PAID — net of the fee, 18
+    /// decimals; 0 = any. The venue prices gross, so the minimum is turned
+    /// into the smallest gross whose net reaches it: with a 1% fee floored,
+    /// net(g) = g − ⌊g/100⌋, and the least g with net(g) ≥ n is
+    /// n + ⌊(n−1)/99⌋ — exact, so a seller who names the very amount the
+    /// sale would pay is served, and never paid a wei under what they named.
+    /// A minimum too large to convert cannot be met by any sale: it becomes
+    /// the largest number there is (never an overflow — a revert here would
+    /// strand the bag the spoke already burned).
+    function _sell(uint32 srcChain, address token, bytes32 seller, uint256 tokensIn, uint256 minNet) internal {
+        uint256 minGross = minNet;
+        if (minNet != 0) {
+            unchecked {
+                minGross += (minNet - 1) / (10_000 / FEE_BPS - 1);
+            }
+            if (minGross < minNet) minGross = type(uint256).max;
+        }
         uint256 usdOut;
-        try venue.execSell(token, tokensIn) returns (uint256 u) {
+        try venue.execSell(token, tokensIn, minGross) returns (uint256 u) {
             usdOut = u;
         } catch {
-            // the venue will not price it (dust): the spoke burned the bag,
-            // so it goes back the way a delivery does
+            // the venue will not price it (dust), or not at the seller's
+            // minimum: the spoke burned the bag, so it goes back the way a
+            // delivery does
             _refuse(OP_SELL, srcChain, _b32(token), seller, tokensIn, R_VENUE);
             _deliver(srcChain, token, seller, tokensIn, 0);
             return;
@@ -755,7 +841,7 @@ contract SpawnPad is IOmniReceiver, Roles {
         usd.bridgeBurn(address(this), net);
         _sendHome(srcChain, seller, net);
 
-        emit Trade(token, srcChain, seller, false, net, tokensIn, venue.spotPrice(token), uint64(block.timestamp));
+        _trade(token, srcChain, seller, false, net, tokensIn);
         _accrueFee(token, fee);
     }
 
@@ -781,14 +867,14 @@ contract SpawnPad is IOmniReceiver, Roles {
                 // global supply shrinks for every chain at once. If the
                 // venue refuses, the pot simply waits for the next fee.
                 uint256 pot = f.burnPot;
-                try venue.execBuy(token, pot) returns (uint256 out, uint256 spent, bool asc) {
+                try venue.execBuy(token, pot, 0) returns (uint256 out, uint256 spent, bool asc) {
                     f.burnPot = pot - spent;
                     f.burnedUsd += spent;
                     f.burnedTokens += out;
                     SpawnToken(token).bridgeBurn(address(this), out);
                     if (asc) emit Ascended(token, venue.curveOf(token).vBase, uint64(block.timestamp));
                     emit BuybackBurn(token, spent, out);
-                    emit Trade(token, HUB_CHAIN, _b32(address(this)), true, spent, out, venue.spotPrice(token), uint64(block.timestamp));
+                    _trade(token, HUB_CHAIN, _b32(address(this)), true, spent, out);
                 } catch {}
             }
         }

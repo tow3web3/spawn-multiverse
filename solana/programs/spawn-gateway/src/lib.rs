@@ -20,15 +20,21 @@ use oapp::{
 declare_id!("3mypQvfiLtRHQhWStYyQ6cUu6YC4hqUFBXcNNme3H95g");
 
 /// SPAWN! gateway, Solana leg (chain label 1) — a LayerZero V2 OApp that
-/// speaks protocol v7 to the hub exactly as an EVM SpawnGateway does:
+/// speaks protocol v7.2 to the hub exactly as an EVM SpawnGateway does:
 ///
 ///  - real USDC settlement: a program-owned vault takes USDC on buys and
 ///    pays it out on PAYOUT / refunds; what cannot be paid on the spot is a
 ///    redeemable claim, never a failed message;
 ///  - users pay for their messages and for the hub's replies (an executor
 ///    option forwards the reply budget into the hub adapter's tank);
-///  - the whole v7 wire (ops 1–5 out, 10–13 in), entry limits, parking of
-///    deliveries that beat their SYNC, roles and pause.
+///  - the whole v7.2 wire (ops 1–7 out, 10–13 in; a minimum on every
+///    trade; the reply budget in the envelope), entry limits, parking of
+///    deliveries that beat their SYNC, roles and pause;
+///  - a token opened from here when the hub left this chain out of its
+///    launch, a claim moved to another chain — and a claim moved HERE paid
+///    or booked for any 32-byte recipient;
+///  - the vault levelled with the EVM vaults over Circle CCTP, toward
+///    peers named once.
 ///
 /// What Solana changes, and why, is in solana/V7.md.
 #[program]
@@ -91,6 +97,26 @@ pub mod spawn_gateway {
         RecoverTank::apply(&mut ctx, lamports)
     }
 
+    pub fn set_receive_table(mut ctx: Context<SetReceiveTable>) -> Result<()> {
+        SetReceiveTable::apply(&mut ctx)
+    }
+
+    pub fn set_open_legs(mut ctx: Context<Govern>, legs: u8) -> Result<()> {
+        Govern::set_open_legs(&mut ctx, legs)
+    }
+
+    pub fn set_move_legs(mut ctx: Context<SetMoveLegs>, dst_chain: u32, legs: u16) -> Result<()> {
+        SetMoveLegs::apply(&mut ctx, dst_chain, legs)
+    }
+
+    pub fn set_cctp_peer(mut ctx: Context<SetCctpPeer>, label: u32, domain: u32, vault: [u8; 32]) -> Result<()> {
+        SetCctpPeer::apply(&mut ctx, label, domain, vault)
+    }
+
+    pub fn rebalance(mut ctx: Context<Rebalance>, label: u32, usdc: u64) -> Result<()> {
+        Rebalance::apply(&mut ctx, label, usdc)
+    }
+
     /* ----------------------------- hub → here --------------------------- */
 
     pub fn lz_receive<'info>(
@@ -149,6 +175,20 @@ pub mod spawn_gateway {
         params: TokenMsgParams,
     ) -> Result<()> {
         PullFees::apply(&mut ctx, &params)
+    }
+
+    pub fn open_token<'info>(
+        mut ctx: Context<'_, '_, 'info, 'info, OpenToken<'info>>,
+        params: TokenMsgParams,
+    ) -> Result<()> {
+        OpenToken::apply(&mut ctx, &params)
+    }
+
+    pub fn move_claim<'info>(
+        mut ctx: Context<'_, '_, 'info, 'info, MoveClaim<'info>>,
+        params: MoveClaimParams,
+    ) -> Result<()> {
+        MoveClaim::apply(&mut ctx, &params)
     }
 
     pub fn quote_send<'info>(

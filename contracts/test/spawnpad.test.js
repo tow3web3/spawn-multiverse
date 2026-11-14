@@ -179,8 +179,8 @@ describe('SPAWN! omnichain protocol', () => {
     expect(await world.venue.spotPrice(token)).to.equal(await world.pad.spotPrice(token))
 
     // nobody but the pad can touch price discovery directly
-    await expect(world.venue.connect(user).execBuy(token, E(100))).to.be.revertedWith('VENUE: not pad')
-    await expect(world.venue.connect(user).execSell(token, E(100))).to.be.revertedWith('VENUE: not pad')
+    await expect(world.venue.connect(user).execBuy(token, E(100), 0)).to.be.revertedWith('VENUE: not pad')
+    await expect(world.venue.connect(user).execSell(token, E(100), 0)).to.be.revertedWith('VENUE: not pad')
     await expect(world.venue.connect(user).openMarket(user.address)).to.be.revertedWith('VENUE: not pad')
   })
 
@@ -264,7 +264,7 @@ describe('SPAWN! omnichain protocol', () => {
     const token = await spawnVia(world.chains[0])
     const payload = ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint8', 'bytes'],
-      [2, ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'bytes32', 'uint256'], [b32(token), b32(user.address), E(100)])],
+      [2, ethers.AbiCoder.defaultAbiCoder().encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [b32(token), b32(user.address), E(100), 0n])],
     )
     await expect(world.pad.connect(user).onOmniMessage(1, b32(user.address), payload)).to.be.revertedWith(
       'PAD: not messenger',
@@ -298,7 +298,7 @@ describe('SPAWN! omnichain protocol', () => {
     const wideToken = ('0x01' + '00'.repeat(11) + token.slice(2)).toLowerCase()
     const badTokenBuy = coder.encode(
       ['uint8', 'bytes'],
-      [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [wideToken, b32(user.address), E(100)])],
+      [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [wideToken, b32(user.address), E(100), 0n])],
     )
     const worthBefore = await worth(src, user)
     await expect(world.pad.connect(msgr).onOmniMessage(label, srcId, badTokenBuy))
@@ -313,7 +313,7 @@ describe('SPAWN! omnichain protocol', () => {
     const wideBuyer = '0x11' + 'ab'.repeat(31)
     const wideBuy = coder.encode(
       ['uint8', 'bytes'],
-      [2, coder.encode(['bytes32', 'bytes32', 'uint256'], [b32(token), wideBuyer, E(100)])],
+      [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [b32(token), wideBuyer, E(100), 0n])],
     )
     await expect(world.pad.connect(msgr).onOmniMessage(label, srcId, wideBuy)).to.be.revertedWith(
       'GW: bad recipient',

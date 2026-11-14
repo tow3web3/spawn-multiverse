@@ -6,8 +6,9 @@ use anchor_spl::{
 };
 use oapp::endpoint::instructions::{QuoteParams, SendParams as EndpointSendParams};
 
-/// The spoke→hub send path: spawn / buy / sell / claim / pull, each one
-/// encoding a protocol payload and shipping it through the real endpoint.
+/// The spoke→hub send path: spawn / buy / sell / claim / pull — and, since
+/// v7.2, open / move — each one encoding a protocol payload and shipping it
+/// through the real endpoint.
 ///
 /// WHO PAYS (v7). The user who causes a message pays for it AND for the
 /// replies it triggers, exactly like an EVM gateway: every send carries one
@@ -16,7 +17,10 @@ use oapp::endpoint::instructions::{QuoteParams, SendParams as EndpointSendParams
 /// tank with the message. The program builds the option itself (the caller
 /// cannot shrink the reply budget), the real executor prices both, and the
 /// ULN debits the user's own lamports. On a `sponsored` store (testnets)
-/// the tank gives the user the fee back.
+/// the tank gives the user the fee back. The same budget is written in the
+/// envelope (v7.2): the hub adapter refuses a delivery that brings less,
+/// so nobody can land a message with nothing and leave its reply to the
+/// hub tank.
 ///
 /// remaining_accounts carry the ENDPOINT SEND LIST, resolved client-side
 /// exactly like the OFT example (the TS SDK's send account resolution). With
@@ -54,24 +58,28 @@ const IDX_WORKERS: usize = 18;
 const MIN_SEND_ACCOUNTS: usize = IDX_WORKERS + 4; // at least the executor quad
 
 /// The wire bytes of one message: the op payload inside the inter-transport
-/// envelope (v5) — this store as protocol sender, the hub pad as target.
-fn envelope(store: &Account<Store>, msg: &SpawnMsg) -> Vec<u8> {
+/// envelope — this store as protocol sender, the hub pad as target, and the
+/// reply budget the message must arrive with.
+fn envelope(store: &Account<Store>, msg: &SpawnMsg, value: u128) -> Vec<u8> {
     msg_codec::Envelope {
         src_sender: msg_codec::WireAddr(store.key().to_bytes()),
         dst_addr: msg_codec::WireAddr(store.hub_pad),
         payload: msg.encode(),
+        value: msg_codec::U256::from_u128(value),
     }
     .encode()
 }
 
-/// The executor options of a send that will cause `legs` hub replies.
-fn options_for(store: &Store, legs: u8) -> Result<Vec<u8>> {
+/// The executor options of a send that will cause `legs` hub replies, and
+/// the reply budget (hub-native wei) they carry — ONE number, written in
+/// the option and in the envelope alike.
+fn options_for(store: &Store, legs: u16) -> Result<(Vec<u8>, u128)> {
     require!(store.gas_to_hub > 0, GatewayError::NoSendOptions);
     let value = store
         .return_unit
         .checked_mul(legs as u128)
         .ok_or(GatewayError::AmountOverflow)?;
-    Ok(msg_codec::lz_receive_options(store.gas_to_hub, value))
+    Ok((msg_codec::lz_receive_options(store.gas_to_hub, value), value))
 }
 
 /// CPI-quotes the endpoint for `message` + `options`. The endpoint refuses
@@ -129,7 +137,7 @@ pub(crate) fn send_to_hub<'info>(
     system_program: &AccountInfo<'info>,
     rem: &[AccountInfo<'info>],
     msg: &SpawnMsg,
-    legs: u8,
+    legs: u16,
     max_native_fee: u64,
 ) -> Result<u64> {
     // Sends need the real endpoint — the LiteSVM sentinel cannot carry one.
@@ -137,8 +145,8 @@ pub(crate) fn send_to_hub<'info>(
     require!(rem.len() >= MIN_SEND_ACCOUNTS, GatewayError::BadSendAccounts);
     // the ULN debits the list's payer: it must be the user who signed
     require!(*rem[IDX_PAYER].key == *user.key && rem[IDX_PAYER].is_signer, GatewayError::BadFeePayer);
-    let message = envelope(store, msg);
-    let options = options_for(store, legs)?;
+    let (options, value) = options_for(store, legs)?;
+    let message = envelope(store, msg, value);
 
     let seeds: &[&[u8]] = &[STORE_SEED, &[store.bump]];
     let receipt = oapp::endpoint_cpi::send(
@@ -299,7 +307,7 @@ impl<'info> SpawnToken<'info> {
         // a spawn makes the hub SYNC every remote chain; a dev buy adds the
         // DELIVER that brings the creator's bag home
         let store = &ctx.accounts.store;
-        let legs = store.spawn_legs + if params.dev_buy_usdc > 0 { store.trade_legs } else { 0 };
+        let legs = store.spawn_legs as u16 + if params.dev_buy_usdc > 0 { store.trade_legs as u16 } else { 0 };
         send_to_hub(
             &ctx.accounts.store,
             &ctx.accounts.peer,
@@ -374,6 +382,11 @@ pub struct BuyTokenParams {
     /// USDC units (6 decimals); rides the wire ×1e12. One unit is exactly
     /// the EVM gateways' dust floor (1e12 wei).
     pub usdc_in: u64,
+    /// The least replica units (6 decimals) the buyer will take for it;
+    /// rides the wire ×1e12 (v7.2). The hub fills the buy for at least this
+    /// much or not at all — the dollars then come home whole. REQUIRED
+    /// (> 0): see `BuyToken::apply`.
+    pub min_tokens_out: u64,
     pub max_native_fee: u64,
 }
 
@@ -384,6 +397,13 @@ impl<'info> BuyToken<'info> {
     ) -> Result<()> {
         require!(!ctx.accounts.store.paused, GatewayError::Paused);
         require!(params.usdc_in > 0, GatewayError::ZeroAmount);
+        // A MINIMUM, ALWAYS (v7.2). From here every trade is a cross-chain
+        // one: it executes minutes after it became public, and anyone may
+        // deliver it — between a buy and a sell of their own. There is no
+        // synchronous path on this chain where an unprotected trade would
+        // be safe, so there is no unprotected entry point: the caller names
+        // what they will accept, and one unit (0.000001) says "anything".
+        require!(params.min_tokens_out > 0, GatewayError::ZeroMinimum);
         let user_key = ctx.accounts.user.key();
         stamp(&mut ctx.accounts.user_account, &user_key, ctx.bumps.user_account);
         deposit(
@@ -398,8 +418,9 @@ impl<'info> BuyToken<'info> {
             hub_token: msg_codec::WireAddr(params.hub_token),
             buyer: msg_codec::WireAddr::from_pubkey(&user_key),
             usd_in: msg_codec::U256::from_spl_amount(params.usdc_in),
+            min_tokens_out: msg_codec::U256::from_spl_amount(params.min_tokens_out),
         };
-        let legs = ctx.accounts.store.trade_legs;
+        let legs = ctx.accounts.store.trade_legs as u16;
         send_to_hub(
             &ctx.accounts.store,
             &ctx.accounts.peer,
@@ -467,6 +488,10 @@ pub struct SellTokenParams {
     /// Replica units (6 decimals); the hub re-materializes amount ×1e12 —
     /// always an exact multiple, so the hub's supply ledger never underflows.
     pub amount: u64,
+    /// The least USDC units (6 decimals) the seller will be PAID, net of
+    /// the fee; rides the wire ×1e12 (v7.2). Under it the hub refuses the
+    /// sale and delivers the bag back. REQUIRED (> 0), like a buy's.
+    pub min_usdc_out: u64,
     pub max_native_fee: u64,
 }
 
@@ -477,6 +502,7 @@ impl<'info> SellToken<'info> {
         params: &SellTokenParams,
     ) -> Result<()> {
         require!(params.amount > 0, GatewayError::ZeroAmount);
+        require!(params.min_usdc_out > 0, GatewayError::ZeroMinimum);
         let user_key = ctx.accounts.user.key();
         stamp(&mut ctx.accounts.user_account, &user_key, ctx.bumps.user_account);
         // burn the replicas FIRST — the hub mints them back into curve
@@ -496,8 +522,9 @@ impl<'info> SellToken<'info> {
             hub_token: msg_codec::WireAddr(params.hub_token),
             seller: msg_codec::WireAddr::from_pubkey(&user_key),
             tokens_in: msg_codec::U256::from_spl_amount(params.amount),
+            min_usd_out: msg_codec::U256::from_spl_amount(params.min_usdc_out),
         };
-        let legs = ctx.accounts.store.trade_legs;
+        let legs = ctx.accounts.store.trade_legs as u16;
         send_to_hub(
             &ctx.accounts.store,
             &ctx.accounts.peer,
@@ -574,7 +601,7 @@ impl<'info> ClaimFees<'info> {
             hub_token: msg_codec::WireAddr(params.hub_token),
             claimer: msg_codec::WireAddr::from_pubkey(&user_key),
         };
-        let legs = ctx.accounts.store.trade_legs;
+        let legs = ctx.accounts.store.trade_legs as u16;
         send_to_hub(
             &ctx.accounts.store,
             &ctx.accounts.peer,
@@ -622,7 +649,7 @@ impl<'info> PullFees<'info> {
         params: &TokenMsgParams,
     ) -> Result<()> {
         let msg = SpawnMsg::PullFees { hub_token: msg_codec::WireAddr(params.hub_token) };
-        let legs = ctx.accounts.store.trade_legs;
+        let legs = ctx.accounts.store.trade_legs as u16;
         send_to_hub(
             &ctx.accounts.store,
             &ctx.accounts.peer,
@@ -639,12 +666,220 @@ impl<'info> PullFees<'info> {
     }
 }
 
+/* ------------------------- open a token (v7.2) ------------------------ */
+
+/// Asks the hub for this chain's replica of a token it never got: the SYNC
+/// was skipped at launch (its fee was above the hub's ceiling for this
+/// chain), failed, or the token is older than the chain's gateway
+/// (`SpawnGateway.openToken`). Anyone may; the caller pays the round trip —
+/// the message, the SYNC the hub sends back (`open_legs`), AND THE RENT OF
+/// THE REPLICA: its two accounts are created by that SYNC, which arrives
+/// with no lamports, so the opener leaves their rent at the two addresses
+/// now. The answer then costs the tank nothing, whoever executes it.
+///
+/// The hub answers with an ordinary SYNC, or with nothing: an id it never
+/// spawned, or a SYNC that costs more right now than its ceiling for
+/// requests toward this chain (`SpawnPad.requestCap`). The fee is then
+/// spent and the rent stays at the two addresses — it serves the next open
+/// of that token; for an id that names no token it is lost. A frontend
+/// reads the hub before offering this.
+#[derive(Accounts)]
+#[instruction(params: TokenMsgParams)]
+pub struct OpenToken<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(seeds = [STORE_SEED], bump = store.bump)]
+    pub store: Box<Account<'info, Store>>,
+    #[account(
+        seeds = [PEER_SEED, &store.key().to_bytes(), &store.hub_eid.to_be_bytes()],
+        bump = peer.bump
+    )]
+    pub peer: Account<'info, PeerConfig>,
+    #[account(mut, seeds = [GAS_TANK_SEED], bump)]
+    pub gas_tank: SystemAccount<'info>,
+    /// CHECK: where the replica entry will live — it must not exist yet
+    #[account(mut, seeds = [REPLICA_SEED, &params.hub_token], bump)]
+    pub replica: UncheckedAccount<'info>,
+    /// CHECK: where its SPL mint will live
+    #[account(mut, seeds = [MINT_SEED, &params.hub_token], bump)]
+    pub mint: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+impl<'info> OpenToken<'info> {
+    pub fn apply(
+        ctx: &mut Context<'_, '_, 'info, 'info, OpenToken<'info>>,
+        params: &TokenMsgParams,
+    ) -> Result<()> {
+        // a replica is new exposure to a market: opens stop with the rest
+        require!(!ctx.accounts.store.paused, GatewayError::Paused);
+        // every token is a contract on the hub: its id is an EVM address,
+        // left-padded. The hub refuses anything wider — refuse it here,
+        // where it costs nothing.
+        require!(params.hub_token[..12] == [0u8; 12], GatewayError::BadTokenId);
+        let replica = ctx.accounts.replica.to_account_info();
+        require!(
+            replica.owner != ctx.program_id || replica.data_is_empty(),
+            GatewayError::AlreadyOpen
+        );
+        // the rent of what the SYNC will create, left where it will be
+        // needed (a top-up: what an earlier open left there counts)
+        let rent = Rent::get()?;
+        let mint = ctx.accounts.mint.to_account_info();
+        for (target, space) in [(&replica, Replica::SIZE), (&mint, util::MINT_LEN)] {
+            let missing = rent.minimum_balance(space).saturating_sub(target.lamports());
+            if missing > 0 {
+                anchor_lang::solana_program::program::invoke(
+                    &system_instruction::transfer(ctx.accounts.user.key, target.key, missing),
+                    &[
+                        ctx.accounts.user.to_account_info(),
+                        target.clone(),
+                        ctx.accounts.system_program.to_account_info(),
+                    ],
+                )?;
+            }
+        }
+        let msg = SpawnMsg::Open { hub_token: msg_codec::WireAddr(params.hub_token) };
+        let legs = ctx.accounts.store.open_legs as u16;
+        send_to_hub(
+            &ctx.accounts.store,
+            &ctx.accounts.peer,
+            &ctx.accounts.gas_tank.to_account_info(),
+            ctx.bumps.gas_tank,
+            &ctx.accounts.user.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.remaining_accounts,
+            &msg,
+            legs,
+            params.max_native_fee,
+        )?;
+        Ok(())
+    }
+}
+
+/* -------------------------- move a claim (v7.2) ----------------------- */
+
+/// What a move to `dst_chain` prepays: the route's price, never fewer legs
+/// than a trade's (they pay for the way home if the hub returns the claim).
+/// A chain with no price is closed — which is also what refuses a chain
+/// that does not exist. `SpawnGateway._moveLegs`.
+fn move_legs(store: &Store, route: Option<&MoveRoute>, dst_chain: u32) -> Result<u16> {
+    require!(dst_chain != CHAIN_LABEL && dst_chain != HUB_LABEL, GatewayError::BadDestination);
+    let legs = route.filter(|r| r.dst_chain == dst_chain).map(|r| r.legs).unwrap_or(0);
+    require!(legs != 0, GatewayError::RouteClosed);
+    Ok(legs.max(store.trade_legs as u16))
+}
+
+/// Sends a dollar claim to `to` on another chain, whose vault pays it in
+/// that chain's dollar if it can and as a claim there if it cannot
+/// (`SpawnGateway.moveClaim`). For the claim a short vault left behind:
+/// dollars enter where buyers are and leave where sellers are.
+///
+/// What moves is the caller's CLAIM (`user_account.usd_claim`), nothing
+/// else: this chain has no oUSD token and no `wrap`, so USDC in a wallet is
+/// not a claim and cannot leave this way (the USDT vault's rule on the EVM
+/// side, for the same reason: it would be a free exchange through the
+/// vaults).
+///
+/// AN EXIT: it ignores the pause. If the hub cannot hand the claim on — no
+/// such chain, a recipient that chain cannot pay, a leg that fails or costs
+/// more right now than the hub's ceiling for it — it comes back to the
+/// caller here, as USDC or as the same claim. The caller pays the message
+/// and the hub's leg to the destination.
+#[derive(Accounts)]
+#[instruction(params: MoveClaimParams)]
+pub struct MoveClaim<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+    #[account(mut, seeds = [STORE_SEED], bump = store.bump)]
+    pub store: Box<Account<'info, Store>>,
+    #[account(
+        seeds = [PEER_SEED, &store.key().to_bytes(), &store.hub_eid.to_be_bytes()],
+        bump = peer.bump
+    )]
+    pub peer: Account<'info, PeerConfig>,
+    #[account(mut, seeds = [GAS_TANK_SEED], bump)]
+    pub gas_tank: SystemAccount<'info>,
+    #[account(
+        mut,
+        seeds = [USER_SEED, user.key().as_ref()],
+        bump = user_account.bump,
+        constraint = user_account.owner == user.key() @ GatewayError::AccountMismatch
+    )]
+    pub user_account: Box<Account<'info, UserAccount>>,
+    /// CHECK: the price of this destination — absent or 0 = route closed
+    #[account(seeds = [MOVE_ROUTE_SEED, &params.dst_chain.to_be_bytes()], bump)]
+    pub route: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Clone, AnchorSerialize, AnchorDeserialize)]
+pub struct MoveClaimParams {
+    /// SPAWN! chain label of the destination.
+    pub dst_chain: u32,
+    /// The recipient there, as a wide id: an EVM address left-padded.
+    pub to: [u8; 32],
+    /// USDC units (6 decimals) of the caller's claim; rides the wire ×1e12.
+    pub units: u64,
+    pub max_native_fee: u64,
+}
+
+impl<'info> MoveClaim<'info> {
+    /// Never paused: a pause blocks new exposure, not exits.
+    pub fn apply(
+        ctx: &mut Context<'_, '_, 'info, 'info, MoveClaim<'info>>,
+        params: &MoveClaimParams,
+    ) -> Result<()> {
+        // one unit is exactly the EVM gateways' dust floor (1e12 wei)
+        require!(params.units > 0, GatewayError::ZeroAmount);
+        require!(params.to != [0u8; 32], GatewayError::BadDestination);
+        let route_info = ctx.accounts.route.to_account_info();
+        let route: Option<MoveRoute> = if route_info.owner == ctx.program_id && !route_info.data_is_empty() {
+            Some(util::load(&route_info)?)
+        } else {
+            None
+        };
+        let legs = move_legs(&ctx.accounts.store, route.as_ref(), params.dst_chain)?;
+
+        // burn the claim FIRST — the value now rides the message
+        let user_account = &mut ctx.accounts.user_account;
+        require!(user_account.usd_claim >= params.units, GatewayError::ClaimTooSmall);
+        user_account.usd_claim -= params.units;
+        let store = &mut ctx.accounts.store;
+        store.claims_total = store.claims_total.saturating_sub(params.units);
+
+        let user_key = ctx.accounts.user.key();
+        let msg = SpawnMsg::Move {
+            from: msg_codec::WireAddr::from_pubkey(&user_key),
+            to: msg_codec::WireAddr(params.to),
+            amount: msg_codec::U256::from_spl_amount(params.units),
+            dst_chain: params.dst_chain,
+        };
+        send_to_hub(
+            &ctx.accounts.store,
+            &ctx.accounts.peer,
+            &ctx.accounts.gas_tank.to_account_info(),
+            ctx.bumps.gas_tank,
+            &ctx.accounts.user.to_account_info(),
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.remaining_accounts,
+            &msg,
+            legs,
+            params.max_native_fee,
+        )?;
+        emit!(ClaimMoved { user: user_key, dst_chain: params.dst_chain, to: params.to, usdc: params.units });
+        Ok(())
+    }
+}
+
 /* -------------------------------- quote ------------------------------- */
 
 /// The native fee an action costs right now — simulate it before signing
-/// (the gateways' `quote*` views). BUY, SELL, CLAIM and PULL payloads have a
-/// fixed size; a SPAWN's size depends on its strings, so its quote takes
-/// them. remaining_accounts: the same send list as the action itself.
+/// (the gateways' `quote*` views). BUY, SELL, CLAIM, PULL, OPEN and MOVE
+/// payloads have a fixed size; a SPAWN's size depends on its strings, so its
+/// quote takes them; a MOVE's price depends on where it goes, so its quote
+/// takes the destination and that destination's route account.
+/// remaining_accounts: the same send list as the action itself.
 #[derive(Accounts)]
 pub struct QuoteSend<'info> {
     #[account(seeds = [STORE_SEED], bump = store.bump)]
@@ -654,16 +889,20 @@ pub struct QuoteSend<'info> {
         bump = peer.bump
     )]
     pub peer: Account<'info, PeerConfig>,
+    /// The price of a move's destination (op 7 only; absent = route closed).
+    pub move_route: Option<Account<'info, MoveRoute>>,
 }
 
 #[derive(Clone, AnchorSerialize, AnchorDeserialize)]
 pub struct QuoteSendParams {
-    /// The wire op: 1 spawn, 2 buy, 3 sell, 4 claim, 5 pull.
+    /// The wire op: 1 spawn, 2 buy, 3 sell, 4 claim, 5 pull, 6 open, 7 move.
     pub op: u8,
     pub name: String,
     pub symbol: String,
     pub meta_uri: String,
     pub with_dev_buy: bool,
+    /// The destination of a move (op 7); ignored otherwise.
+    pub dst_chain: u32,
 }
 
 impl<'info> QuoteSend<'info> {
@@ -674,6 +913,7 @@ impl<'info> QuoteSend<'info> {
         let store = &ctx.accounts.store;
         let zero = msg_codec::WireAddr([0u8; 32]);
         let nil = msg_codec::U256([0u8; 32]);
+        let trade = store.trade_legs as u16;
         let (msg, legs) = match params.op {
             msg_codec::OP_SPAWN => (
                 SpawnMsg::Spawn {
@@ -684,16 +924,21 @@ impl<'info> QuoteSend<'info> {
                     dev_buy_usd: nil,
                     fee_mode: 0,
                 },
-                store.spawn_legs + if params.with_dev_buy { store.trade_legs } else { 0 },
+                store.spawn_legs as u16 + if params.with_dev_buy { trade } else { 0 },
             ),
-            msg_codec::OP_BUY => (SpawnMsg::Buy { hub_token: zero, buyer: zero, usd_in: nil }, store.trade_legs),
-            msg_codec::OP_SELL => (SpawnMsg::Sell { hub_token: zero, seller: zero, tokens_in: nil }, store.trade_legs),
-            msg_codec::OP_CLAIM => (SpawnMsg::Claim { hub_token: zero, claimer: zero }, store.trade_legs),
-            msg_codec::OP_PULL_FEES => (SpawnMsg::PullFees { hub_token: zero }, store.trade_legs),
+            msg_codec::OP_BUY => (SpawnMsg::Buy { hub_token: zero, buyer: zero, usd_in: nil, min_tokens_out: nil }, trade),
+            msg_codec::OP_SELL => (SpawnMsg::Sell { hub_token: zero, seller: zero, tokens_in: nil, min_usd_out: nil }, trade),
+            msg_codec::OP_CLAIM => (SpawnMsg::Claim { hub_token: zero, claimer: zero }, trade),
+            msg_codec::OP_PULL_FEES => (SpawnMsg::PullFees { hub_token: zero }, trade),
+            msg_codec::OP_OPEN => (SpawnMsg::Open { hub_token: zero }, store.open_legs as u16),
+            msg_codec::OP_MOVE => (
+                SpawnMsg::Move { from: zero, to: zero, amount: nil, dst_chain: params.dst_chain },
+                move_legs(store, ctx.accounts.move_route.as_deref(), params.dst_chain)?,
+            ),
             _ => return Err(GatewayError::UnknownOp.into()),
         };
-        let message = envelope(store, &msg);
-        let options = options_for(store, legs)?;
+        let (options, value) = options_for(store, legs)?;
+        let message = envelope(store, &msg, value);
         quote_native(store, &ctx.accounts.peer, ctx.remaining_accounts, &message, &options)
     }
 }
@@ -703,6 +948,14 @@ pub struct SentToHub {
     pub op: u8,
     pub user: Pubkey,
     pub native_fee: u64,
-    pub legs: u8,
+    pub legs: u16,
     pub sponsored: bool,
+}
+
+#[event]
+pub struct ClaimMoved {
+    pub user: Pubkey,
+    pub dst_chain: u32,
+    pub to: [u8; 32],
+    pub usdc: u64,
 }

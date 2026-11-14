@@ -26,6 +26,9 @@ export interface GatewayRpc {
   latestBlockhash(): Promise<string>
   /** A recent slot, for `createLookupTable`. */
   slot(): Promise<number>
+  /** The cluster's rent-exempt minimum for an account of `bytes` bytes
+   * (clusters differ: never hard-code it). */
+  rent(bytes: number): Promise<bigint>
 }
 
 export async function getAccount(rpc: GatewayRpc, key: PublicKey): Promise<AccountData | null> {
@@ -76,6 +79,9 @@ export function connectionRpc(conn: Connection, commitment: Commitment = 'confir
     },
     async slot() {
       return conn.getSlot('finalized')
+    },
+    async rent(bytes) {
+      return BigInt(await conn.getMinimumBalanceForRentExemption(bytes, commitment))
     },
   }
 }

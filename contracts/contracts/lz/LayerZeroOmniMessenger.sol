@@ -48,6 +48,30 @@ import {Roles} from "../Roles.sol";
 ///    cost. An empty tank reverts the reply; LayerZero keeps the inbound
 ///    message retryable until the tank is refilled.
 ///
+/// THE REPLY BUDGET IS ENFORCED ON ARRIVAL (v7.2). LayerZero lets ANYONE
+/// execute a verified packet, with whatever `msg.value` they like: the
+/// executor's option is what the sender paid for, not what the endpoint
+/// insists on. An adapter that took whatever came would let the sender of a
+/// message — or anyone else — deliver it with nothing and make this tank pay
+/// its replies; a few dollars of that and every reply of every user stalls.
+/// So the budget rides INSIDE the message (the envelope's last word, written
+/// by the sending adapter from the very number it put in the executor
+/// option) and `lzReceive` refuses a delivery that brings less. The packet
+/// stays deliverable: the executor, or anyone who attaches the value, lands
+/// it. The hub's own replies carry no budget and are unaffected.
+///
+/// EXECUTOR GAS PER KIND OF MESSAGE (v7.2). `gasLimit[dst]` is one number per
+/// destination, so it has to cover the dearest message that chain ever
+/// receives — a spawn on the hub, a replica deployment on a spoke — and every
+/// buy, sell and payout pays for that much gas. `gasForOp[dst][op]`
+/// overrides it for one kind of message (the op is the first word of every
+/// protocol payload). What the option buys is what the HONEST executor
+/// delivers with and what the user pays for; it is NOT a guarantee to the
+/// receiver, since anyone may deliver the packet with any gas at all. The
+/// receivers never rely on it: a delivery that runs short reverts as a whole
+/// and stays deliverable, and where a failed inner call is tolerated the pad
+/// tells starvation from refusal by itself (`SpawnPad._notStarved`).
+///
 /// LOCAL LOOPBACK (v7). Labels marked `isLocal` live on this very chain
 /// (the hub's own gateway). A send to one makes NO LayerZero call: it is a
 /// direct, same-transaction `onOmniMessage` on a REGISTERED local endpoint of
@@ -59,7 +83,8 @@ import {Roles} from "../Roles.sol";
 /// LayerZero delegate, the tank's exit — is the admin's, i.e. a timelock's:
 /// a re-pointed route or a fake sender can forge a hub message, and a
 /// forged PAYOUT pays real USDC. The operator only tunes what a message
-/// costs (`setDestination`), within a hard bound.
+/// costs (`setDestination`, `setGasForOp`), the reply budget within a hard
+/// bound.
 contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     /// Hard ceiling on the reply budget per leg an operator can make users
     /// prepay (destination-chain native currency).
@@ -85,6 +110,9 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     /// native amount (destination currency) forwarded per prepaid reply.
     mapping(uint32 => uint128) public gasLimit;
     mapping(uint32 => uint128) public returnUnit;
+    /// Executor gas for ONE kind of message to a destination: label -> op
+    /// (the first word of the payload) -> gas. 0 = `gasLimit[label]`.
+    mapping(uint32 => mapping(uint8 => uint128)) public gasForOp;
 
     /// One event per message, enough to audit the fee model: what the route
     /// cost (`nativeFee`), how much of it was reply budget
@@ -107,6 +135,7 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     event RouteSet(uint32 indexed chainLabel, uint32 eid, bytes32 peer);
     event RouteRepointed(uint32 indexed chainLabel, uint32 oldEid, bytes32 oldPeer, uint32 eid, bytes32 peer);
     event DestinationSet(uint32 indexed chainLabel, uint128 gas, uint128 unit);
+    event GasForOpSet(uint32 indexed chainLabel, uint8 indexed op, uint128 gas);
     event DelegateSet(address delegate);
     event Recovered(address to, uint256 amount);
 
@@ -219,6 +248,17 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
         emit DestinationSet(chainLabel, gas, unit);
     }
 
+    /// Executor gas for one kind of message to `chainLabel` (0 = back to
+    /// `gasLimit`). A price like the others: it changes what a user pays and
+    /// what the honest executor delivers with, nothing else. Set too low,
+    /// that kind of message runs out of gas on arrival and waits to be
+    /// delivered again with more — by anyone. A destination whose
+    /// `gasLimit` is 0 stays closed whatever is set here.
+    function setGasForOp(uint32 chainLabel, uint8 op, uint128 gas) external onlyOperator {
+        gasForOp[chainLabel][op] = gas;
+        emit GasForOpSet(chainLabel, op, gas);
+    }
+
     /* ----------------------- IOmniMessenger ----------------------- */
 
     function quote(uint32 dstChain, bytes32 dstAddr, bytes calldata payload, uint256 returnLegs)
@@ -275,13 +315,22 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
         require(eid != 0 && peers[eid] != bytes32(0), "LZM: no route");
         uint128 gas = gasLimit[dstChain];
         require(gas != 0, "LZM: no gas limit");
+        // this KIND of message may have its own executor gas: every protocol
+        // payload is `abi.encode(uint8 op, bytes data)`, so the op is the
+        // last byte of its first word
+        if (payload.length >= 32) {
+            uint128 own = gasForOp[dstChain][uint8(payload[31])];
+            if (own != 0) gas = own;
+        }
         value = uint256(returnUnit[dstChain]) * returnLegs;
         require(value <= type(uint128).max, "LZM: value overflow");
 
         // The inter-adapter envelope is bytes32-addressed (v5): a Solana
         // destination or sender does not fit in 20 bytes. Local senders are
-        // EVM contracts, so they ride left-padded.
-        bytes memory message = abi.encode(bytes32(uint256(uint160(sender))), dstAddr, payload);
+        // EVM contracts, so they ride left-padded. Its last word (v7.2) is
+        // the reply budget this message must ARRIVE with — the same number
+        // as in the executor option below.
+        bytes memory message = abi.encode(bytes32(uint256(uint160(sender))), dstAddr, payload, value);
         // Type-3 options, one executor lzReceive option: gas only (17 bytes)
         // or gas + native value delivered into the remote lzReceive (33).
         bytes memory options = value == 0
@@ -293,7 +342,8 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     /* ---------------------- ILayerZeroReceiver ---------------------- */
 
     /// Payable on purpose: the executor delivers the sender's prepaid reply
-    /// budget as msg.value, straight into this adapter's tank.
+    /// budget as msg.value, straight into this adapter's tank — and since
+    /// v7.2 the delivery is refused without it (see the contract header).
     function lzReceive(
         Origin calldata origin,
         bytes32,
@@ -303,14 +353,18 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     ) external payable {
         require(msg.sender == address(endpoint), "LZM: not endpoint");
         require(_isPeer(origin.srcEid, origin.sender), "LZM: not a peer");
-        (bytes32 srcSender, bytes32 dstAddr, bytes memory payload) = abi.decode(
+        (bytes32 srcSender, bytes32 dstAddr, bytes memory payload, uint256 value) = abi.decode(
             message,
-            (bytes32, bytes32, bytes)
+            (bytes32, bytes32, bytes, uint256)
         );
         // A message always names its source: receivers authenticate it by
         // comparing it with an address they stored, and an address they
         // never stored is bytes32(0) too.
         require(srcSender != bytes32(0), "LZM: no sender");
+        // …and arrives with the reply budget its sender paid the executor
+        // to bring. Whoever delivers it with less — anyone can try — is
+        // turned away, and the packet waits for a delivery that brings it.
+        require(msg.value >= value, "LZM: value");
         // We are an EVM chain, so the local target must downcast; the source
         // sender stays wide — the receiver authenticates it as bytes32.
         require(uint256(dstAddr) >> 160 == 0, "LZM: bad target");

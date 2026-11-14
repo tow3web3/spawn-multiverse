@@ -4,14 +4,29 @@
  * Re-running after a partial run is safe. Step 1 (the program deploy) is
  * checked, never performed.
  *
- * ORDER CHANGE vs V7.md §6: `init_store` (step 2) stores the lookup table
- * the executor will use and requires the table to exist (owner check), and
- * the program has no instruction to set it later. So the table is CREATED
- * first (step 2a, empty) and FILLED at step 7, once the verifier set is
- * known.
+ * THE LOOKUP TABLE. `init_store` records the table the executor will use
+ * if it is given one, so the table is CREATED first (step 2a, empty) and
+ * FILLED at step 7, once the verifier set is known. A store that names no
+ * table, or another one, is re-pointed with `set_receive_table` (step 2b).
+ * A table has no "transfer authority": whoever created it can extend it
+ * and CLOSE it for good — and a closed table stalls every delivery by
+ * LayerZero's executor until the admin names a new one. So once it is
+ * full the table is FROZEN (step 7b, `freezeTable`): nobody can touch it
+ * again; a later change of verifier set gets a new table (`--table` +
+ * step 2b).
+ *
+ * THE LIBRARIES. A fresh OApp follows the endpoint's DEFAULT send and
+ * receive libraries. Step 5 pins both to the library those defaults name
+ * today (ULN 302), exactly as the EVM adapters do (contracts/scripts/
+ * lib-dvn.js): the receive library decides whose verification is believed,
+ * and the verifier set of step 6 is a setting OF that library — if
+ * LayerZero re-aimed the default, an unpinned gateway would follow it to a
+ * library where our set was never configured, i.e. to that library's
+ * defaults. Custody must not rest on a default.
  */
 import {
   AddressLookupTableAccount,
+  AddressLookupTableProgram,
   PublicKey,
   Signer,
   SystemProgram,
@@ -22,21 +37,33 @@ import {
   Cluster,
   LZ_ENDPOINT,
   LZ_EXECUTOR,
+  MAX_MOVE_LEGS,
+  MAX_OPEN_LEGS,
   MAX_RETURN_UNIT,
   MAX_SPAWN_LEGS,
   MAX_TRADE_LEGS,
   PROGRAM_ID,
+  SOLANA_LABEL,
   SYSTEM_PROGRAM,
   TOKEN_PROGRAM,
 } from './constants'
 import { bytesToHex, equalBytes } from './bytes'
-import { Store, decodeLzReceiveTypesAccounts, decodePeerConfig, decodeStore } from './accounts'
+import {
+  Store,
+  decodeCctpPeer,
+  decodeLzReceiveTypesAccounts,
+  decodeMoveRoute,
+  decodePeerConfig,
+  decodeStore,
+} from './accounts'
 import {
   CONFIG_TYPE,
   UlnConfig,
   compareKeys,
   decodeReceiveConfig,
+  decodeReceiveLibraryConfig,
   decodeSendConfig,
+  decodeSendLibraryConfig,
   encodeUlnConfig,
   initNonceIx,
   initReceiveLibraryIx,
@@ -44,9 +71,19 @@ import {
   initUlnConfigIx,
   resolveSendPath,
   sendStaticAddresses,
+  setReceiveLibraryIx,
+  setSendLibraryIx,
   setUlnConfigIx,
 } from './layerzero'
-import { governIx, initStoreIx, initVaultIx, setPeerConfigIx } from './instructions'
+import {
+  governIx,
+  initStoreIx,
+  initVaultIx,
+  setCctpPeerIx,
+  setMoveLegsIx,
+  setPeerConfigIx,
+  setReceiveTableIx,
+} from './instructions'
 import { GatewayPdas, lzPda } from './pda'
 import { GatewayRpc, getAccount, getLookupTable } from './rpc'
 import { createLookupTableIx, extendLookupTableIxs } from './transaction'
@@ -76,9 +113,22 @@ export interface WiringParams {
   operator?: PublicKey
   guardian?: PublicKey
   fee: { gasToHub: bigint; returnUnit: bigint; tradeLegs: number; spawnLegs: number }
+  /** Legs an `open_token` prepays (v7.2; default 1 — the program's own). */
+  openLegs?: number
+  /** The price of a claim moved toward each chain (v7.2): what the hub
+   * pays to carry the PAYOUT there, in this chain's reply units. A chain
+   * that is not listed stays closed. */
+  moveLegs?: { dstChain: number; legs: number }[]
+  /** Peer vaults for CCTP rebalancing (v7.2) — each set ONCE, for good. */
+  cctpPeers?: { label: number; domain: number; vault: Uint8Array }[]
   depositCap: bigint
-  /** Leave the store paused at the end of step 8 (V7.md: yes, until the hub batch). */
+  /** Leave the store paused at the end of step 8 (V7.md: yes, until the
+   * hub batch). A store is born paused; false unpauses it. */
   leavePaused: boolean
+  /** Pin the send and receive libraries (step 5). Default true. */
+  pinLibraries?: boolean
+  /** Freeze the lookup table once it is full (step 7b). Default true. */
+  freezeTable?: boolean
   /** Target lamport balance of the tank (step 9 tops it up to this). */
   tankLamports: bigint
   /** Step 10: the next admin (the multisig). Omit to skip step 10. */
@@ -166,9 +216,15 @@ export async function tableAddresses(c: StepContext): Promise<PublicKey[]> {
     lzPda.oappRegistry(pdas.store),
     lzPda.eventAuthority(LZ_EXECUTOR),
     LZ_EXECUTOR,
+    // what a move toward each priced chain reads
+    ...(p.moveLegs ?? []).map((m) => pdas.moveRoute(m.dstChain)),
   ]
   return [...new Map(all.map((k) => [k.toBase58(), k])).values()]
 }
+
+/** The message library an endpoint config account names, or null for "the
+ * default" (all zeros). */
+const namedLib = (k: PublicKey) => (k.equals(PublicKey.default) ? null : k)
 
 export const STEPS: Step[] = [
   {
@@ -196,12 +252,11 @@ export const STEPS: Step[] = [
       const t = await getAccount(c.rpc, c.pdas.lzReceiveTypes)
       if (t) {
         const alt = decodeLzReceiveTypesAccounts(t.data).alt
-        c.state.table = alt.equals(PublicKey.default) ? null : alt
-        return c.log(
-          c.state.table
-            ? `the store already names table ${alt.toBase58()}`
-            : 'WARNING: the store was initialised WITHOUT a table and the program cannot set one later',
-        )
+        if (!alt.equals(PublicKey.default)) {
+          c.state.table = alt
+          return c.log(`the store already names table ${alt.toBase58()}`)
+        }
+        c.log('the store names no table: creating one (step 2b records it)')
       }
       const slot = await c.rpc.slot()
       const { ix, address } = createLookupTableIx(c.p.admin, c.p.admin, slot)
@@ -221,6 +276,18 @@ export const STEPS: Step[] = [
       }
       const ix = initStoreIx(c.pdas, c.p.admin, { admin: c.p.admin, endpoint: LZ_ENDPOINT, hubEid: c.p.hubEid, hubPad: c.p.hubPad }, c.state.table)
       await c.sender.send('init_store', [ix])
+    },
+  },
+  {
+    id: '2b-table-record',
+    title: 'the store names the lookup table (set_receive_table if it names none, or another)',
+    async run(c) {
+      if (!c.state.table) return c.log('no table: nothing to record')
+      const t = await getAccount(c.rpc, c.pdas.lzReceiveTypes)
+      // (dry run on a fresh cluster: init_store will have recorded it)
+      if (!t) return c.log('recorded by init_store')
+      if (decodeLzReceiveTypesAccounts(t.data).alt.equals(c.state.table)) return c.log('already recorded')
+      await c.sender.send(`set_receive_table ${c.state.table.toBase58()}`, [setReceiveTableIx(c.pdas, c.p.admin, c.state.table)])
     },
   },
   {
@@ -258,8 +325,27 @@ export const STEPS: Step[] = [
       if (!slc) ixs.push(initSendLibraryIx(c.p.admin, store, c.p.hubEid))
       if (!rlc) ixs.push(initReceiveLibraryIx(c.p.admin, store, c.p.hubEid))
       if (!nonce) ixs.push(initNonceIx(c.p.admin, store, c.p.hubEid, c.p.hubAdapter))
-      if (!ixs.length) return c.log('endpoint already wired')
-      await c.sender.send('endpoint init_send_library / init_receive_library / init_nonce', ixs)
+      if (!ixs.length) c.log('endpoint already wired')
+      else await c.sender.send('endpoint init_send_library / init_receive_library / init_nonce', ixs)
+
+      // pin both libraries to what the endpoint's defaults name today
+      if (c.p.pinLibraries === false) return c.log('libraries left on the endpoint defaults (pinLibraries = false)')
+      const [dslc, drlc] = await c.rpc.getAccounts([
+        lzPda.defaultSendLibraryConfig(c.p.hubEid),
+        lzPda.defaultReceiveLibraryConfig(c.p.hubEid),
+      ])
+      if (!dslc || !drlc) throw new Error(`the endpoint has no default libraries for eid ${c.p.hubEid}: the pathway does not exist`)
+      const sendLib = decodeSendLibraryConfig(dslc.data).messageLib
+      const recvLib = decodeReceiveLibraryConfig(drlc.data).messageLib
+      const ownSend = slc ? namedLib(decodeSendLibraryConfig(slc.data).messageLib) : null
+      const ownRecv = rlc ? namedLib(decodeReceiveLibraryConfig(rlc.data).messageLib) : null
+      const pins: TransactionInstruction[] = []
+      if (!ownSend) pins.push(setSendLibraryIx(c.p.admin, store, c.p.hubEid, sendLib))
+      else if (!ownSend.equals(sendLib)) c.log(`send library pinned to ${ownSend.toBase58()} (the default is now ${sendLib.toBase58()}): left as it is`)
+      if (!ownRecv) pins.push(setReceiveLibraryIx(c.p.admin, store, c.p.hubEid, recvLib))
+      else if (!ownRecv.equals(recvLib)) c.log(`receive library pinned to ${ownRecv.toBase58()} (the default is now ${recvLib.toBase58()}): left as it is`)
+      if (!pins.length) return c.log('libraries already pinned')
+      await c.sender.send(`endpoint set_send_library / set_receive_library (pin ${sendLib.toBase58()})`, pins)
     },
   },
   {
@@ -305,12 +391,43 @@ export const STEPS: Step[] = [
     },
   },
   {
+    id: '7b-table-freeze',
+    title: 'freeze the lookup table (nobody can extend or close it again)',
+    async run(c) {
+      if (!c.state.table) return c.log('no table: skipped')
+      if (c.p.freezeTable === false) {
+        return c.log(`table left under the authority of ${c.p.admin.toBase58()} (freezeTable = false): that key can CLOSE it and stall deliveries`)
+      }
+      const t = await getLookupTable(c.rpc, c.state.table)
+      if (!t) {
+        if (c.sender.dryRun) return c.log('(dry run: the table would be frozen once created and filled)')
+        throw new Error(`table ${c.state.table.toBase58()} does not exist`)
+      }
+      if (!t.state.authority) return c.log('table already frozen')
+      const have = new Set(t.state.addresses.map((k) => k.toBase58()))
+      const missing = (await tableAddresses(c)).filter((k) => !have.has(k.toBase58()))
+      if (missing.length && !c.sender.dryRun) throw new Error(`the table lacks ${missing.length} addresses: refusing to freeze it`)
+      if (!t.state.authority.equals(c.p.admin)) {
+        return c.log(`the table belongs to ${t.state.authority.toBase58()}, not to this admin: it must freeze it`)
+      }
+      await c.sender.send('freeze lookup table', [
+        AddressLookupTableProgram.freezeLookupTable({ lookupTable: c.state.table, authority: c.p.admin }),
+      ])
+    },
+  },
+  {
     id: '8-roles',
     title: 'operator, guardian, fee config, deposit cap, pause',
     async run(c) {
       const f = c.p.fee
       if (f.tradeLegs > MAX_TRADE_LEGS || f.spawnLegs > MAX_SPAWN_LEGS || f.returnUnit > MAX_RETURN_UNIT || f.gasToHub <= 0n) {
         throw new Error('fee config out of the program bounds (set_fee_config would refuse it)')
+      }
+      const openLegs = c.p.openLegs ?? 1
+      if (openLegs < 0 || openLegs > MAX_OPEN_LEGS) throw new Error(`open legs out of the program bounds (≤ ${MAX_OPEN_LEGS})`)
+      for (const m of c.p.moveLegs ?? []) {
+        if (m.legs < 0 || m.legs > MAX_MOVE_LEGS) throw new Error(`move legs toward chain ${m.dstChain} out of the program bounds (≤ ${MAX_MOVE_LEGS})`)
+        if (m.dstChain === SOLANA_LABEL || m.dstChain === 0) throw new Error(`chain ${m.dstChain} is not a destination for a claim`)
       }
       const s = await readStore(c)
       const a = c.p.admin
@@ -321,9 +438,40 @@ export const STEPS: Step[] = [
         s && s.gasToHub === f.gasToHub && s.returnUnit === f.returnUnit && s.tradeLegs === f.tradeLegs && s.spawnLegs === f.spawnLegs
       if (!feeSet) ixs.push(governIx.setFeeConfig(c.pdas, a, f))
       if (!(s && s.depositCap === c.p.depositCap)) ixs.push(governIx.setDepositCap(c.pdas, a, c.p.depositCap))
-      if (c.p.leavePaused && !(s && s.paused)) ixs.push(governIx.pause(c.pdas, a))
+      // (a fresh store has open_legs = 1: nothing to send for the default)
+      if ((s ? s.openLegs : 1) !== openLegs) ixs.push(governIx.setOpenLegs(c.pdas, a, openLegs))
+      const routes = c.p.moveLegs ?? []
+      const have = await c.rpc.getAccounts(routes.map((m) => c.pdas.moveRoute(m.dstChain)))
+      routes.forEach((m, i) => {
+        const cur = have[i] ? decodeMoveRoute(have[i]!.data).legs : 0
+        if (cur !== m.legs) ixs.push(setMoveLegsIx(c.pdas, a, m.dstChain, m.legs))
+      })
+      // a store is born paused
+      const paused = s ? s.paused : true
+      if (c.p.leavePaused && !paused) ixs.push(governIx.pause(c.pdas, a))
+      if (!c.p.leavePaused && paused) ixs.push(governIx.unpause(c.pdas, a))
       if (!ixs.length) return c.log('roles and fee settings already in place')
-      await c.sender.send('roles / fee config / deposit cap / pause', ixs)
+      await c.sender.send(`roles / fee config / deposit cap / legs / ${c.p.leavePaused ? 'paused' : 'unpaused'}`, ixs)
+    },
+  },
+  {
+    id: '8b-cctp-peers',
+    title: 'CCTP peer vaults (each named once, for good)',
+    async run(c) {
+      const peers = c.p.cctpPeers ?? []
+      if (!peers.length) return c.log('no CCTP peer given: skipped (the vault cannot be levelled outward until one is named)')
+      const have = await c.rpc.getAccounts(peers.map((p) => c.pdas.cctpPeer(p.label)))
+      const ixs: TransactionInstruction[] = []
+      peers.forEach((p, i) => {
+        if (p.vault.length !== 32) throw new Error(`the peer vault of chain ${p.label} must be 32 bytes (an EVM address left-padded)`)
+        if (!have[i]) return ixs.push(setCctpPeerIx(c.pdas, c.p.admin, p.label, p.domain, p.vault))
+        const cur = decodeCctpPeer(have[i]!.data)
+        if (cur.domain !== p.domain || !equalBytes(cur.vault, p.vault)) {
+          throw new Error(`chain ${p.label} already has a CCTP peer (domain ${cur.domain}, ${bytesToHex(cur.vault)}) and a peer is never re-aimed`)
+        }
+      })
+      if (!ixs.length) return c.log('CCTP peers already named')
+      await c.sender.send(`set_cctp_peer × ${ixs.length}`, ixs)
     },
   },
   {

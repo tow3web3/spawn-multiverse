@@ -167,9 +167,11 @@ describe('SPAWN! over async LayerZero V2 transport', () => {
 
     // inspect the packet WITHOUT delivering: envelope + payload, byte-exact
     const pkt = await world.endpoint.peek(0)
-    const [envSender, envTarget, envPayload] = coder.decode(['bytes32', 'bytes32', 'bytes'], pkt.message)
+    const [envSender, envTarget, envPayload, envValue] = coder.decode(['bytes32', 'bytes32', 'bytes', 'uint256'], pkt.message)
     expect(envSender).to.equal(b32(world.pad.target))
     expect(envTarget).to.equal(srcId)
+    expect(envValue).to.equal(0n) // (v7.2) the reply budget it must arrive with: a reply from the hub carries none
+    expect(pkt.message).to.equal(coder.encode(['bytes32', 'bytes32', 'bytes', 'uint256'], [envSender, envTarget, envPayload, 0n]))
     const [op, inner] = coder.decode(['uint8', 'bytes'], envPayload)
     expect(op).to.equal(12n) // OP_PAYOUT
     const [recipient, amount] = coder.decode(['bytes32', 'uint256'], inner)

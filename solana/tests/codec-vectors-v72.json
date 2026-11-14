@@ -1,0 +1,223 @@
+{
+  "about": "Protocol v7.2 wire shapes that tests/codec-vectors.json (generated before v7.2) does not hold: BUY and SELL with their minimum, OPEN (op 6), MOVE (op 7), and the four-field envelope. WRITTEN BY HAND, word by word, from the Solidity shapes (abi.encode head/tail rules) - not produced by either codec under test. Each vector is the list of its 32-byte words with what each one is. To be replaced by contracts/scripts/gen-codec-vectors.js output once the v7.2 contracts are final.",
+  "shapes": {
+    "payload": "abi.encode(uint8 op, bytes data)",
+    "BUY": "abi.encode(bytes32 token, bytes32 buyer, uint256 usdIn, uint256 minTokensOut)",
+    "SELL": "abi.encode(bytes32 token, bytes32 seller, uint256 tokensIn, uint256 minUsdOut)",
+    "OPEN": "abi.encode(bytes32 token)",
+    "MOVE": "abi.encode(bytes32 from, bytes32 to, uint256 amount, uint32 dstChain)",
+    "envelope": "abi.encode(bytes32 sender, bytes32 dstAddr, bytes payload, uint256 value)"
+  },
+  "ops": [
+    {
+      "name": "BUY",
+      "op": 2,
+      "note": "250 dollars for at least 1,000,000 tokens; the buyer is a Solana key (all 32 bytes used)",
+      "fields": {
+        "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
+        "buyer": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "usdIn": "250000000000000000000",
+        "minTokensOut": "1000000000000000000000000"
+      },
+      "words": [
+        ["0000000000000000000000000000000000000000000000000000000000000002", "op = 2"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "token"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "buyer"],
+        ["00000000000000000000000000000000000000000000000d8d726b7177a80000", "usdIn = 250e18"],
+        ["00000000000000000000000000000000000000000000d3c21bcecceda1000000", "minTokensOut = 1,000,000e18"]
+      ]
+    },
+    {
+      "name": "BUY",
+      "op": 2,
+      "note": "the smallest buy with the smallest minimum a Solana gateway can name: one unit of each (1e12 wei)",
+      "fields": {
+        "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
+        "buyer": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "usdIn": "1000000000000",
+        "minTokensOut": "1000000000000"
+      },
+      "words": [
+        ["0000000000000000000000000000000000000000000000000000000000000002", "op = 2"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "token"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "buyer"],
+        ["000000000000000000000000000000000000000000000000000000e8d4a51000", "usdIn = 1e12"],
+        ["000000000000000000000000000000000000000000000000000000e8d4a51000", "minTokensOut = 1e12"]
+      ]
+    },
+    {
+      "name": "SELL",
+      "op": 3,
+      "note": "400,000 tokens for at least 87.5 dollars net",
+      "fields": {
+        "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
+        "seller": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "tokensIn": "400000000000000000000000",
+        "minUsdOut": "87500000000000000000"
+      },
+      "words": [
+        ["0000000000000000000000000000000000000000000000000000000000000003", "op = 3"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "token"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "seller"],
+        ["0000000000000000000000000000000000000000000054b40b1f852bda000000", "tokensIn = 400,000e18"],
+        ["000000000000000000000000000000000000000000000004be4e7267b6ae0000", "minUsdOut = 87.5e18"]
+      ]
+    },
+    {
+      "name": "OPEN",
+      "op": 6,
+      "note": "ask the hub for this chain's replica of one token",
+      "fields": {
+        "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b"
+      },
+      "words": [
+        ["0000000000000000000000000000000000000000000000000000000000000006", "op = 6"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000020", "length of data: 1 word"],
+        ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "token"]
+      ]
+    },
+    {
+      "name": "MOVE",
+      "op": 7,
+      "note": "a Solana holder moves 12.345678 dollars of claim to an EVM address on chain label 4",
+      "fields": {
+        "from": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "to": "0x000000000000000000000000d00dfeedd00dfeedd00dfeedd00dfeedd00dfeed",
+        "amount": "12345678000000000000",
+        "dstChain": 4
+      },
+      "words": [
+        ["0000000000000000000000000000000000000000000000000000000000000007", "op = 7"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "from"],
+        ["000000000000000000000000d00dfeedd00dfeedd00dfeedd00dfeedd00dfeed", "to"],
+        ["000000000000000000000000000000000000000000000000ab54a8bb155ae000", "amount = 12.345678e18"],
+        ["0000000000000000000000000000000000000000000000000000000000000004", "dstChain = 4 (uint32, right-aligned)"]
+      ]
+    },
+    {
+      "name": "MOVE",
+      "op": 7,
+      "note": "the mirror, as an EVM gateway writes it: an EVM holder moves 87.5 dollars to a Solana key on chain label 1",
+      "fields": {
+        "from": "0x000000000000000000000000d00dfeedd00dfeedd00dfeedd00dfeedd00dfeed",
+        "to": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "amount": "87500000000000000000",
+        "dstChain": 1
+      },
+      "words": [
+        ["0000000000000000000000000000000000000000000000000000000000000007", "op = 7"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "length of data: 4 words"],
+        ["000000000000000000000000d00dfeedd00dfeedd00dfeedd00dfeedd00dfeed", "from"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "to"],
+        ["000000000000000000000000000000000000000000000004be4e7267b6ae0000", "amount = 87.5e18"],
+        ["0000000000000000000000000000000000000000000000000000000000000001", "dstChain = 1 (uint32, right-aligned)"]
+      ]
+    }
+  ],
+  "envelopes": [
+    {
+      "name": "solana -> hub: BUY with one reply leg of 0.0002 ETH",
+      "src": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
+      "dst": "0x000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "value": "200000000000000",
+      "payload": { "vector": "ops", "index": 0 },
+      "words": [
+        ["e27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa", "sender: the Solana store"],
+        ["000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "dstAddr: the hub pad"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "offset of payload: after the 4 head words"],
+        ["0000000000000000000000000000000000000000000000000000b5e620f48000", "value = 0.0002e18"],
+        ["00000000000000000000000000000000000000000000000000000000000000e0", "length of payload: 7 words"],
+        ["0000000000000000000000000000000000000000000000000000000000000002", "payload: op = 2"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "payload: offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "payload: length of data"],
+        ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "payload: token"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "payload: buyer"],
+        ["00000000000000000000000000000000000000000000000d8d726b7177a80000", "payload: usdIn"],
+        ["00000000000000000000000000000000000000000000d3c21bcecceda1000000", "payload: minTokensOut"]
+      ]
+    },
+    {
+      "name": "solana -> hub: MOVE with four legs of 0.00035 ETH",
+      "src": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
+      "dst": "0x000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "value": "1400000000000000",
+      "payload": { "vector": "ops", "index": 4 },
+      "words": [
+        ["e27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa", "sender: the Solana store"],
+        ["000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "dstAddr: the hub pad"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "offset of payload"],
+        ["0000000000000000000000000000000000000000000000000004f94ae6af8000", "value = 0.0014e18"],
+        ["00000000000000000000000000000000000000000000000000000000000000e0", "length of payload: 7 words"],
+        ["0000000000000000000000000000000000000000000000000000000000000007", "payload: op = 7"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "payload: offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "payload: length of data"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "payload: from"],
+        ["000000000000000000000000d00dfeedd00dfeedd00dfeedd00dfeedd00dfeed", "payload: to"],
+        ["000000000000000000000000000000000000000000000000ab54a8bb155ae000", "payload: amount"],
+        ["0000000000000000000000000000000000000000000000000000000000000004", "payload: dstChain"]
+      ]
+    },
+    {
+      "name": "hub -> solana: PAYOUT, no value (the hub prepays no reply)",
+      "src": "0x000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "dst": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
+      "value": "0",
+      "payload": {
+        "op": "PAYOUT",
+        "to": "0x9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "usdOut": "87997407000000000000"
+      },
+      "words": [
+        ["000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "sender: the hub pad"],
+        ["e27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa", "dstAddr: the Solana store"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "offset of payload"],
+        ["0000000000000000000000000000000000000000000000000000000000000000", "value = 0"],
+        ["00000000000000000000000000000000000000000000000000000000000000a0", "length of payload: 5 words"],
+        ["000000000000000000000000000000000000000000000000000000000000000c", "payload: op = 12"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "payload: offset of data"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "payload: length of data: 2 words"],
+        ["9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "payload: to"],
+        ["000000000000000000000000000000000000000000000004c535976fae78f000", "payload: usdOut = 87.997407e18"]
+      ]
+    },
+    {
+      "name": "hub -> solana: SYNC of CANARY, no value",
+      "src": "0x000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "dst": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
+      "value": "0",
+      "payload": {
+        "op": "SYNC_TOKEN",
+        "hubToken": "0x0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b",
+        "name": "CANARY",
+        "symbol": "CANARY"
+      },
+      "words": [
+        ["000000000000000000000000a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "sender: the hub pad"],
+        ["e27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa", "dstAddr: the Solana store"],
+        ["0000000000000000000000000000000000000000000000000000000000000080", "offset of payload"],
+        ["0000000000000000000000000000000000000000000000000000000000000000", "value = 0"],
+        ["0000000000000000000000000000000000000000000000000000000000000140", "length of payload: 10 words"],
+        ["000000000000000000000000000000000000000000000000000000000000000a", "payload: op = 10"],
+        ["0000000000000000000000000000000000000000000000000000000000000040", "payload: offset of data"],
+        ["00000000000000000000000000000000000000000000000000000000000000e0", "payload: length of data: 7 words"],
+        ["0000000000000000000000008b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b", "payload: token"],
+        ["0000000000000000000000000000000000000000000000000000000000000060", "payload: offset of name (after 3 head words)"],
+        ["00000000000000000000000000000000000000000000000000000000000000a0", "payload: offset of symbol"],
+        ["0000000000000000000000000000000000000000000000000000000000000006", "payload: length of name"],
+        ["43414e4152590000000000000000000000000000000000000000000000000000", "payload: \"CANARY\", right-padded"],
+        ["0000000000000000000000000000000000000000000000000000000000000006", "payload: length of symbol"],
+        ["43414e4152590000000000000000000000000000000000000000000000000000", "payload: \"CANARY\", right-padded"]
+      ]
+    }
+  ]
+}
