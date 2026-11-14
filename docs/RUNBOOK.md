@@ -182,6 +182,10 @@ BNB testnet (an `OmniUSDLocal` vault over an 18-decimal mock USDT). A chain
 where the deployer has no gas is left out of the run (`SPAWN_SKIP`) and can
 be added later with `add-chain.sh`. LayerZero's default verifiers, sponsored
 gateways, mock dollars anyone can mint, timelocks with no delay.
+`deployments/testnet.json` holds the live v7.1 testnet: a generation is
+never resumed, so the first run stops and prints the archive line to paste
+(`node scripts/archive-state.js testnet _v71_pre72 <net>`), after which v7.2
+deploys fresh beside it (its tanks: `scripts/recover-tanks.js`).
 
 ## 5. Prices — what `tune-fees.js` sets, and why
 
