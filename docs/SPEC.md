@@ -56,10 +56,12 @@ deployed bytecode cannot be patched:
 - *both vaults refuse a deposit that credited nothing* (`MIN_DEPOSIT`, §7).
 
 Protocol version v7.2 (**a full redeploy once more — v7.1 never reached
-mainnet. THE WIRE CHANGES: two new ops, 6 and 7; one more word in ops 2
-and 3, the trader's minimum; one more word in the inter-adapter envelope,
-the reply budget. Ops 1, 4, 5 and 10–13 are unchanged. The Solana codec
-vectors were NOT regenerated and must be**).
+mainnet. THE WIRE CHANGES: two new ops, 6 and 7; two more words in ops 2
+and 3, the trader's minimum and the order's deadline; one more word in the
+inter-adapter envelope, the reply budget. Ops 1, 4, 5 and 10–13 are
+unchanged. The Solana codec vectors were NOT regenerated and must be; the
+Solana program sends the FOUR-word trades of the second round and must
+send five**).
 The hub pad cannot be changed once deployed and a gateway is forever — and
 so is the adapter under them (`messenger` is immutable in both) — so
 what ONE universe on six chains needs from the hub goes in now: Base (the
@@ -95,7 +97,17 @@ no Circle dollar, no CCTP); Solana, later. Chains open one by one.
   with nothing;
 - *executor gas per kind of message* (§3) — `gasForOp` on the adapter: a
   buy no longer pays for a spawn's worth of hub gas, a payout to Ethereum
-  no longer for a replica deployment's worth of L1 gas.
+  no longer for a replica deployment's worth of L1 gas;
+- *an order expires* (§3) — every OP_BUY and OP_SELL carries a deadline,
+  written by the gateway (`block.timestamp + orderTtl`, thirty minutes
+  unless the operator says otherwise) and read on the hub, by the venue,
+  next to the minimum: an order that lands after it is refused whole, like
+  one under its minimum. A minimum
+  protects a fresh order, not one that sat undelivered while the price
+  moved away from it — and delivery is open to anyone;
+- *executor gas has a ceiling* (§3) — `MAX_EXECUTOR_GAS = 15,000,000` on
+  both of the adapter's gas setters: what a limit set too high over-charges
+  goes to LayerZero's executor, and nobody can give it back.
 
 ## 2. Actors and trust model
 
@@ -131,10 +143,10 @@ Powers are split by what they can do to user funds:
 | | OmniUSD `setAgent` (once), `setPeer` (once per label) | the agent can pay out the vault; a peer is a destination for vault USDC |
 | | FeeDistributor `setAgent` (once), `exclude`, `sealExclusions`; gateway `setDistributor` (once) | who drops fees in, who earns nothing |
 | | `transferAdmin`, `setOperator`, `setGuardian` — everywhere | role assignment |
-| **operator** | adapter `setDestination` (executor gas, reply budget — capped at `MAX_RETURN_UNIT = 0.05` native); gateway `setLegs` (capped at 4 / 32) | prices a moving market; bounded |
+| **operator** | adapter `setDestination` (executor gas — capped at `MAX_EXECUTOR_GAS = 15,000,000` since v7.2 — and reply budget — capped at `MAX_RETURN_UNIT = 0.05` native); gateway `setLegs` (capped at 4 / 128) | prices a moving market; bounded |
 | | OmniUSD `setDepositCap`, `rebalance` (to an existing peer only), `unpauseDeposits`; pad / gateway `unpause` | limits and liveness |
 | | pad `resync(token, chain)` with NO value attached (v7.1) | re-sends a token's SYNC to one chain on the hub tank's account. Since v7.2 anyone else may call it too — by attaching what the message costs (§4) |
-| | pad `setSyncCap(chain, cap)`, `setRequestCap(chain, op, cap)`; gateway `setOpenLegs` (≤ 8), `setMoveLegs` (≤ 4096); adapter `setGasForOp(chain, op, gas)` (v7.2) | prices again: what the tank may front for a message the pad is free to skip, what a user prepays for one, and how much executor gas each kind of message buys (§3) |
+| | pad `setSyncCap(chain, cap)`, `setRequestCap(chain, op, cap)`; gateway `setOpenLegs` (≤ 8), `setMoveLegs` (≤ 4096), `setOrderTtl` (2 minutes to 1 day); adapter `setGasForOp(chain, op, gas)` (≤ 15,000,000) (v7.2) | prices again: what the tank may front for a message the pad is free to skip, what a user prepays for one, how much executor gas each kind of message buys, and how long an order sent from a chain stays executable on the hub (§3) |
 | **guardian** | pad `pause`, gateway `pause`, OmniUSD `pauseDeposits` | a fast stop for NEW exposure |
 
 **Intended mainnet deployment** (proved end to end in
@@ -159,7 +171,8 @@ guardian are granted their roles and the deployer renounces all of its own
 | | `rebalance` a vault's whole USDC to a peer vault; `setDepositCap`; unpause during an incident | — | USDC can only go to a peer the admin named; local payouts fall back to oUSD claims, redeemable once liquidity returns. No operator function sends funds out of the protocol |
 | | `resync` in a loop (v7.1) → the hub tank pays one message per call until it is empty and replies stall (retryable) | — | the same harm as a reply budget set too low; a SYNC moves no value and a gateway ignores a duplicate |
 | | (v7.2) `setSyncCap` / `setRequestCap` to 1 wei → no launch reaches that chain, no open of it succeeds (the opener's fee is spent for nothing), every claim moved toward it comes home. Set huge → the tank is exposed to that chain's price again. `setMoveLegs(dst, 0)` closes moves from one chain to another; `setOpenLegs` / `setMoveLegs` set high over-charge whoever signs the quote | — | no value at risk: a SYNC that was skipped is sent by anyone's paid `resync` (no ceiling applies to it), a claim that cannot go on returns to its owner. But the `moveClaim` exit toward a chain is live only while the operator prices it — like every message-based exit already is, through `setDestination` |
-| | (v7.2) `setGasForOp` too LOW → that kind of message runs out of gas on arrival and waits; too HIGH → whoever signs the quote pays the EXECUTOR for gas nobody uses (it is LayerZero's, not the tank's: unlike a reply budget set too high, the admin cannot `recover` it) | — | no bound in the contract: a `uint128`. Value is not lost — a delivery that ran out of gas is made again by anyone with more — but a user can be over-charged up to whatever they sign for. The quote is always what is charged |
+| | (v7.2) `setGasForOp` (or `setDestination`'s gas) too LOW → that kind of message runs out of gas on arrival and waits; too HIGH → whoever signs the quote pays the EXECUTOR for gas nobody uses (it is LayerZero's, not the tank's: unlike a reply budget set too high, the admin cannot `recover` it) | — | `MAX_EXECUTOR_GAS` = 15,000,000 on both setters: the most a slip can over-charge is that much gas at the day's price, per message — under three times what the dearest message there is buys today. Value is not lost — a delivery that ran out of gas is made again by anyone with more. The quote is always what is charged |
+| | (v7.2) `setOrderTtl` short (its floor is 2 minutes) on a chain whose messages take longer → every order from that chain lands late and bounces; long (a day) → a stuck order stays executable at its minimum for a day | — | `MIN_ORDER_TTL`, `MAX_ORDER_TTL`: there is always a deadline, and no way to switch it off. No value at risk either way: a late order is a refund (a messaging fee is spent), a long-lived one is bounded by its minimum as every order was before. A PLAIN order (no minimum) has only the deadline |
 | **admin** (the Safe proposes through the timelock) | nothing | **everything**: name an attacker as peer vault and have the operator rebalance into it; re-point a spoke's hub route to a forged adapter and send it `OP_PAYOUT`; add a gateway label that mints unbacked oUSD into the hub's books; `recover` every tank; sponsor a gateway; replace operator and guardian | the delay itself: each of these is a public `CallScheduled` event for 48–72 h, during which every exit stays open and the guardian can `cancel`. **The timelock buys users time to leave, not immunity** — a hostile admin whom nobody vetoes drains what is left |
 | **deployer** (after the hand-over) | nothing | nothing | holds no role anywhere (asserted) |
 
@@ -172,9 +185,9 @@ is an EOA has no delay: its admin key is a drain key.**
 | Entry point | A stranger | A user of a spoke | Operator | Guardian | A destination that fails |
 |---|---|---|---|---|---|
 | `SpawnPad.resync(token, chain)` payable | sends the SYNC of a REAL token to a chain that HAS a gateway, if `msg.value ≥` the adapter's quote; the whole value goes to the adapter, which pays the fee out of it — the tank ends ≥ where it started (to the wei on the mock). Cannot name a token the pad did not spawn or a chain without a gateway (`"PAD: unknown"`), cannot change what the SYNC says (it is rebuilt from the pad's own storage), cannot fork a token (a gateway ignores a second SYNC). Works while paused | — (a hub-chain call) | the same with no value: the tank pays, as in v7.1 | pays like a stranger | the call reverts with the leg's own error (`"LZM: no gas limit"`, …) — a user call, atomic, the value is not taken |
-| `SpawnPad.setSyncCap` / `setRequestCap`, `LayerZeroOmniMessenger.setGasForOp` | `"ROLES: not operator"` | — | any value, any chain, any kind — see the table above | `"ROLES: not operator"` | — |
+| `SpawnPad.setSyncCap` / `setRequestCap`, `LayerZeroOmniMessenger.setGasForOp`, `SpawnGateway.setOrderTtl` | `"ROLES: not operator"` | — | any chain, any kind; any value for the ceilings, gas up to 15,000,000 (`"LZM: gas too high"`), a lifetime between 2 minutes and a day (`"GW: bad ttl"`) — see the table above | `"ROLES: not operator"` | — |
 | `buyTokenUsdcMin` / `buyTokenMin` / `sellTokenMin` on a REMOTE gateway (v7.2: they used to revert there) | trades their own money with a minimum on the wire | the same. Cannot make the hub fill under the minimum (the venue reverts, the pad refuses); cannot strand anything with an absurd one (the largest number is refused like any other); cannot make someone ELSE'S trade fill under its minimum — but CAN make it bounce, by moving the price past its tolerance just before it lands: that costs the mover the price impact and two fees, and the victim one messaging fee and a retry | — | cannot stop a sell: the gateway's pause does not apply to it | the refusal's own reply is a reply like any other: prepaid, never skipped |
-| `LayerZeroOmniMessenger.lzReceive` — i.e. anyone executing a verified packet through the endpoint | may deliver any verified packet, with any gas and any value. With less value than the envelope names: `"LZM: value"`, the packet stays deliverable. With too little gas: the delivery reverts as a whole (or, where a failed inner call is tolerated, the pad tells starvation from refusal — `"PAD: gas"`), and stays deliverable. With the right value and enough gas they have done the executor's job at their own expense. What they still choose is WHEN — which is what the minimum on the wire is for | — | — | — | — |
+| `LayerZeroOmniMessenger.lzReceive` — i.e. anyone executing a verified packet through the endpoint | may deliver any verified packet, with any gas and any value. With less value than the envelope names: `"LZM: value"`, the packet stays deliverable. With too little gas: the delivery reverts as a whole (or, where a failed inner call is tolerated, the pad tells starvation from refusal — `"PAD: gas"`), and stays deliverable. With the right value and enough gas they have done the executor's job at their own expense. What they still choose is WHEN — which is what the minimum on the wire is for, and, for an order that WAITED, the deadline next to it: after it, all there is left to deliver is a refund | — | — | — | — |
 | `SpawnGateway.openToken` → `OP_OPEN` | on any chain where they hold its coin: asks for a token's replica THERE, only where none exists, prepaying `openLegs`. The hub sends the SYNC if the id is a token it spawned and the SYNC costs ≤ `requestCap` of that chain. Cannot create a replica of anything the hub did not spawn, cannot make the tank front more than `requestCap` | the same | sets `openLegs`, `requestCap` | a paused GATEWAY refuses opens; a paused PAD serves them | the hub logs `SyncFailed` and consumes the message — the fee is spent, nothing else was at stake |
 | `SpawnGateway.moveClaim` → `OP_MOVE` | nothing without oUSD of their own on that chain: the gateway burns the CALLER's balance | moves their own claim to any chain the operator priced, for any recipient; pays the message and the hub's leg (`moveLegs[dst]`). Cannot move more than they hold, cannot reach the hub's own books, cannot make the hub pay out more than was burned (the amount is the gateway's, not theirs to state twice) | prices and thereby opens or closes each (source, destination) pair; sets `requestCap` | cannot stop it: neither the gateway's pause nor the pad's applies | the claim comes home: no gateway there, a recipient that chain cannot pay, a leg that cannot be priced or will not take the message, or costs more than `requestCap`. If the way home fails too, the inbound message reverts and LayerZero keeps it |
 | a `SpawnGateway` itself (i.e. whoever can speak as one: its chain's adapter route, its verifier set) | — | — | — | — | **v7.2 widens this**: a forged `OP_MOVE` is a PAYOUT of any amount on ANY chain, where before v7.2 the hub only ever paid the chain a message came from. Every pathway's verifier set is now custody of every vault, directly (§11) |
@@ -430,6 +443,21 @@ bytes of option (22 in total) when no reply is prepaid, 33 (38 in total)
 with `value = returnUnit × returnLegs` (`_packet`). A destination without a
 gas limit is refused (`"LZM: no gas limit"`).
 
+**A ceiling on executor gas (v7.2).** `setDestination` and `setGasForOp`
+(below) refuse a limit above `MAX_EXECUTOR_GAS = 15,000,000` (`"LZM: gas
+too high"`). What a limit set too high over-charges is paid to LayerZero's
+executor, not into a tank: unlike a reply budget set too high, nobody can
+give it back — and until this bound the only limit was the `uint128` the
+number is stored in. 15M is far above the dearest message there is (the
+worst-case spawn: 5.26M of hub gas in the tooling today, about 0.3M more
+per chain added) and under the 2^24 = 16,777,216 gas that ONE transaction
+may use on chains that cap it (EIP-7825; the test network enforces it):
+above that cap a message could be sold gas it can never be delivered
+with. 15M × 64/63 leaves 1.5M of the cap for the endpoint's own work
+around the call (tested: a message sold the ceiling is delivered with it
+inside one transaction). 0 keeps its two meanings: a closed destination,
+no override.
+
 **Gas per kind of message (v7.2).** `gasLimit[dst]` is one number per
 destination, so it must cover the dearest message that chain ever
 receives: toward the hub the worst-case spawn (5M with four remote
@@ -476,7 +504,7 @@ endpoint — hub figures are therefore pessimistic):
 |---|---|---|
 | OP_SPAWN (hub), 5 remote SYNCs and a dev buy | 4.59M on the mock ≈ 1.4M of protocol work + one send per remote chain + the DELIVER (≈ 0.52M each on the mock). v7.1 measured 4.546M on the same test; v7.2's first round 4.560M (under 3k per chain of the fan-out); its second 4.592M (about 5k more per message SENT: one storage read for the gas of that kind of message, and on the mock one more word of envelope to store) | 4M to the hub |
 | OP_SPAWN (hub), v7.2 worst case: the largest spawn a gateway admits (64 + 16 + 1,024 bytes of strings, a dev buy), FOUR remote chains and the hub chain's own replica | **4.973M** with no ceiling; **4.985M** with a `syncCap` on one chain that is under it (+0.011M: one quote); **4.435M** with that chain over its ceiling (−0.538M: one send less); 5.021M with a ceiling on all four | 6M on the mock; real: `hubGasFor` |
-| OP_BUY / OP_SELL / OP_PULL_FEES (hub), incl. one reply send | 0.260M / 0.220M / 0.151M (v7.1: 0.256M / 0.214M / 0.145M — the minimum on the wire costs a few hundred gas, the rest is the per-send cost above) | 4M to the hub — or its own, smaller budget (`gasForOp`) |
+| OP_BUY / OP_SELL / OP_PULL_FEES (hub), incl. one reply send | 0.260M / 0.220M / 0.151M (v7.1: 0.256M / 0.214M / 0.145M — the minimum on the wire costs a few hundred gas, the deadline about 200 more — 259,894 and 220,313 against 259,697 and 220,101 — and the rest is the per-send cost above) | 4M to the hub — or its own, smaller budget (`gasForOp`) |
 | OP_OPEN (hub), v7.2 — one quote, one SYNC send | 0.25M | 4M to the hub |
 | OP_MOVE (hub), v7.2 — forwarded to a remote chain (one quote, one send) / to the hub chain's own gateway (one quote, the payout itself) / turned back | 0.12M / 0.12M / 0.10M | 4M to the hub |
 | OP_SYNC_TOKEN (spoke — a replica deploy) | 0.72M | 2M to a spoke |
@@ -549,8 +577,10 @@ third of what its bag was worth). Five of the six chains trade this way.
 **v7.2: the minimum rides the wire and the hub enforces it.** OP_BUY and
 OP_SELL carry a fourth word (§4): `minTokensOut`, or `minUsdOut` — what
 the seller is PAID, net of the fee, 18 decimals. 0 = none. The check is in
-the VENUE, where the price is (`ICurveVenue.execBuy(token, usdIn, minOut)`,
-`execSell(token, tokensIn, minOut)`: revert `"VENUE: min out"` before any
+the VENUE, where the price is (`ICurveVenue.execBuy(token, usdIn, minOut,
+deadline)`, `execSell(token, tokensIn, minOut, deadline)` — the last
+argument is the order's deadline, next section: revert `"VENUE: min out"`
+before any
 state changes), so the pad needs no new path — its existing refusal does
 the rest (`Refused`, reason 6):
 
@@ -609,11 +639,13 @@ Limits, stated plainly:
   price past its tolerance just before it lands — at the cost of that
   move and two fees to them, one messaging fee and a retry to the victim;
 - the refusal says "the market would not fill it" (`Refused`, reason 6) —
-  the same reason as dust: the pad does not tell the two apart;
+  the same reason as dust, and as an order that landed after its deadline
+  (next section): the pad does not tell the three apart;
 - the buy check counts tokens only; the refund of a buy the curve capped
   is not part of it (it is the caller's own dollars coming back);
-- no deadline argument: an order that waits is bounded by its minimum, not
-  by time;
+- a minimum bounds the PRICE of an order, not its age. Until the third
+  round of v7.2 an order that waited was bounded by its minimum alone, for
+  ever; that is what the deadline is for (next section);
 - on the local path the minimum is held twice, by the hub and by the
   balance check. They agree to the wei on a sale that is paid; the balance
   check is the stricter one (a parked delivery fails it), and no minimum,
@@ -622,6 +654,125 @@ Limits, stated plainly:
   the loopback still re-enters `onOmniMessage` (which is not), and a dollar
   token with a transfer hook cannot call back into any guarded function
   during the deposit or the payout (`v71.test.js`, with a hooked token).
+
+### An order expires (v7.2)
+
+A minimum protects a FRESH order. It does not protect one that sat
+undelivered while the price moved away from it — and orders sit when
+something of ours fails: an empty tank, executor gas set too low for a
+kind of message, a leg the operator closed or LayerZero paused. Many are
+then stuck at once, each still executable at the minimum it named when the
+market was somewhere else, and delivery is open to anyone. Whoever
+delivers one chooses the moment. For a buy whose price has since FALLEN:
+buy the price back up to the order's limit, deliver it there, sell into
+the buyer's own money. `v72-orders.test.js` runs it — a $1,000 buy with 1%
+of slippage, stuck behind a closed leg while the price falls to a third;
+the attacker pumps with $5,000, lands the order at its limit and dumps, in
+one hub-chain transaction. The buyer gets a third of what $1,000 was
+worth by then; the attacker keeps about $600. The minimum was met. A sale
+whose price has since risen is robbed the same way.
+
+**The deadline.** OP_BUY and OP_SELL carry a fifth word (§4), `deadline`:
+unix seconds, compared with the hub's `block.timestamp`; 0 = none. An
+order that lands AFTER it (`block.timestamp > deadline`: the second itself
+is in time) is refused whole, exactly like one under its minimum, and by
+the same hands. The pad does nothing with the word but pass it to the
+VENUE, next to the minimum (`execBuy(token, usdIn, minOut, deadline)`,
+`execSell(token, tokensIn, minOut, deadline)`); the venue reverts
+`"VENUE: expired"` before it looks at anything else
+(`InternalCurveVenue._inTime`); and the pad's two existing refusals do the
+rest — no path of its own:
+
+- a late buy: nothing is booked, the genesis accounting is undone (the
+  buyer's $250 cap is intact, no tax is taken), and the whole `usdIn`
+  rides home in the DELIVER's refund — as dollars if that vault holds
+  them;
+- a late sell: the bag the spoke burned is delivered back;
+- `Refused`, reason 6 — also the reason of a fill under a minimum and of
+  dust. A late order is told apart by its time: the deadline is on the
+  wire, the refusal has a block;
+- a late buy on a paused hub, or in the launch block, bounces as a paused
+  or a launch-block buy does (reason 1; the genesis guard): whole either
+  way;
+- the attack above, one second after the deadline: the order is refused
+  inside the attacker's transaction, the buyer has every dollar back, and
+  the attacker bought and sold into nobody — two fees, $99.50 on $5,000.
+
+No arithmetic is done on the word, by the pad or by the venue: no value
+of it — 0, 1, `2^256 − 1` — can revert the delivery (tested with each).
+
+Three shapes were built and measured on the pad, which has no bytes to
+waste: the word handed to the venue (18 bytes), the pad turning a late
+order's minimum into `2^256 − 1` so that the venue's minimum check refuses
+it (45), and a refusal path of its own in the pad, with its two replies
+(145). The first is the one in the code. It is the smallest, and the only one
+that leans on nothing else: the venue tests the time first, on every
+path, whatever the minimum says, and the seller's net-to-gross conversion
+has no part in it. Its price is the minimum's: the deadline is the
+VENUE's to enforce (`ICurveVenue` says so for both), and a venue that
+ignored it would fill a late order (the tests read what the pad hands
+over with a venue that records it and trades regardless). The pad's venue
+is set once (`setVenue`) and enforces both.
+
+**The gateway writes it; nobody signs it.** Every BUY and SELL a gateway
+sends — the plain functions and the three `…Min` alike — carries
+`block.timestamp + orderTtl` (`SpawnGateway._deadline`). No user-facing
+signature changed, and there is no way to send an order without one.
+`orderTtl` is a `uint32` of seconds: 30 minutes from deployment, set per
+gateway by the operator (`setOrderTtl`, event `OrderTtlSet`) between
+`MIN_ORDER_TTL` = 2 minutes and `MAX_ORDER_TTL` = 1 day (`"GW: bad ttl"`).
+An order in flight keeps the deadline it left with. The quotes'
+placeholder payloads have the word (tested with a price per byte: the
+quote is the fee of the very message that leaves). On the hub chain's own
+gateway the order executes in the transaction that sends it and can never
+be late.
+
+What has NO deadline: a spawn with its dev buy (the first trade of a
+curve created in the same delivery — there is no earlier price for it to
+be stale against; tested three days late), a dev's fee claim, a fee pull,
+an open, a move. None of them names a price.
+
+**Two clocks.** The deadline is written from the SOURCE chain's clock and
+read against the hub's. What a skewed source clock does, at worst:
+
+- *behind the hub's* by `s` seconds: its orders expire `s` early. They
+  bounce whole — a messaging fee and a retry each. Behind by a whole
+  lifetime, EVERY order from that chain bounces, until the operator
+  lengthens `orderTtl` there (a day at most). It is the remedy for a leg
+  that has simply become slow, too — the same arithmetic, the hub's time
+  at delivery minus the gateway's at sending — and is tested as that: an
+  hour of lag against thirty minutes, then against a day;
+- *ahead* by `s`: its orders live `s` longer than the lifetime says. Each
+  is still bounded by its minimum, as every order was before the
+  deadline existed. A plain order — no minimum — is the one that then
+  depends on the clock alone.
+
+Neither can lose a dollar or a token: the outcomes are a fill at or above
+the minimum, or a refund. The hub's own clock being off moves every
+chain's orders the same way. An EVM chain stamps its blocks from a
+validator's or a sequencer's clock, held near real time by its protocol;
+a chain whose time is an estimate that can lag when it runs slow (Solana's
+is a stake-weighted one, and has run many minutes behind) is the case the
+first bullet is written for: that gateway's lifetime must absorb its
+drift.
+
+Limits, stated plainly:
+- **the deadline bounds the window; it does not close it.** Inside its
+  lifetime a stuck order is exactly as exposed as before: the test above
+  pays the attacker at the last second of the thirty minutes. A shorter
+  lifetime narrows the window and bounces more orders on a slow day;
+- **the floor is a guard against a slip, not a promise of delivery.** Two
+  minutes is under what a message from Ethereum waits before it is even
+  verified (15 block confirmations — three minutes — in the mainnet
+  profile): an operator who set that on the Ethereum gateway would bounce
+  every order from it. The tooling must refuse a lifetime under a multiple
+  of what each chain's messages take;
+- an order that expires costs its sender the messaging fee, like one that
+  bounced off its minimum;
+- a late order's refund is a reply like any other — prepaid, never
+  skipped. If it cannot be sent either, the delivery reverts and waits:
+  the incident is not over, and still ends in that refund when it is
+  (tested behind an empty tank, a closed leg and a blocked one).
 
 ### DVN configuration
 
@@ -759,8 +910,8 @@ revert (`SpawnPad.sol:_addr` → `"PAD: bad recipient"`,
 | Op | Name | Direction | Wire tuple (`data`) | Trigger | Effect on receive |
 |---|---|---|---|---|---|
 | 1 | OP_SPAWN | gateway → pad | `(bytes32 creator [wide ok], string name, string symbol, string metaURI, uint256 devBuyUsd, uint8 feeMode)` | `SpawnGateway.spawnToken` (burns dev-buy oUSD first) or `spawnTokenUsdc` (v7: pulls dev-buy USDC into the vault via `OmniUSD.depositFor`) — same message. The gateway first refuses what the hub would: `feeMode > 3` (`"GW: bad fee mode"`), name > 64 / symbol > 16 / metaURI > 1024 bytes (`"GW: string too long"`), a paused gateway (`"GW: paused"`), and (v7.1) an oUSD dev buy under 1e12 wei (`"GW: dust"`) | `SpawnPad._spawn`: deploy hub `SpawnToken` (premint 1B to pad, reporting to no distributor), store `Meta` (creator stays wide), `venue.openMarket`, emit `Spawned`, send OP_SYNC_TOKEN to **every** registered chain — each send under `try` (v7.1): one that fails emits `SyncFailed(token, chain)` and the spawn goes on; a chain with a `syncCap` is quoted first and skipped the same way above it (v7.2) — then optional dev-buy via `_buy`. **Refused** (no token; a dev buy goes home by OP_PAYOUT) when the pad is paused or `feeMode > 3` |
-| 2 | OP_BUY | gateway → pad | `(bytes32 token [downcast], bytes32 buyer [wide ok], uint256 usdIn, uint256 minTokensOut)` — **the fourth word is new in v7.2**; 0 = no minimum | `SpawnGateway.buyToken` (burns buyer's oUSD; ≥ 1e12 wei, `"GW: dust"`) or `buyTokenUsdc` (v7: pulls USDC into the vault; the vault refuses a deposit that credited less than 1e12 oUSD wei, `"oUSD: dust"`, v7.1) — both with `minTokensOut = 0` — or their `…Min` twins, which carry the caller's minimum (v7.2: on every chain, §3). All first require a local replica (`"GW: unknown token"`), so a BUY for a token the hub never spawned cannot leave the chain | `SpawnPad._buy`: genesis gate, fee off the top, `venue.execBuy(token, usd, minTokensOut)`, mint `spend + fee` into the hub's books, burn hub tokens, `supplyByChain[src] += out`, send OP_DELIVER (tokens + refund), emit `Trade`, `_accrueFee`. **Refused** — whole `usdIn` refunded — when the pad is paused or the venue refuses, which now includes a fill under `minTokensOut` (via OP_DELIVER, `out = 0`), or the token id is wide/unknown (via OP_PAYOUT) |
-| 3 | OP_SELL | gateway → pad | `(bytes32 token [downcast], bytes32 seller [wide ok], uint256 tokensIn, uint256 minUsdOut)` — **the fourth word is new in v7.2**: what the seller must be PAID, net of the fee, 18 decimals; 0 = no minimum | `SpawnGateway.sellToken` (burns seller's replica; ≥ 1e12 wei, `"GW: dust"`; `minUsdOut = 0`), or `sellTokenMin` with the caller's minimum (v7.2: on every chain, §3). Never paused | `SpawnPad._sell`: turn `minUsdOut` into the smallest gross that nets it (§3), `venue.execSell(token, tokens, minGross)`, mint tokens back to pad custody, `supplyByChain[src] -= tokensIn`, 1% fee, burn net oUSD, send OP_PAYOUT, emit `Trade`, `_accrueFee`. **Refused** when the venue will not price it, or not at the seller's minimum: the bag goes back by OP_DELIVER |
+| 2 | OP_BUY | gateway → pad | `(bytes32 token [downcast], bytes32 buyer [wide ok], uint256 usdIn, uint256 minTokensOut, uint256 deadline)` — **the fourth and fifth words are new in v7.2**: the minimum (0 = none), and the last second, on the hub's clock, at which the order may still execute (unix seconds; 0 = none — the wire allows it, no gateway sends it) | `SpawnGateway.buyToken` (burns buyer's oUSD; ≥ 1e12 wei, `"GW: dust"`) or `buyTokenUsdc` (v7: pulls USDC into the vault; the vault refuses a deposit that credited less than 1e12 oUSD wei, `"oUSD: dust"`, v7.1) — both with `minTokensOut = 0` — or their `…Min` twins, which carry the caller's minimum (v7.2: on every chain, §3). Every one stamps `deadline = block.timestamp + orderTtl` (§3, "An order expires"). All first require a local replica (`"GW: unknown token"`), so a BUY for a token the hub never spawned cannot leave the chain | `SpawnPad._buy`: genesis gate, fee off the top, `venue.execBuy(token, usd, minTokensOut, deadline)`, mint `spend + fee` into the hub's books, burn hub tokens, `supplyByChain[src] += out`, send OP_DELIVER (tokens + refund), emit `Trade`, `_accrueFee`. **Refused** — whole `usdIn` refunded — when the pad is paused or the venue refuses, which now includes a fill under `minTokensOut` and ANY fill of an order that landed after its `deadline` (via OP_DELIVER, `out = 0`), or the token id is wide/unknown (via OP_PAYOUT) |
+| 3 | OP_SELL | gateway → pad | `(bytes32 token [downcast], bytes32 seller [wide ok], uint256 tokensIn, uint256 minUsdOut, uint256 deadline)` — **the fourth and fifth words are new in v7.2**: what the seller must be PAID, net of the fee, 18 decimals (0 = no minimum), and the order's deadline, as for a buy | `SpawnGateway.sellToken` (burns seller's replica; ≥ 1e12 wei, `"GW: dust"`; `minUsdOut = 0`), or `sellTokenMin` with the caller's minimum (v7.2: on every chain, §3); both stamp `deadline = block.timestamp + orderTtl`. Never paused | `SpawnPad._sell`: turn `minUsdOut` into the smallest gross that nets it (§3), `venue.execSell(token, tokens, minGross, deadline)`, mint tokens back to pad custody, `supplyByChain[src] -= tokensIn`, 1% fee, burn net oUSD, send OP_PAYOUT, emit `Trade`, `_accrueFee`. **Refused** when the venue will not price it, or not at the seller's minimum, or the order landed after its `deadline`: the bag goes back by OP_DELIVER |
 | 4 | OP_CLAIM | gateway → pad | `(bytes32 token [downcast], bytes32 claimer [wide ok])` | `SpawnGateway.claimFees` (requires a local replica). Never paused | `SpawnPad._claim`: pay `dev − devClaimed` via OP_PAYOUT to the claim chain, emit `DevClaimed`. **Refused** (no reply) when `claimer` is not the creator (wide comparison) or nothing is accrued |
 | 5 | OP_PULL_FEES (v7) | gateway → pad | `(bytes32 token [downcast])` | `SpawnGateway.pullFees` — anyone, for any token with a local replica; prepays `tradeLegs`. Never paused | `SpawnPad._pull`: split any pot not split yet, then send `OP_FEE_DROP(token, pendingDrop[token][src])` to the source chain and zero it, emit `FeesPulled`. **Refused** (no reply) when nothing is waiting or the token is unknown |
 | 6 | OP_OPEN (v7.2) | gateway → pad | `(bytes32 token [downcast])` | `SpawnGateway.openToken` — anyone, for a hub token id that has NO replica on this chain (`"GW: already open"`); prepays `openLegs`. Refused by a paused gateway (`"GW: paused"`) | send that token's OP_SYNC_TOKEN to the SOURCE chain if it costs the tank no more than `requestCap[src][10]`, emit `Resynced`; otherwise — the leg refuses, cannot be priced, or is above the ceiling — emit `SyncFailed`, no revert. **Refused** (`Refused`, reason 2, no reply) for an id the pad never spawned. Ignores the pad's pause |
@@ -774,14 +925,21 @@ Unknown ops revert (`"PAD: bad op"` / `"GW: bad op"`); the Solana codec
 rejects unknown ops, dirty envelope padding and bad offsets
 (`msg_codec.rs` tests). Ops 5, 6 and 7 are ADDITIVE; ops 1, 4 and 10–13
 are byte-for-byte what they were. **Ops 2 and 3 are NOT** (v7.2): each
-gained a fourth word, and the pad decodes four — a three-word BUY or SELL
-is malformed and reverts. So is the envelope around every message (§3).
-The codec vectors in `solana/tests/codec-vectors.json` were not
-regenerated — they still describe the three-word trades and the
-three-field envelope and are WRONG for this hub; the Solana program must
-send the new shapes (a minimum of 0 is a valid one) before it speaks to
-it. It neither sends ops 5–7 yet nor ever receives them (they are gateway
-→ pad only). What v7.2 also asks of a non-EVM gateway: its PAYOUT handler
+gained two words — the minimum, then the deadline — and the pad decodes
+five. A SHORTER BUY or SELL is malformed: it reverts on the hub every
+time it is delivered (pinned by a test, with the four-word shape of the
+second round), with the trader's dollars or bag already taken on the
+source chain. Words after the fifth are ignored. No EVM gateway of this generation can send one; any
+other implementation of a gateway does, until it is brought to this
+table. So is the envelope around every message (§3). The codec vectors in
+`solana/tests/codec-vectors.json` were not regenerated (three-word trades,
+three-field envelope), and the hand-written
+`solana/tests/codec-vectors-v72.json` holds the FOUR-word trades of the
+second round: both are wrong for this hub. The Solana program must send
+five words — a minimum of 0 is valid; the deadline is its clock's unix
+time plus a lifetime, never 0 — before it speaks to it. Ops 5–7 are
+gateway → pad only: no gateway receives them. What v7.2 also asks of a
+non-EVM gateway: its PAYOUT handler
 now receives recipients a user CHOSE (a moved claim), not only identities
 that were a signer on that chain — it must pay, park or mint a claim for
 any 32-byte `to`, never fail (§5, §11).
@@ -804,7 +962,8 @@ through every contract it calls:
 | pad `_spawn` | out of gas on oversized strings | **was reachable — fixed** | name/symbol/metaURI are stored on the hub and replayed to every chain; now capped at the gateway (64 / 16 / 1024 bytes). The largest legal spawn (max strings + dev buy, 5 remote chains) costs ≈ 2.33M of hub work plus one endpoint send per remote chain — ≈ 3.5M at an ESTIMATED 0.2M per real send, inside the 4M budget (the mock's 0.52M per send is measured, the real figure is not: the testnet rehearsal must confirm it, and the hub gas limit must rise with the number of remote chains) |
 | pad | ~~`"PAD: bad recipient"` on a wide token id~~ | fixed (defence in depth) | a wide or unknown token id is refused; a BUY's dollars go home by OP_PAYOUT |
 | pad `_claim` | ~~`"PAD: not the dev"`, `"PAD: nothing to claim"`~~ | fixed | carried no value, but left a dead, never-retryable packet behind; now a refusal with no reply |
-| pad `_buy` / `_sell` / buyback → venue | `"VENUE: dust"`, `"VENUE: zero …"`, `"VENUE: unknown token"`, `"VENUE: min out"` (v7.2), anything a future venue throws | fixed | `execBuy` / `execSell` run under `try`: a buy bounces whole, a sold bag is re-delivered, a buyback leaves its pot for the next fee. The gateway also floors buys and sells at 1e12 wei so dust never leaves. v7.2 uses this very path for the trader's minimum: the venue reverts under it, before any state change, and the refusal is the protection (§3) |
+| pad `_buy` / `_sell` / buyback → venue | `"VENUE: dust"`, `"VENUE: zero …"`, `"VENUE: unknown token"`, `"VENUE: min out"` and `"VENUE: expired"` (v7.2), anything a future venue throws | fixed | `execBuy` / `execSell` run under `try`: a buy bounces whole, a sold bag is re-delivered, a buyback leaves its pot for the next fee. The gateway also floors buys and sells at 1e12 wei so dust never leaves. v7.2 uses this very path for the trader's minimum: the venue reverts under it, before any state change, and the refusal is the protection (§3) — and for an order past its deadline, which the venue turns away first of all (`"VENUE: expired"`) |
+| pad `onOmniMessage`, the `deadline` of a BUY or a SELL (v7.2) | — | never a revert | the pad decodes the word and hands it to the venue: no comparison of its own, no arithmetic — 0, 1 and `2^256 − 1` are all handled (tested). A late order goes through the row above. The dev buy of a spawn and a buyback pass 0 |
 | pad `_sell`, the seller's minimum → the venue's gross minimum | ~~an arithmetic overflow on a minimum near `2^256`~~ | **would have been a stranding bug — designed out** | `minUsdOut` is the first NUMBER on the wire that a user chooses freely and the pad does arithmetic on. The conversion runs unchecked and saturates: a minimum too large to convert becomes one no sale can meet, the venue refuses, the bag goes back (tested with `2^256 − 1` and its neighbours; the checked version reverts the delivery for good) |
 | adapter `lzReceive` | `"LZM: value"` (v7.2) | acceptable — retryable | the delivery brought less than the reply budget the envelope names. The packet is not consumed: the executor, or anyone who attaches the budget, delivers it (§3, "The budget must arrive") |
 | adapter `lzReceive` → anything, with too little gas | out of gas | acceptable — retryable | the executor's gas is per kind of message since v7.2 and an operator can set one too low; anyone can also deliver with less on purpose. A delivery that runs short reverts as a whole; where an inner failure is tolerated the outcome does not depend on gas (§3, "What the option is, and is not") |
@@ -1351,13 +1510,18 @@ Constant-product with virtual reserves (`InternalCurveVenue.sol`):
   remaining curve supply it is capped and charged only what the remainder
   costs, `+1` rounding against the buyer (`execBuy`); the pad
   refunds the unspent remainder to the buyer's chain.
-- **Minimums (v7.2).** `execBuy(token, usdIn, minOut)` reverts `"VENUE:
-  min out"` if `out < minOut` — after the cap above, so a buy the curve
-  can only fill in part is under its minimum — and `execSell(token,
-  tokensIn, minOut)` if the gross `usdOut < minOut`; both before any
+- **Minimums (v7.2).** `execBuy(token, usdIn, minOut, deadline)` reverts
+  `"VENUE: min out"` if `out < minOut` — after the cap above, so a buy the
+  curve can only fill in part is under its minimum — and `execSell(token,
+  tokensIn, minOut, deadline)` if the gross `usdOut < minOut`; both before any
   state changes, on the curve and on the pool after ascension. 0 = none.
   It is part of `ICurveVenue`: any future venue must enforce it, or the
   hub's cross-chain orders are unprotected again.
+- **Deadlines (v7.2).** Both take a fourth argument, `deadline` (unix
+  seconds, 0 = none), and revert `"VENUE: expired"` when `block.timestamp
+  > deadline` — first of all, before the token, the amount or the minimum
+  is looked at (`_inTime`). Part of `ICurveVenue` too, for the same
+  reason (§3, "An order expires").
 - **Ascension:** when `sold ≥ CURVE_SUPPLY`, `vBase −= V_BASE_0` (the
   virtual part evaporates; what remains is real raised USD) and
   `vTokens = 200M` — the reserved supply seeds the "omnipool" and trading
@@ -1399,10 +1563,17 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 - **Codec:** hand-rolled canonical ABI codec, byte-exact against vectors
   generated by ethers' AbiCoder (`contracts/scripts/gen-codec-vectors.js`
   → `solana/tests/codec-vectors.json`: 25 op vectors + 3 envelope vectors).
-  **Stale since v7.2**: the generator and the vectors still describe the
+  **Stale since v7.2**: the generator and those vectors still describe the
   three-word OP_BUY / OP_SELL and the three-field envelope, and know
-  nothing of ops 6 and 7. Both must be brought to §3 / §4 before the
-  program speaks to a v7.2 hub.
+  nothing of ops 6 and 7; the hand-written `codec-vectors-v72.json` has the
+  second round's shapes (four-word trades). Everything must be brought to
+  §3 / §4 — FIVE-word trades — before the program speaks to a v7.2 hub: a
+  four-word BUY or SELL reverts there for good (§4).
+- **Deadline (v7.2):** the program must stamp every BUY and SELL with its
+  clock's unix time plus a lifetime, as the last word (a big-endian
+  `uint256`), never 0. The hub reads it against Base's clock: Solana's
+  on-chain time is an estimate that can lag real time, so its lifetime
+  must absorb that lag or its orders bounce (§3, "Two clocks").
 
 ## 11. Known gaps and testnet shortcuts
 
@@ -1417,8 +1588,9 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 | ~~`FeeDistributor` 2^128 magnitude edge~~ | **RESOLVED** — it was exploitable, not theoretical; closed by `MIN_SHARES`, bound quantified in §8 |
 | ~~Hub-chain local trading absent~~ | **RESOLVED in v7** — the hub chain has its own gateway (label 3) on the hub adapter's loopback (§3); the S3 dead branch was removed in the hardening chantier (§6) |
 | ~~`OP_FEE_DROP` fan-out is not prepaid by anyone~~ | **RESOLVED** — holder fees accrue on the hub and travel on a user-paid `OP_PULL_FEES` (§8); every remote message the hub sends is now prepaid (§3). New economic property to review: just-in-time capture of a large un-pulled slice (§8) |
-| `returnUnit` / `tradeLegs` / `spawnLegs` are operator-set estimates of a moving price | AUDIT SCOPE as a liveness model — set too low the hub tank drains and replies stall (retryable, §3); set too high users overpay into the tank (now bounded: `MAX_RETURN_UNIT`, legs ≤ 4 / 32). Needs monitoring + a refresh routine; one `returnUnit` per destination means a spawn's SYNC legs are priced at the origin's unit, not each target's; `spawnLegs` goes stale on every gateway when a chain is added. v7.2 adds numbers of the same kind — `syncCap`, `requestCap` per kind, `openLegs`, `moveLegs` per destination, `gasForOp` per kind — each a price the operator must keep near the market; none can lose user value when wrong (a skipped SYNC, a claim sent home, a delivery to make again), all can cost users fees or liveness |
-| ~~One executor gas limit per destination~~ | **RESOLVED in v7.2** (§3, F-20) — `gasForOp[dst][op]`. Not bounded by the contract (a `uint128`): set absurdly high it over-charges whoever signs the quote, and that money goes to LayerZero's executor, not to the tank — nobody can give it back |
+| `returnUnit` / `tradeLegs` / `spawnLegs` are operator-set estimates of a moving price | AUDIT SCOPE as a liveness model — set too low the hub tank drains and replies stall (retryable, §3); set too high users overpay into the tank (now bounded: `MAX_RETURN_UNIT`, legs ≤ 4 / 128). Needs monitoring + a refresh routine; one `returnUnit` per destination means a spawn's SYNC legs are priced at the origin's unit, not each target's; `spawnLegs` goes stale on every gateway when a chain is added. v7.2 adds numbers of the same kind — `syncCap`, `requestCap` per kind, `openLegs`, `moveLegs` per destination, `gasForOp` per kind, `orderTtl` per gateway — each a price (or, for the last, a delay) the operator must keep near the market; none can lose user value when wrong (a skipped SYNC, a claim sent home, a delivery to make again), all can cost users fees or liveness |
+| ~~One executor gas limit per destination~~ | **RESOLVED in v7.2** (§3, F-20) — `gasForOp[dst][op]`. ~~Not bounded by the contract~~: bounded in the third round, with `setDestination`'s gas — `MAX_EXECUTOR_GAS = 15,000,000` (F-27). Inside the bound a limit set too high still over-charges whoever signs the quote, and that money goes to LayerZero's executor, not to the tank — nobody can give it back |
+| ~~An undelivered order stays executable at its minimum for ever~~ | **RESOLVED in v7.2** (§3 "An order expires", F-26) — every BUY and SELL carries a deadline; a late one is refused whole. Residuals: inside its lifetime (30 minutes by default) a stuck order is as exposed as before — the deadline bounds the window, it does not close it; the deadline compares two chains' clocks (a source clock behind bounces orders early, one ahead lets them live longer — never a loss); the 2-minute floor is under Ethereum's own confirmation time, so the tooling must refuse a lifetime that short there; and the check, like the minimum's, is the venue's (a venue that ignored it would fill late orders) |
 | Gateway sponsorship is one admin flag | AUDIT SCOPE (hostile/mistaken admin, now behind the timelock) — sponsoring a gateway on mainnet reopens the dust-drain of its adapter's tank |
 | ~~The adapter accepts a zero-sender packet from an unconfigured chain as the hub~~ | **RESOLVED in v7.1** (F-11, §3) by a full redeploy; the retired v7.0 deployment held only canary funds |
 | ~~One chain whose send reverts bricks every launch~~ | **RESOLVED in v7.1** (F-12, §4) — failed SYNCs are logged, `resync` repairs them |
@@ -1428,14 +1600,14 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 | A forged gateway message can now pay out on ANY chain (v7.2) | **AUDIT SCOPE** — before `OP_MOVE` the hub only ever sent value back to the chain a message came from, so a compromised leg (its adapter route, its verifier set, a faulty non-EVM gateway program) could drain other vaults only indirectly (unbacked buys moving the price). A forged `OP_MOVE` is a direct `OP_PAYOUT` of any amount to any chain: USDC out of every liquid vault, unbacked claims beyond. The weakest pathway's verifier set is now custody of every vault. There is no per-chain or per-period limit on what a chain may move out — it would need hub storage and a policy; not built |
 | ~~The executor's prepaid value is not enforced on arrival~~ | **RESOLVED in v7.2** (§3 "The budget must arrive", F-19) — the budget rides in the envelope and `lzReceive` refuses a delivery that brings less. Residual, to verify on a testnet before mainnet: it assumes the real executor delivers exactly the option's value, as the mock does. If one delivered short, hub-bound messages would wait for a manual delivery (anyone, with the value attached) instead of landing |
 | ~~A spawn cannot prepay a leg far dearer than its own chain's reply~~ | **RESOLVED in v7.2** — `MAX_SPAWN_LEGS` is 128 (it was 32). Measured on forks, a launch that reaches Ethereum needs 15–30 of its origin's legs, and more as executor gas per kind shrinks the unit. The legs are still priced on a reply to the ORIGIN chain (one unit per destination), so `spawnLegs` must be re-tuned when any leg's price moves; and with a `syncCap` set below Ethereum's ordinary price NO token is on Ethereum until someone pays to open it there — a policy, no longer a necessity |
-| The pad is close to the code-size limit | 23,872 of 24,576 bytes after v7.2 (704 to spare; `sizes.test.js` requires 512). Room was made by routing every reply send, every `Refused`, every `Trade` and the BUY/SELL dispatch through shared internals — no behaviour change. The minimum on the wire cost the pad 8 bytes (the check lives in the venue). No compiler override, same optimizer settings as every other contract. It only matters until the pad is deployed: after that nothing can be added anyway |
+| The pad is close to the code-size limit | 23,890 of 24,576 bytes after v7.2 (686 to spare; `sizes.test.js` requires 512). Room was made by routing every reply send, every `Refused`, every `Trade` and the BUY/SELL dispatch through shared internals — no behaviour change. The minimum on the wire cost the pad 8 bytes and the deadline 18 (both checks live in the venue; the pad carries the words). No compiler override, same optimizer settings as every other contract. It only matters until the pad is deployed: after that nothing can be added anyway |
 | `requestCap` defaults to 0 — closed | by design (fail-closed: an unpriced chain cannot make the tank front anything) — but the deploy tooling must set it for every remote chain and for both kinds (10: opens, 12: incoming moves), with `moveLegs` for every pair and `openLegs = 0` on the hub chain's gateway, or opens waste their fee and moves come home. TOOLING CHANTIER (next) |
-| ~~No slippage protection on CROSS-CHAIN trades~~ | **RESOLVED in v7.2** (§3, F-18) — the minimum rides OP_BUY / OP_SELL and the venue enforces it; `…Min` work on every chain. Residuals: on a remote chain the protection is a refusal after the fact, not a revert (the order's value makes the round trip and the messaging fee is spent); an order can be made to BOUNCE by whoever moves the price past its tolerance; the refusal's reason code (6) is shared with dust. And the PLAIN functions still name no price: a frontend that sends a cross-chain trade without a minimum sends it unprotected — it should not offer that |
+| ~~No slippage protection on CROSS-CHAIN trades~~ | **RESOLVED in v7.2** (§3, F-18) — the minimum rides OP_BUY / OP_SELL and the venue enforces it; `…Min` work on every chain. Residuals: on a remote chain the protection is a refusal after the fact, not a revert (the order's value makes the round trip and the messaging fee is spent); an order can be made to BOUNCE by whoever moves the price past its tolerance; the refusal's reason code (6) is shared with dust and with a late order. And the PLAIN functions still name no price: a frontend that sends a cross-chain trade without a minimum sends it unprotected — it should not offer that |
 | No slippage protection on a spawn's dev buy | not needed — it executes first on a curve that did not exist one instruction earlier, inside the spawn itself |
 | A parked delivery needs a user transaction (`claimPending`) and the UI does not surface it yet | frontend chantier — the tokens are safe and visible on-chain (`pendingDelivery`, `DeliveryParked`), but a user who never looks never gets them |
 | No rescue path for a permanently refused message's prepaid native fee, or for USDC sent to a vault by mistake | by design so far (no admin function moves vault USDC); note it |
 | Solana program still pays its sends from a protocol GasTank and prepays no reply | must adopt the v7 fee model before a Solana mainnet leg (wire unchanged; the fee plumbing is transport-side) |
-| Solana program and the v7.2 ops | not written. As a DESTINATION of a move its PAYOUT handler receives a user-chosen 32-byte recipient and must never fail on it (an account that does not exist, is not a wallet, has no token account): pay, park, or mint a claim. The hub forwards any WIDE `to` to a wide gateway (an address-shaped one is sent home, §5), with one `returnUnit` of that chain's coin for the account it may have to open (§3): the program must be told what that unit is and the tooling must set it on the hub adapter for that label only. As a SOURCE it needs `OP_OPEN` / `OP_MOVE` in its codec (new vectors) and per-destination pricing. And for ANYTHING it sends to this hub: the four-word OP_BUY / OP_SELL (a minimum of 0 is valid) and the four-field envelope whose last word is the reply budget its executor option carries — the hub's adapter refuses a delivery that brings less — and, on what it receives, the same envelope (budget 0) |
+| Solana program and the v7.2 ops | written against the SECOND round's wire (the Solana chantier; four-word trades) — one word behind this hub, see the end of this row. As a DESTINATION of a move its PAYOUT handler receives a user-chosen 32-byte recipient and must never fail on it (an account that does not exist, is not a wallet, has no token account): pay, park, or mint a claim. The hub forwards any WIDE `to` to a wide gateway (an address-shaped one is sent home, §5), with one `returnUnit` of that chain's coin for the account it may have to open (§3): the program must be told what that unit is and the tooling must set it on the hub adapter for that label only. As a SOURCE it needs `OP_OPEN` / `OP_MOVE` in its codec (new vectors) and per-destination pricing. And for ANYTHING it sends to this hub: the FIVE-word OP_BUY / OP_SELL (a minimum of 0 is valid; the deadline is its clock's unix time plus a lifetime, never 0 — a four-word trade reverts on the hub for good, with the trader's funds taken) and the four-field envelope whose last word is the reply budget its executor option carries — the hub's adapter refuses a delivery that brings less — and, on what it receives, the same envelope (budget 0) |
 | Frontend indexing by raw `eth_getLogs` scans | OUT OF SCOPE (ops; mainnet gets an indexer) |
 | LayerZero DVN/executor selection | adapters now set a delegate (v7), so the set CAN be chosen — and must be, at deploy time, per pathway and on both sides (§3). Until `endpoint.setConfig` is called the defaults apply. AUDIT SCOPE for mainnet config review |
 | Raydium/Meteora venue adapter | does not exist yet; OUT OF SCOPE until written |
@@ -1446,7 +1618,7 @@ the engineering log: [../solana/NOTES.md](../solana/NOTES.md).
 Observations made while writing this spec from the code — none silently
 papered over. Status after the v7 hardening chantier: **F-1, F-2, F-5, F-6
 resolved; F-7 to F-10 found and resolved by that chantier; F-11 to F-13
-found after the v7.0 mainnet deployment and resolved in v7.1; F-14 to F-25
+found after the v7.0 mainnet deployment and resolved in v7.1; F-14 to F-27
 found while building v7.2 and resolved in it; F-3 and F-4 are Solana-side
 and remain open.**
 
@@ -1657,3 +1829,25 @@ frozen hub must give it:
 - **`MAX_SPAWN_LEGS` 32 → 128.** Not a defect of the code but of a bound:
   a launch that reaches Ethereum needs 15–30 of its origin's legs on the
   fork figures, at the edge of 32 (§3).
+
+Found in the third round of v7.2 — the last before the pad is frozen:
+
+- **F-26 — an order that waits is free money for whoever delivers it.**
+  The minimum of F-18 is a price, not an age. An order that is not
+  delivered stays executable at that price for ever; orders are stuck
+  exactly when something of ours fails (an empty tank, a gas limit set too
+  low, a closed leg), many at once; and delivery is permissionless. Once
+  the market has moved away from a stuck order's minimum, the gap is the
+  deliverer's: pump to the order's limit, deliver, dump — a $1,000 buy
+  left its buyer a third of what the money was worth and the attacker
+  about $600, with the minimum honoured to the wei. RESOLVED: a deadline
+  on the wire for ops 2 and 3, stamped by the gateway, read on the hub;
+  a late order is turned away by the venue, next to the minimum, and
+  comes home whole (§3, "An order expires"). An incident now ends in
+  refunds.
+- **F-27 — executor gas had no upper bound.** `setDestination` and
+  `setGasForOp` took any `uint128`. A slip over-charges whoever signs the
+  quote, and the money goes to LayerZero's executor: no tank holds it, no
+  admin can return it — and above 2^24 gas a message is sold gas that no
+  single transaction can deliver it with, on chains that cap one.
+  RESOLVED: `MAX_EXECUTOR_GAS = 15,000,000` on both (§3).

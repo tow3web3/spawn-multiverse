@@ -37,19 +37,28 @@ interface ICurveVenue {
     /// minutes before it executes here, and anyone may deliver it: without
     /// a minimum enforced where the price is, it can be sandwiched inside
     /// one hub-chain transaction. Every venue must enforce it.
+    ///
+    /// AND IN TIME (v7.2). Both trades take a `deadline` — unix seconds on
+    /// THIS chain's clock; 0 = none — and REVERT after it, the same way and
+    /// for the same reason: a minimum protects a fresh order, not one that
+    /// sat undelivered while the price moved away from it, and whoever
+    /// delivers a stale order picks the moment. `block.timestamp ==
+    /// deadline` is in time. Every venue must enforce it too.
 
     /// Executes a buy of up to `usdIn`. Returns the tokens bought, the USD
     /// actually spent (the pad refunds the remainder) and whether this buy
     /// completed the curve — ascension. Reverts if fewer than `minOut`
     /// tokens would be bought (a buy cut short by the end of the curve
-    /// included).
-    function execBuy(address token, uint256 usdIn, uint256 minOut)
+    /// included), or after `deadline`.
+    function execBuy(address token, uint256 usdIn, uint256 minOut, uint256 deadline)
         external
         returns (uint256 tokensOut, uint256 usdSpent, bool ascendedNow);
 
     /// Executes a sell. Returns the USD owed for it, before the pad's fee.
-    /// Reverts if that is less than `minOut`.
-    function execSell(address token, uint256 tokensIn, uint256 minOut) external returns (uint256 usdOut);
+    /// Reverts if that is less than `minOut`, or after `deadline`.
+    function execSell(address token, uint256 tokensIn, uint256 minOut, uint256 deadline)
+        external
+        returns (uint256 usdOut);
 
     function spotPrice(address token) external view returns (uint256);
 

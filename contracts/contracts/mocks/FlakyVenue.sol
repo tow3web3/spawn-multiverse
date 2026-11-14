@@ -38,15 +38,23 @@ contract FlakyVenue is ICurveVenue {
         inner.openMarket(token);
     }
 
-    function execBuy(address token, uint256 usdIn, uint256 minOut) external onlyPad returns (uint256, uint256, bool) {
+    function execBuy(address token, uint256 usdIn, uint256 minOut, uint256 deadline)
+        external
+        onlyPad
+        returns (uint256, uint256, bool)
+    {
         require(!refuse && buysLeft > 0, "FLAKY: refused");
         if (buysLeft != type(uint256).max) buysLeft--;
-        return inner.execBuy(token, usdIn, minOut);
+        return inner.execBuy(token, usdIn, minOut, deadline);
     }
 
-    function execSell(address token, uint256 tokensIn, uint256 minOut) external onlyPad returns (uint256) {
+    function execSell(address token, uint256 tokensIn, uint256 minOut, uint256 deadline)
+        external
+        onlyPad
+        returns (uint256)
+    {
         require(!refuse, "FLAKY: refused");
-        return inner.execSell(token, tokensIn, minOut);
+        return inner.execSell(token, tokensIn, minOut, deadline);
     }
 
     function spotPrice(address token) external view returns (uint256) {

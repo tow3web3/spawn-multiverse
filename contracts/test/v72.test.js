@@ -1416,15 +1416,18 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       ).to.deep.equal(PAD_V71)
       expect(
         split(names(gw, 'function'), [
-          'MAX_MOVE_LEGS()', 'MAX_OPEN_LEGS()', 'moveClaim(uint32,bytes32,uint256)', 'moveLegs(uint32)', 'openLegs()',
-          'openToken(address)', 'quoteMove(uint32)', 'quoteOpen()', 'setMoveLegs(uint32,uint16)', 'setOpenLegs(uint8)',
+          'MAX_MOVE_LEGS()', 'MAX_OPEN_LEGS()', 'MAX_ORDER_TTL()', 'MIN_ORDER_TTL()', 'moveClaim(uint32,bytes32,uint256)',
+          'moveLegs(uint32)', 'openLegs()', 'openToken(address)', 'orderTtl()', 'quoteMove(uint32)', 'quoteOpen()',
+          'setMoveLegs(uint32,uint16)', 'setOpenLegs(uint8)', 'setOrderTtl(uint32)',
         ]),
       ).to.deep.equal(GW_V71)
       expect(
         split(names(pad, 'event'), ['Moved(uint32,uint32,bytes32,bytes32,uint256,bool)', 'RequestCapSet(uint32,uint8,uint256)', 'SyncCapSet(uint32,uint256)']),
       ).to.have.length(21)
       expect(
-        split(names(gw, 'event'), ['ClaimMoved(address,uint32,bytes32,uint256)', 'MoveLegsSet(uint32,uint16)', 'OpenLegsSet(uint8)']),
+        split(names(gw, 'event'), [
+          'ClaimMoved(address,uint32,bytes32,uint256)', 'MoveLegsSet(uint32,uint16)', 'OpenLegsSet(uint8)', 'OrderTtlSet(uint32)',
+        ]),
       ).to.have.length(13)
       // new
       expect(sig(pad, 'syncCap')).to.equal('function syncCap(uint32) view returns (uint256)')
@@ -1446,6 +1449,12 @@ describe('Protocol v7.2 — one universe, six chains, two dollars', () => {
       expect(sig(gw, 'setMoveLegs')).to.equal('function setMoveLegs(uint32 dstChain, uint16 legs)')
       expect(sig(gw, 'MAX_OPEN_LEGS')).to.equal('function MAX_OPEN_LEGS() view returns (uint8)')
       expect(sig(gw, 'MAX_MOVE_LEGS')).to.equal('function MAX_MOVE_LEGS() view returns (uint16)')
+      // the lifetime of an order (the third round): a number and its setter — no trade function changed
+      expect(sig(gw, 'orderTtl')).to.equal('function orderTtl() view returns (uint32)')
+      expect(sig(gw, 'setOrderTtl')).to.equal('function setOrderTtl(uint32 ttl)')
+      expect(sig(gw, 'MIN_ORDER_TTL')).to.equal('function MIN_ORDER_TTL() view returns (uint32)')
+      expect(sig(gw, 'MAX_ORDER_TTL')).to.equal('function MAX_ORDER_TTL() view returns (uint32)')
+      expect(gw.getEvent('OrderTtlSet').format('full')).to.equal('event OrderTtlSet(uint32 ttl)')
       // changed: payable, and no longer the operator's alone — same selector
       expect(sig(pad, 'resync')).to.equal('function resync(address token, uint32 chain) payable')
       // untouched

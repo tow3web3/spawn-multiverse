@@ -49,11 +49,19 @@ contract InternalCurveVenue is ICurveVenue {
         _curves[token] = Curve(V_BASE_0, V_TOKENS_0, 0, false);
     }
 
-    function execBuy(address token, uint256 usdIn, uint256 minOut)
+    /// An order that lands after its deadline is no order: it is turned
+    /// away before anything is looked at (0 = no deadline; the second
+    /// itself is in time).
+    function _inTime(uint256 deadline) internal view {
+        require(deadline == 0 || block.timestamp <= deadline, "VENUE: expired");
+    }
+
+    function execBuy(address token, uint256 usdIn, uint256 minOut, uint256 deadline)
         external
         onlyPad
         returns (uint256 out, uint256 spend, bool ascendedNow)
     {
+        _inTime(deadline);
         Curve storage c = _curves[token];
         require(c.vTokens > 0, "VENUE: unknown token");
         require(usdIn > 0, "VENUE: zero buy");
@@ -93,7 +101,12 @@ contract InternalCurveVenue is ICurveVenue {
         }
     }
 
-    function execSell(address token, uint256 tokensIn, uint256 minOut) external onlyPad returns (uint256 usdOut) {
+    function execSell(address token, uint256 tokensIn, uint256 minOut, uint256 deadline)
+        external
+        onlyPad
+        returns (uint256 usdOut)
+    {
+        _inTime(deadline);
         Curve storage c = _curves[token];
         require(c.vTokens > 0, "VENUE: unknown token");
         require(tokensIn > 0, "VENUE: zero sell");

@@ -610,7 +610,7 @@ describe('Transport economics (protocol v7)', () => {
     it('the loopback vouches for exactly what a peered adapter would: a registered sender and its own label', async () => {
       const payload = coder.encode(
         ['uint8', 'bytes'],
-        [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [ethers.ZeroHash, b32(user.address), E(100), 0n])],
+        [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256'], [ethers.ZeroHash, b32(user.address), E(100), 0n, 0n])],
       )
       // not registered: cannot send at all
       await expect(w.hubMessenger.connect(stranger).send(0, b32(w.pad.target), payload, 0)).to.be.revertedWith(

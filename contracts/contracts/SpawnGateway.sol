@@ -29,6 +29,11 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// SYNC fan-out). The `quote*` views return that fee exactly, before
 /// signing. A short fee reverts the whole call: nothing is burned or pulled.
 ///
+/// EVERY ORDER HAS A DEADLINE (v7.2). A buy or a sell sent from here is
+/// stamped with `block.timestamp + orderTtl`; the hub refuses it whole — the
+/// dollars or the bag come home — if it lands later than that. See
+/// `orderTtl`.
+///
 /// v7.2 adds two actions that are not trades. `openToken` asks the hub for
 /// this chain's replica of a token that never reached it (its SYNC was
 /// skipped or failed, or the chain joined later). `moveClaim` sends an oUSD
@@ -81,6 +86,15 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     /// A move is answered on ANOTHER chain, which can cost hundreds of this
     /// chain's reply units (an L1 seen from an L2).
     uint16 public constant MAX_MOVE_LEGS = 4096;
+    /// Bounds on `orderTtl`, so that there is always a deadline and never
+    /// an absurd one. The floor is a guard against a slip, NOT a promise
+    /// that an order reaches the hub that fast from every chain: a message
+    /// waits for its source chain's block confirmations before it is even
+    /// verified (some three minutes from Ethereum), so the lifetime is set
+    /// per chain, well above what that chain's messages take. Set too
+    /// short, every order from here bounces whole until it is lengthened.
+    uint32 public constant MIN_ORDER_TTL = 2 minutes;
+    uint32 public constant MAX_ORDER_TTL = 1 days;
 
     IOmniMessenger public immutable messenger;
     OmniUSD public immutable usd; // this chain's instance
@@ -111,6 +125,29 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     /// tank, and anyone could ask for one. The hub chain's own gateway is
     /// set to 0 (its SYNC is a free local call).
     uint8 public openLegs = 1;
+    /// HOW LONG AN ORDER LIVES (v7.2), in seconds. Every BUY and SELL this
+    /// gateway sends — plain or `...Min` — carries `block.timestamp +
+    /// orderTtl` as its deadline, and the hub refuses an order that lands
+    /// after it exactly as it refuses one under its minimum: a buy's dollars
+    /// ride home whole, a sold bag is delivered back. Orders get stuck when
+    /// something of ours fails (an empty tank, executor gas set too low, a
+    /// paused leg) — many at once — and delivery is open to anyone: without
+    /// a deadline, each one stays executable at its minimum for ever, for
+    /// whoever finds the moment the price has moved away from it. With one,
+    /// a stale order bounces and the incident ends in refunds.
+    ///
+    /// There is always a deadline: the operator can move it only between
+    /// `MIN_ORDER_TTL` and `MAX_ORDER_TTL`. No caller chooses it, so no
+    /// signature changed.
+    ///
+    /// TWO CLOCKS: the deadline is THIS chain's `block.timestamp` plus the
+    /// lifetime, and the hub compares it with its own. If this chain's
+    /// clock runs behind the hub's, orders expire that much early and
+    /// bounce whole (lengthen `orderTtl`); if it runs ahead, they live that
+    /// much longer and are still bounded by their minimum. On the hub's own
+    /// chain the order executes in the very transaction that sends it and
+    /// can never be late.
+    uint32 public orderTtl = 30 minutes;
     /// Legs prepaid by `moveClaim` (v7.2), per DESTINATION chain: what the
     /// hub pays to carry the PAYOUT there, in this chain's reply units —
     /// never fewer than `tradeLegs`, which pays for the way back if the
@@ -133,6 +170,7 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
     event ReplicaDeployed(address indexed hubToken, address replica, string name, string symbol);
     event LegsSet(uint8 tradeLegs, uint8 spawnLegs);
     event OpenLegsSet(uint8 openLegs);
+    event OrderTtlSet(uint32 ttl);
     event MoveLegsSet(uint32 indexed dstChain, uint16 legs);
     /// `from` burned `amount` of oUSD here and asked the hub to pay it to
     /// (`dstChain`, `to`). The hub's `Moved` says where it ended up.
@@ -179,6 +217,14 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         require(legs <= MAX_OPEN_LEGS, "GW: legs too high");
         openLegs = legs;
         emit OpenLegsSet(legs);
+    }
+
+    /// How long the orders sent from here stay executable on the hub — see
+    /// `orderTtl`. Orders already in flight keep the deadline they left with.
+    function setOrderTtl(uint32 ttl) external onlyOperator {
+        require(ttl >= MIN_ORDER_TTL && ttl <= MAX_ORDER_TTL, "GW: bad ttl");
+        orderTtl = ttl;
+        emit OrderTtlSet(ttl);
     }
 
     /// Prices — and thereby opens — moves from this chain to `dstChain`;
@@ -339,14 +385,21 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
 
     /// `minTokensOut` rides the wire (v7.2): the hub refuses the buy whole,
     /// and sends every dollar home, if it would fill for less. 0 = any fill.
+    /// So does the order's deadline, and the hub does the same after it.
     function _sendBuy(address hubToken, uint256 usdIn, uint256 minTokensOut) internal {
         // token id + buyer ride as bytes32 (wire convention)
         messenger.send{value: msg.value}(
             HUB_CHAIN,
             _b32(pad),
-            abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn, minTokensOut)),
+            abi.encode(OP_BUY, abi.encode(_b32(hubToken), _b32(msg.sender), usdIn, minTokensOut, _deadline())),
             tradeLegs
         );
+    }
+
+    /// The last second at which the hub will still execute an order sent
+    /// now (see `orderTtl`).
+    function _deadline() internal view returns (uint256) {
+        return block.timestamp + orderTtl;
     }
 
     function sellToken(address hubToken, uint256 tokens) external payable nonReentrant {
@@ -355,7 +408,8 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
 
     /// `minUsdOut` rides the wire (v7.2): what the seller must be PAID, net
     /// of the fee, in 18-decimal dollars — or the hub refuses the sale and
-    /// sends the bag back. 0 = any price.
+    /// sends the bag back. 0 = any price. The order's deadline rides with
+    /// it: after it, the bag comes back too.
     function _sell(address hubToken, uint256 tokens, uint256 minUsdOut) internal {
         require(tokens > 0, "GW: zero");
         require(tokens >= MIN_AMOUNT, "GW: dust");
@@ -366,7 +420,7 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
         messenger.send{value: msg.value}(
             HUB_CHAIN,
             _b32(pad),
-            abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens, minUsdOut)),
+            abi.encode(OP_SELL, abi.encode(_b32(hubToken), _b32(msg.sender), tokens, minUsdOut, _deadline())),
             tradeLegs
         );
     }
@@ -564,16 +618,25 @@ contract SpawnGateway is IOmniReceiver, ReentrancyGuard, Roles {
 
     /// The native fee each action requires right now — call before signing
     /// and attach the result as msg.value. BUY, SELL, CLAIM and PULL
-    /// payloads have a fixed size (with or without a minimum: the word is
-    /// always there), so a placeholder payload quotes exactly;
+    /// payloads have a fixed size (with or without a minimum: that word and
+    /// the deadline's are always there), so a placeholder payload quotes
+    /// exactly;
     /// a SPAWN's size depends on its strings, so its quote takes them.
 
     function quoteBuy() external view returns (uint256) {
-        return _quote(abi.encode(OP_BUY, abi.encode(bytes32(0), bytes32(0), uint256(0), uint256(0))), tradeLegs);
+        return
+            _quote(
+                abi.encode(OP_BUY, abi.encode(bytes32(0), bytes32(0), uint256(0), uint256(0), uint256(0))),
+                tradeLegs
+            );
     }
 
     function quoteSell() external view returns (uint256) {
-        return _quote(abi.encode(OP_SELL, abi.encode(bytes32(0), bytes32(0), uint256(0), uint256(0))), tradeLegs);
+        return
+            _quote(
+                abi.encode(OP_SELL, abi.encode(bytes32(0), bytes32(0), uint256(0), uint256(0), uint256(0))),
+                tradeLegs
+            );
     }
 
     function quoteClaim() external view returns (uint256) {

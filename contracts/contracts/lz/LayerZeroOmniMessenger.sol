@@ -83,12 +83,21 @@ import {Roles} from "../Roles.sol";
 /// LayerZero delegate, the tank's exit — is the admin's, i.e. a timelock's:
 /// a re-pointed route or a fake sender can forge a hub message, and a
 /// forged PAYOUT pays real USDC. The operator only tunes what a message
-/// costs (`setDestination`, `setGasForOp`), the reply budget within a hard
-/// bound.
+/// costs (`setDestination`, `setGasForOp`), executor gas and the reply
+/// budget each within a hard bound.
 contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     /// Hard ceiling on the reply budget per leg an operator can make users
     /// prepay (destination-chain native currency).
     uint128 public constant MAX_RETURN_UNIT = 0.05 ether;
+    /// Hard ceiling on the executor gas an operator can make users buy for
+    /// one message (`gasLimit`, `gasForOp`). What a limit set too high
+    /// overcharges is paid to LayerZero's executor, not into a tank: nobody
+    /// can give it back. 15M is far above the dearest message there is (a
+    /// spawn that reaches every chain: some 5M, 0.3M more per chain added)
+    /// and under the 2^24 gas that one transaction may use on chains that
+    /// cap it — above that cap a message could be sold gas it can never be
+    /// delivered with.
+    uint128 public constant MAX_EXECUTOR_GAS = 15_000_000;
 
     ILayerZeroEndpointV2 public immutable endpoint;
     uint32 public immutable localEid;
@@ -242,6 +251,7 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     /// Per-destination executor settings. `gas` is ignored for a local label
     /// (no executor involved); `unit` is charged per reply leg either way.
     function setDestination(uint32 chainLabel, uint128 gas, uint128 unit) external onlyOperator {
+        require(gas <= MAX_EXECUTOR_GAS, "LZM: gas too high");
         require(unit <= MAX_RETURN_UNIT, "LZM: unit too high");
         gasLimit[chainLabel] = gas;
         returnUnit[chainLabel] = unit;
@@ -255,6 +265,7 @@ contract LayerZeroOmniMessenger is IOmniMessenger, ILayerZeroReceiver, Roles {
     /// delivered again with more — by anyone. A destination whose
     /// `gasLimit` is 0 stays closed whatever is set here.
     function setGasForOp(uint32 chainLabel, uint8 op, uint128 gas) external onlyOperator {
+        require(gas <= MAX_EXECUTOR_GAS, "LZM: gas too high");
         gasForOp[chainLabel][op] = gas;
         emit GasForOpSet(chainLabel, op, gas);
     }

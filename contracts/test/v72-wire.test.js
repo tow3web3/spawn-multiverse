@@ -3,7 +3,7 @@ const { ethers, artifacts } = require('hardhat')
 const { time } = require('@nomicfoundation/hardhat-network-helpers')
 const { deployWorld, fundUsdc, U, GAS_TO_SPOKE, MOCK_GAS_TO_HUB } = require('../scripts/lib-deploy')
 const {
-  E, b32, coder, bal, pastGenesis, FEE, UNIT, EID, HOME, op, unpack, peek, events, deployMixed,
+  E, b32, coder, bal, pastGenesis, FEE, UNIT, EID, TTL, HOME, op, unpack, peek, events, timeOf, deployMixed,
 } = require('./mixed-world')
 
 /** The exact type-3 executor option the adapter builds. */
@@ -13,7 +13,9 @@ const opts = (gas, value = 0n) =>
     : ethers.solidityPacked(['uint16', 'uint8', 'uint16', 'uint8', 'uint128'], [3, 1, 17, 1, gas])
 /** The inter-adapter envelope (v7.2): its last word is the reply budget. */
 const ENVELOPE = ['bytes32', 'bytes32', 'bytes', 'uint256']
-const TRADE = ['bytes32', 'bytes32', 'uint256', 'uint256']
+/** OP_BUY / OP_SELL data: (token, trader, amount, minimum, deadline) — the
+ * deadline is the gateway's block time plus `orderTtl` (test/v72-orders.test.js). */
+const TRADE = ['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256']
 const WHOLE = E(1_000_000_000) // more tokens, or dollars, than any trade gives
 
 /* trades with a minimum, their quoted fee attached */
@@ -90,11 +92,11 @@ describe('Protocol v7.2 — the wire: a minimum for every trade, a budget that m
         }
 
         // ── one wei too many
-        await (await buyMin(c, alice, token, 300, out + 1n)).wait()
+        const sent = await (await buyMin(c, alice, token, 300, out + 1n)).wait()
         // the call did not revert here: the order is on the wire, with its minimum as the fourth word
         expect(unpack(await w.endpoint.peek(0))).to.deep.equal({
           op: 2,
-          data: coder.encode(TRADE, [b32(token), b32(alice.address), E(300), out + 1n]),
+          data: coder.encode(TRADE, [b32(token), b32(alice.address), E(300), out + 1n, (await timeOf(sent)) + TTL]),
         })
         expect(await c.dollar.balanceOf(alice.address)).to.equal(before.dollars - c.T(300))
         // the hub refuses it whole (reason 6: the market would not fill it) and touches nothing
@@ -137,10 +139,10 @@ describe('Protocol v7.2 — the wire: a minimum for every trade, a budget that m
         const worth = await w.worth(opt, alice)
 
         // one wei more than the sale pays: refused, and the bag the spoke burned is delivered back
-        await (await sellMin(opt, alice, token, part, net + 1n)).wait()
+        const sent = await (await sellMin(opt, alice, token, part, net + 1n)).wait()
         expect(unpack(await w.endpoint.peek(0))).to.deep.equal({
           op: 3,
-          data: coder.encode(TRADE, [b32(token), b32(alice.address), part, net + 1n]),
+          data: coder.encode(TRADE, [b32(token), b32(alice.address), part, net + 1n, (await timeOf(sent)) + TTL]),
         })
         expect(await rep.balanceOf(alice.address)).to.equal(bag - part)
         await expect(w.endpoint.deliverNext())
@@ -241,24 +243,26 @@ describe('Protocol v7.2 — the wire: a minimum for every trade, a budget that m
       const { w, token } = await launched()
       const [base, opt] = [w.at(HOME), w.at(6)]
       await w.fund(opt, alice, 1_000)
-      await (await w.buy(opt, alice, token, 100)).wait()
+      let sent = await (await w.buy(opt, alice, token, 100)).wait()
       expect(unpack(await w.endpoint.peek(0))).to.deep.equal({
         op: 2,
-        data: coder.encode(TRADE, [b32(token), b32(alice.address), E(100), 0n]),
+        data: coder.encode(TRADE, [b32(token), b32(alice.address), E(100), 0n, (await timeOf(sent)) + TTL]),
       })
       await w.deliverAll()
       const rep = await w.replica(opt, token)
       const bag = await rep.balanceOf(alice.address)
-      await (await w.sell(opt, alice, token, bag / 2n)).wait()
+      sent = await (await w.sell(opt, alice, token, bag / 2n)).wait()
       expect(unpack(await w.endpoint.peek(0))).to.deep.equal({
         op: 3,
-        data: coder.encode(TRADE, [b32(token), b32(alice.address), bag / 2n, 0n]),
+        data: coder.encode(TRADE, [b32(token), b32(alice.address), bag / 2n, 0n, (await timeOf(sent)) + TTL]),
       })
       await w.deliverAll()
       // oUSD already held: the same wire
       await (await opt.usd.connect(alice).wrap(U(50))).wait()
-      await (await opt.gateway.connect(alice).buyTokenMin(token, E(50), 7n, { value: await opt.gateway.quoteBuy() })).wait()
-      expect(unpack(await w.endpoint.peek(0)).data).to.equal(coder.encode(TRADE, [b32(token), b32(alice.address), E(50), 7n]))
+      sent = await (await opt.gateway.connect(alice).buyTokenMin(token, E(50), 7n, { value: await opt.gateway.quoteBuy() })).wait()
+      expect(unpack(await w.endpoint.peek(0)).data).to.equal(
+        coder.encode(TRADE, [b32(token), b32(alice.address), E(50), 7n, (await timeOf(sent)) + TTL]),
+      )
       await w.deliverAll()
 
       for (const c of [base, opt]) {
@@ -269,7 +273,8 @@ describe('Protocol v7.2 — the wire: a minimum for every trade, a budget that m
         await expect(c.gateway.connect(alice).buyTokenUsdcMin(stranger.address, c.T(10), 1, { value: fee })).to.be.revertedWith('GW: unknown token')
       }
 
-      // a quote is exactly what the send needs — with a fee per byte, a word short would show
+      // a quote is exactly what the send needs — with a fee per byte, a word short (the minimum's, or
+      // the deadline's) would show
       await (await w.endpoint.setByteFee(ethers.parseUnits('1', 'gwei'))).wait()
       const qBuy = await opt.gateway.quoteBuy()
       const qSell = await opt.gateway.quoteSell()
@@ -980,13 +985,13 @@ describe('Protocol v7.2 — the wire: a minimum for every trade, a budget that m
       await w.deliverAll()
 
       // ── REPLIES carry nothing: their recipient acted on that chain already, there is nothing to create
-      await (await w.pad.connect(hub).onOmniMessage(1, STORE, op(2, TRADE, [b32(token), KEY, E(50), 0n]))).wait()
+      await (await w.pad.connect(hub).onOmniMessage(1, STORE, op(2, TRADE, [b32(token), KEY, E(50), 0n, 0n]))).wait()
       let [reply] = await toSixth()
       expect([unpack(reply).op, reply.value]).to.deep.equal([11, 0n])
       expect(reply.options).to.equal(opts(300_000n))
       const bag = coder.decode(['bytes32', 'bytes32', 'uint256', 'uint256'], unpack(reply).data)[2]
       await w.deliverAll()
-      await (await w.pad.connect(hub).onOmniMessage(1, STORE, op(3, TRADE, [b32(token), KEY, bag, 0n]))).wait()
+      await (await w.pad.connect(hub).onOmniMessage(1, STORE, op(3, TRADE, [b32(token), KEY, bag, 0n, 0n]))).wait()
       ;[reply] = await toSixth()
       expect([unpack(reply).op, reply.value]).to.deep.equal([12, 0n])
       await w.deliverAll()
@@ -1078,12 +1083,14 @@ describe('Protocol v7.2 — the wire: a minimum for every trade, a budget that m
   /* ====================================================================== */
 
   describe('what this round changes in the ABI', () => {
-    it('the venue takes a minimum, the messenger says whether it answers at once, the adapter prices gas per op — and the gateway is untouched', async () => {
+    it('the venue takes a minimum (and, since the third round, a deadline), the messenger says whether it answers at once, the adapter prices gas per op — and the gateway is untouched', async () => {
       const sig = async (name, fn) => new ethers.Interface((await artifacts.readArtifact(name)).abi).getFunction(fn)?.format('full')
       expect(await sig('ICurveVenue', 'execBuy')).to.equal(
-        'function execBuy(address token, uint256 usdIn, uint256 minOut) returns (uint256 tokensOut, uint256 usdSpent, bool ascendedNow)',
+        'function execBuy(address token, uint256 usdIn, uint256 minOut, uint256 deadline) returns (uint256 tokensOut, uint256 usdSpent, bool ascendedNow)',
       )
-      expect(await sig('ICurveVenue', 'execSell')).to.equal('function execSell(address token, uint256 tokensIn, uint256 minOut) returns (uint256 usdOut)')
+      expect(await sig('ICurveVenue', 'execSell')).to.equal(
+        'function execSell(address token, uint256 tokensIn, uint256 minOut, uint256 deadline) returns (uint256 usdOut)',
+      )
       expect(await sig('IOmniMessenger', 'isLocal')).to.equal('function isLocal(uint32 chain) view returns (bool)')
       expect(await sig('LocalOmniMessenger', 'isLocal')).to.equal('function isLocal(uint32) pure returns (bool)')
       expect(await sig('LayerZeroOmniMessenger', 'isLocal')).to.equal('function isLocal(uint32) view returns (bool)')

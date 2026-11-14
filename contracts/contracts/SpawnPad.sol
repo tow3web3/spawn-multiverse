@@ -214,7 +214,8 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// A message the pad would not execute. Any value it carried was sent
     /// home (`amount`: the dollars or tokens concerned). `reason`: 1 paused,
     /// 2 unknown token, 3 bad fee mode, 4 not the dev, 5 nothing to pay,
-    /// 6 the venue refused the trade.
+    /// 6 the venue refused the trade (dust, a fill under the order's
+    /// minimum, or an order that landed after its deadline).
     event Refused(
         uint8 indexed op,
         uint32 indexed srcChain,
@@ -474,12 +475,31 @@ contract SpawnPad is IOmniReceiver, Roles {
             ) = abi.decode(data, (bytes32, string, string, string, uint256, uint8));
             _spawn(srcChain, creator, name, symbol, metaURI, devBuyUsd, feeMode);
         } else if (op == OP_BUY || op == OP_SELL) {
-            // one tuple for both: (token, buyer, usdIn, minTokensOut) /
-            // (token, seller, tokensIn, minUsdOut). THE MINIMUM RIDES THE
-            // WIRE (v7.2): 0 = none; under it the trade is refused whole.
-            (bytes32 tokenB, bytes32 actor, uint256 amount, uint256 minOut) = abi.decode(
+            // one tuple for both: (token, buyer, usdIn, minTokensOut,
+            // deadline) / (token, seller, tokensIn, minUsdOut, deadline).
+            // THE MINIMUM RIDES THE WIRE (v7.2): 0 = none; under it the
+            // trade is refused whole.
+            //
+            // AND AN ORDER EXPIRES (v7.2). `deadline` is unix seconds; 0 =
+            // none. A minimum protects a fresh order, not one that sat
+            // undelivered while the price moved away from it — and anyone
+            // may deliver it, at the moment that suits them. The deadline
+            // goes to the venue next to the minimum: an order that lands
+            // AFTER it is turned away there like a fill under a minimum,
+            // and the same two refusals send the dollars, or the bag, home
+            // whole. No path of its own, and no arithmetic on the word.
+            //
+            // TWO CLOCKS. The gateway wrote the deadline from ITS chain's
+            // clock; it is read against the hub's. A source clock that
+            // runs behind makes orders expire early: they bounce whole (a
+            // messaging fee and a retry — and if it lags by a whole
+            // lifetime, every order from that chain bounces until its
+            // operator lengthens `orderTtl`). One that runs ahead makes
+            // them live that much longer, still bounded by their minimum.
+            // Neither can lose a dollar or a token.
+            (bytes32 tokenB, bytes32 actor, uint256 amount, uint256 minOut, uint256 deadline) = abi.decode(
                 data,
-                (bytes32, bytes32, uint256, uint256)
+                (bytes32, bytes32, uint256, uint256, uint256)
             );
             (bool ok, address token) = _known(tokenB);
             if (!ok) {
@@ -488,9 +508,9 @@ contract SpawnPad is IOmniReceiver, Roles {
                 // unknown id names nothing a spoke could have burned to sell.)
                 if (op == OP_BUY) _sendHome(srcChain, actor, amount);
             } else if (op == OP_BUY) {
-                _buy(srcChain, token, actor, amount, minOut, false);
+                _buy(srcChain, token, actor, amount, minOut, deadline, false);
             } else {
-                _sell(srcChain, token, actor, amount, minOut);
+                _sell(srcChain, token, actor, amount, minOut, deadline);
             }
         } else if (op == OP_CLAIM) {
             (bytes32 tokenB, bytes32 claimer) = abi.decode(data, (bytes32, bytes32));
@@ -581,8 +601,10 @@ contract SpawnPad is IOmniReceiver, Roles {
 
         // The dev buy is part of the spawn itself — the one disclosed FAIR
         // GENESIS exemption (no block-0 rule, no tax, no cap). It names no
-        // minimum: it is the first trade of a curve born one line above.
-        if (devBuyUsd > 0) _buy(srcChain, address(token), creator, devBuyUsd, 0, true);
+        // minimum and no deadline: it is the first trade of a curve born
+        // one line above — there is no earlier price for it to be stale
+        // against.
+        if (devBuyUsd > 0) _buy(srcChain, address(token), creator, devBuyUsd, 0, 0, true);
     }
 
     /// MESSAGES THE PAD IS FREE TO SKIP — a token's SYNC (at spawn, or asked
@@ -744,10 +766,18 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// of the curve included — and the catch below does what it does for any
     /// refusal: the genesis accounting is undone and the WHOLE `usdIn` rides
     /// home in the DELIVER. This is what a cross-chain buy has against
-    /// whoever delivers it between two trades of their own.
-    function _buy(uint32 srcChain, address token, bytes32 buyer, uint256 usdIn, uint256 minOut, bool genesisBuy)
-        internal
-    {
+    /// whoever delivers it between two trades of their own. `deadline`
+    /// (unix seconds, 0 = none) goes to the venue with it, and an order
+    /// that lands after it leaves the same way: whole.
+    function _buy(
+        uint32 srcChain,
+        address token,
+        bytes32 buyer,
+        uint256 usdIn,
+        uint256 minOut,
+        uint256 deadline,
+        bool genesisBuy
+    ) internal {
         uint256 spendable;
         uint256 snipeBps;
         if (paused) {
@@ -766,7 +796,11 @@ contract SpawnPad is IOmniReceiver, Roles {
         uint256 fee;
         if (spendable > 0) {
             uint256 feeIn = (spendable * feeRate) / 10_000;
-            try venue.execBuy(token, spendable - feeIn, minOut) returns (uint256 o, uint256 s, bool ascendedNow) {
+            try venue.execBuy(token, spendable - feeIn, minOut, deadline) returns (
+                uint256 o,
+                uint256 s,
+                bool ascendedNow
+            ) {
                 out = o;
                 spend = s;
                 // If the curve capped the buy, the fee shrinks with it.
@@ -808,8 +842,17 @@ contract SpawnPad is IOmniReceiver, Roles {
     /// sale would pay is served, and never paid a wei under what they named.
     /// A minimum too large to convert cannot be met by any sale: it becomes
     /// the largest number there is (never an overflow — a revert here would
-    /// strand the bag the spoke already burned).
-    function _sell(uint32 srcChain, address token, bytes32 seller, uint256 tokensIn, uint256 minNet) internal {
+    /// strand the bag the spoke already burned). A sale that lands after
+    /// its `deadline` (0 = none) is turned away by the venue too, and its
+    /// bag goes back the same way.
+    function _sell(
+        uint32 srcChain,
+        address token,
+        bytes32 seller,
+        uint256 tokensIn,
+        uint256 minNet,
+        uint256 deadline
+    ) internal {
         uint256 minGross = minNet;
         if (minNet != 0) {
             unchecked {
@@ -818,12 +861,12 @@ contract SpawnPad is IOmniReceiver, Roles {
             if (minGross < minNet) minGross = type(uint256).max;
         }
         uint256 usdOut;
-        try venue.execSell(token, tokensIn, minGross) returns (uint256 u) {
+        try venue.execSell(token, tokensIn, minGross, deadline) returns (uint256 u) {
             usdOut = u;
         } catch {
             // the venue will not price it (dust), or not at the seller's
-            // minimum: the spoke burned the bag, so it goes back the way a
-            // delivery does
+            // minimum, or not this late: the spoke burned the bag, so it
+            // goes back the way a delivery does
             _refuse(OP_SELL, srcChain, _b32(token), seller, tokensIn, R_VENUE);
             _deliver(srcChain, token, seller, tokensIn, 0);
             return;
@@ -867,7 +910,7 @@ contract SpawnPad is IOmniReceiver, Roles {
                 // global supply shrinks for every chain at once. If the
                 // venue refuses, the pot simply waits for the next fee.
                 uint256 pot = f.burnPot;
-                try venue.execBuy(token, pot, 0) returns (uint256 out, uint256 spent, bool asc) {
+                try venue.execBuy(token, pot, 0, 0) returns (uint256 out, uint256 spent, bool asc) {
                     f.burnPot = pot - spent;
                     f.burnedUsd += spent;
                     f.burnedTokens += out;

@@ -5,8 +5,8 @@ const { deployDistributor, setV72Legs, setRequestCaps, GAS_TO_SPOKE, MOCK_GAS_TO
 
 /**
  * The mixed universe of protocol v7.2 and the small tools its tests share
- * (test/v72.test.js, test/v72-wire.test.js). Not a test file: it defines no
- * test.
+ * (test/v72.test.js, test/v72-wire.test.js, test/v72-orders.test.js). Not a
+ * test file: it defines no test.
  */
 
 const E = (n) => ethers.parseEther(String(n))
@@ -23,6 +23,10 @@ const UNIT = E('0.0012')
 const EID = (label) => 30_000 + label
 /** A 32-byte identity that is not an address (a Solana key, say). */
 const WIDE = '0x' + 'ab'.repeat(32)
+/** How long an order lives unless the operator says otherwise (`SpawnGateway.orderTtl`). */
+const TTL = 1_800n
+/** The time of the block a transaction landed in, in seconds. */
+const timeOf = async (rc) => BigInt((await ethers.provider.getBlock(rc.blockNumber)).timestamp)
 
 /* Wire payloads, as the pad and the gateways build them. */
 const op = (code, types, values) => coder.encode(['uint8', 'bytes'], [code, coder.encode(types, values)])
@@ -283,6 +287,6 @@ function events(rc, contract, name) {
 }
 
 module.exports = {
-  E, b32, coder, bal, pastGenesis, BILLION, FEE, UNIT, EID, WIDE, HOME, LAYOUT,
-  op, syncOf, moveOf, unpack, peek, as, events, deployMixed, dearEthereum,
+  E, b32, coder, bal, pastGenesis, BILLION, FEE, UNIT, EID, WIDE, TTL, HOME, LAYOUT,
+  op, syncOf, moveOf, unpack, peek, as, events, timeOf, deployMixed, dearEthereum,
 }

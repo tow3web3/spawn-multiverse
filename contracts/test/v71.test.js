@@ -33,7 +33,7 @@ async function as(address) {
 /* Wire payloads, as the pad and the gateways build them. */
 const op = (code, types, values) => coder.encode(['uint8', 'bytes'], [code, coder.encode(types, values)])
 const payout = (to, amount) => op(12, ['bytes32', 'uint256'], [b32(to), amount])
-const buy = (token, buyer, usdIn) => op(2, ['bytes32', 'bytes32', 'uint256', 'uint256'], [token, buyer, usdIn, 0n])
+const buy = (token, buyer, usdIn) => op(2, ['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256'], [token, buyer, usdIn, 0n, 0n])
 /** The inter-adapter envelope: (source contract, local target, payload, the
  * reply budget it must arrive with — v7.2). */
 const envelope = (srcSender, dst, payload, value = 0n) =>

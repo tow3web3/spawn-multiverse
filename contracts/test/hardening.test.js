@@ -1030,13 +1030,13 @@ describe('Hardening (protocol v7)', () => {
     it('a buy for a token the hub never spawned is refunded; a sell or a claim for one changes nothing', async () => {
       const ghost = ethers.Wallet.createRandom().address
       const before = await worth(A, user)
-      // (v7.2: a BUY and a SELL carry a fourth word, the trader's minimum; 0 = none)
-      await expect(inject(A, msg(2, ['bytes32', 'bytes32', 'uint256', 'uint256'], [b32(ghost), b32(user.address), E(80), 0n])))
+      // (v7.2: a BUY and a SELL carry two more words, the trader's minimum and the order's deadline; 0 = none)
+      await expect(inject(A, msg(2, ['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256'], [b32(ghost), b32(user.address), E(80), 0n, 0n])))
         .to.emit(world.pad, 'Refused')
         .withArgs(2, A.label, b32(ghost), b32(user.address), E(80), 2)
       expect((await worth(A, user)) - before).to.equal(E(80))
 
-      await expect(inject(A, msg(3, ['bytes32', 'bytes32', 'uint256', 'uint256'], [b32(ghost), b32(user.address), E(5), 0n])))
+      await expect(inject(A, msg(3, ['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256'], [b32(ghost), b32(user.address), E(5), 0n, 0n])))
         .to.emit(world.pad, 'Refused')
         .withArgs(3, A.label, b32(ghost), b32(user.address), E(5), 2)
       await expect(inject(A, msg(4, ['bytes32', 'bytes32'], [b32(ghost), b32(user.address)])))
@@ -1053,7 +1053,7 @@ describe('Hardening (protocol v7)', () => {
       const rep = await replica(A, token)
       // 1 wei of token is worth less than 1 wei of oUSD: the gateway's floor
       // stops it at the door, so land it on the hub directly
-      const sell = msg(3, ['bytes32', 'bytes32', 'uint256', 'uint256'], [b32(token), b32(user.address), 1n, 0n])
+      const sell = msg(3, ['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256'], [b32(token), b32(user.address), 1n, 0n, 0n])
       await expect(inject(A, sell))
         .to.emit(world.pad, 'Refused')
         .withArgs(3, A.label, b32(token), b32(user.address), 1, 6)

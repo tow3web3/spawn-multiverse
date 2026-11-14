@@ -1022,7 +1022,7 @@ describe('BNB universe — a single-chain SPAWN! settled in a local dollar', () 
       await (await u.messenger.register(stranger.address, LABEL)).wait()
       const buy = coder.encode(
         ['uint8', 'bytes'],
-        [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [ethers.ZeroHash, b32(stranger.address), E(1_000_000), 0n])],
+        [2, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256', 'uint256'], [ethers.ZeroHash, b32(stranger.address), E(1_000_000), 0n, 0n])],
       )
       await expect(u.messenger.connect(stranger).send(0, b32(u.pad.target), buy, 0)).to.be.revertedWith('PAD: not a gateway')
       expect(await u.dollar.balanceOf(u.usd.target)).to.equal(u.T(1_000))
