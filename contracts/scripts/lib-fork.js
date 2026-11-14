@@ -22,6 +22,7 @@
 const { spawn } = require('child_process')
 const { ethers } = require('ethers')
 const FORKS = require('../config/forks')
+const { decodeEnvelope } = require('./lib-wire')
 
 const coder = ethers.AbiCoder.defaultAbiCoder()
 const EP_IFACE = new ethers.Interface([
@@ -196,11 +197,17 @@ function decodeOptions(options) {
 /** The protocol op inside an adapter envelope: abi.encode(bytes32, bytes32, bytes) → (uint8 op, bytes). */
 function opOf(message) {
   try {
-    const [, , payload] = coder.decode(['bytes32', 'bytes32', 'bytes'], message)
-    const [op] = coder.decode(['uint8', 'bytes'], payload)
-    return Number(op)
+    return decodeEnvelope(message).op
   } catch {
     return -1
+  }
+}
+/** The reply budget the envelope says the delivery must bring (v7.2). */
+function envelopeValue(message) {
+  try {
+    return decodeEnvelope(message).value
+  } catch {
+    return 0n
   }
 }
 const OP_NAMES = { 1: 'SPAWN', 2: 'BUY', 3: 'SELL', 4: 'CLAIM', 5: 'PULL_FEES', 6: 'OPEN', 7: 'MOVE', 10: 'SYNC', 11: 'DELIVER', 12: 'PAYOUT', 13: 'FEE_DROP' }
@@ -282,6 +289,9 @@ class Relay {
         const dst = this.byEid[p.dstEid]
         const o = decodeOptions(ev.args.options)
         const item = { ...p, src: net, dst, gasLimit: o.gas, value: o.value, op: opOf(p.message), tries: 0, verified: false, srcTx: l.transactionHash }
+        // the envelope names the same budget as the executor option (v7.2):
+        // a mismatch would be a bug in the sending adapter
+        if (envelopeValue(p.message) !== o.value) this.errors.push(`${OP_NAMES[item.op]} ${net} → ${dst}: envelope value ${envelopeValue(p.message)} ≠ option value ${o.value}`)
         if (!dst) {
           this.log(`  [relay] packet from ${net} to eid ${p.dstEid}: no fork for it — dropped`)
           continue
@@ -340,6 +350,23 @@ class Relay {
     const limit = gasOverride ?? (this.generous > 0n ? this.generous : item.gasLimit)
     let gas = ig.base + limit
     if (gas < ig.floor) gas = ig.floor
+    // THE NEGATIVE CHECK (v7.2): once, a delivery that brings one wei less
+    // than the budget its sender paid for must be REFUSED by the receiving
+    // adapter ("LZM: value") — and the packet must stay deliverable
+    if (this.underpayNext && item.value > 0n) {
+      this.underpayNext = false
+      const short = await sendAs(url, EXECUTOR, { to: this.endpoint, data, value: ethers.toQuantity(item.value - 1n), gas: ethers.toQuantity(gas) })
+      let reason
+      if (short.status !== '0x1') {
+        try {
+          await rpc(url, 'eth_call', [{ from: EXECUTOR, to: this.endpoint, data, value: ethers.toQuantity(item.value - 1n), gas: ethers.toQuantity(gas) }, 'latest'])
+        } catch (e) {
+          reason = String(e.data ?? e.message)
+        }
+      }
+      this.underpay = { op: OP_NAMES[item.op], src: item.src, dst: item.dst, value: String(item.value), refused: short.status !== '0x1', reason }
+      this.log(`  [relay] NEGATIVE CHECK ${OP_NAMES[item.op]} ${item.src} → ${item.dst} delivered with ${item.value - 1n} wei instead of ${item.value}: ${short.status !== '0x1' ? 'REFUSED ✓' : 'ACCEPTED ✗'}`)
+    }
     const rc = await sendAs(url, EXECUTOR, { to: this.endpoint, data, value: ethers.toQuantity(item.value), gas: ethers.toQuantity(gas) })
     const gasUsed = BigInt(rc.gasUsed)
     const rec = {
@@ -377,4 +404,4 @@ class Relay {
   }
 }
 
-module.exports = { rpc, sendAs, startForks, pickUpstream, Relay, decodePacket, decodeOptions, opOf, intrinsic, OP_NAMES, EP_IFACE, EXECUTOR }
+module.exports = { rpc, sendAs, startForks, pickUpstream, Relay, decodePacket, decodeOptions, opOf, envelopeValue, intrinsic, OP_NAMES, EP_IFACE, EXECUTOR }

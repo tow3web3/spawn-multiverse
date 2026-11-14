@@ -28,16 +28,22 @@
  *   - the pad's SYNC_GAS_FLOOR margin: a real send and a real quote, their
  *     call depth, and — by sweeping the gas of a held spawn and a held open
  *     with callTracer — the most gas ever left behind a STARVED call, against
- *     the 100,000 floor.
+ *     the 200,000 floor;
+ *   - what an OPEN and a MOVE toward the hub must be sold, every path: an
+ *     open served / refused by a reverting leg; a move forwarded / refused
+ *     at its quote / the worst (quote, failed send, the claim sent home);
+ *   - what a launch costs from each chain at the forks' prices;
+ *   - the reply budget enforced on arrival: one delivery attempted with one
+ *     wei less than its budget must be refused and stay deliverable.
  *
  * Who signs: the REAL deployer address is impersonated on every fork (no key
  * signs anything — a transaction signed for a fork is valid on the chain);
  * OWNER is a fresh address that "sent a transaction" on the Base fork.
  * Dollars for the canaries are minted on the forks by Circle's own minter
- * and by the BEP20 owner. The Ethereum launch ceiling is forced below the
- * live price (SPAWN_SYNC_CAP_ETHEREUM, default here 0.0000001) so launches
- * SKIP Ethereum and its canary must OPEN the token — set it to 0.0003 to
- * rehearse the profile's own value instead.
+ * and by the BEP20 owner. Ethereum's launch ceiling is the profile's own
+ * (0.002 ETH: launches reach Ethereum at ordinary L1 prices);
+ * SPAWN_SYNC_CAP_ETHEREUM=0.0000001 forces launches to skip it, so that its
+ * canary must OPEN the token (the measurements open one either way).
  *
  * The one shortcut: a fork cannot get DVN signatures, so the relay calls
  * `endpoint.verify` AS the receive library (scripts/lib-fork.js). Everything
@@ -53,9 +59,11 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { ethers } = require('ethers')
-const { rpc, sendAs, startForks, Relay, EXECUTOR, EP_IFACE, OP_NAMES } = require('./lib-fork')
+const { rpc, sendAs, startForks, Relay, EXECUTOR, OP_NAMES } = require('./lib-fork')
 
 const NETS = ['base', 'optimism', 'arbitrum', 'ethereum', 'bnb']
+/** SpawnPad.SYNC_GAS_FLOOR (200,000 since the second round of v7.2) */
+const FLOOR = 200_000n
 const cwd = path.join(__dirname, '..')
 const DEPLOYER = ethers.getAddress(process.env.SPAWN_DEPLOYER ?? '0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904')
 const OWNER = ethers.getAddress(ethers.dataSlice(ethers.id('spawn/fork/owner'), 12))
@@ -109,7 +117,7 @@ async function main() {
     SPAWN_MARK_DIR: dir,
     SPAWN_RETRY_SLEEP: '2',
     SMOKE_POLL_MS: '500',
-    SPAWN_SYNC_CAP_ETHEREUM: process.env.SPAWN_SYNC_CAP_ETHEREUM ?? '0.0000001',
+    ...(process.env.SPAWN_SYNC_CAP_ETHEREUM ? { SPAWN_SYNC_CAP_ETHEREUM: process.env.SPAWN_SYNC_CAP_ETHEREUM } : {}),
     ...Object.fromEntries(NETS.map((n) => [`RPC_${n.toUpperCase()}`, url[n]])),
   }
   for (const k of ['SPAWN_LAUNCH_PROFILE', 'SPAWN_SKIP', 'SPAWN_ENABLE', 'SPAWN_DEPOSIT_CAP_USDC']) delete env[k]
@@ -153,7 +161,7 @@ async function main() {
     endpoint,
   })
   await relay.start()
-  const report = { dir, forkBlocks: forks.blocks, deployer: DEPLOYER, owner: OWNER, ethSyncCap: env.SPAWN_SYNC_CAP_ETHEREUM }
+  const report = { dir, forkBlocks: forks.blocks, deployer: DEPLOYER, owner: OWNER, ethSyncCap: env.SPAWN_SYNC_CAP_ETHEREUM ?? 'profile' }
   try {
     const launch = await runAsync('bash scripts/launch.sh', 'bash', ['scripts/launch.sh'], env)
     report.launchMin = mins()
@@ -265,22 +273,39 @@ async function measure({ profile, url, relay, abi }) {
   }
   const out = {}
 
-  // ── 1. the live quotes of our verifier set: the worst SYNC toward each spoke ──
-  const WORST_SYNC = coder.encode(['uint8', 'bytes'], [10, coder.encode(['bytes32', 'string', 'string'], [ethers.ZeroHash, 'N'.repeat(64), 'S'.repeat(16)])])
-  out.syncQuotes = {}
+  // ── 1. the live quotes of our verifier set toward each spoke (the pad's
+  // skippable messages carry one return leg since the second round) ──
+  const { WORST_SYNC, SAMPLE_PAYOUT } = require('./lib-prices')
+  out.quotes = {}
   for (const n of NETS.filter((x) => x !== 'base')) {
-    const [q] = await callR('base', LZM, hub.adapter, 'quote', [label(n), ethers.zeroPadValue(state[n].gateway, 32), WORST_SYNC, 0])
-    out.syncQuotes[n] = q
-    console.log(`  worst SYNC hub → ${n}: ${ethers.formatEther(q)} ETH`)
+    const gw32 = ethers.zeroPadValue(state[n].gateway, 32)
+    const [sync] = await callR('base', LZM, hub.adapter, 'quote', [label(n), gw32, WORST_SYNC, 1])
+    const [payout] = await callR('base', LZM, hub.adapter, 'quote', [label(n), gw32, SAMPLE_PAYOUT, 1])
+    out.quotes[n] = { sync, payout }
+    console.log(`  hub → ${n}: worst SYNC ${ethers.formatEther(sync)} ETH, PAYOUT ${ethers.formatEther(payout)} ETH`)
   }
 
-  // ── 2. hubGasFor: the worst admitted spawn from Optimism, four remote chains ──
+  // ── 2. what a launch costs from each chain right now (after tune-fees) ──
+  out.launchCost = {}
+  for (const n of NETS) {
+    const gw = state[n].gateway
+    const [typical] = await callR(n, GW, gw, 'quoteSpawn', ['CANARY TWO', 'CNRY', '{"image":"ipfs://x"}', false])
+    const [worst] = await callR(n, GW, gw, 'quoteSpawn', ['N'.repeat(64), 'S'.repeat(16), 'm'.repeat(1024), true])
+    const [legs] = await callR(n, GW, gw, 'spawnLegs')
+    out.launchCost[n] = { typical, worst, spawnLegs: legs, coin: profile.nets[n].native ?? 'ETH' }
+    console.log(`  a launch from ${n}: ${ethers.formatEther(typical)} ${profile.nets[n].native ?? 'ETH'} (the largest, with a dev buy: ${ethers.formatEther(worst)}) — ${legs} spawn leg(s)`)
+  }
+  const [ethCeiling] = await callR('base', PAD, hub.pad, 'syncCap', [label('ethereum')])
+  out.ethereumInLaunches = out.quotes.ethereum.sync <= ethCeiling
+  console.log(`  Ethereum's SYNC ${ethers.formatEther(out.quotes.ethereum.sync)} ETH vs its launch ceiling ${ethers.formatEther(ethCeiling)}: launches ${out.ethereumInLaunches ? 'REACH Ethereum' : 'SKIP Ethereum'}`)
+
+  // ── 3. hubGasFor: the worst admitted spawn from Optimism, four remote chains ──
   const setCaps = async (caps) => {
-    for (const n of ['optimism', 'arbitrum', 'ethereum', 'bnb']) {
-      await tx('base', hub.pad, PAD, 'setSyncCap', [label(n), caps[n] ?? 0n])
+    for (const c of ['optimism', 'arbitrum', 'ethereum', 'bnb']) {
+      await tx('base', hub.pad, PAD, 'setSyncCap', [label(c), caps[c] ?? 0n])
     }
   }
-  const restore = { ethereum: ethers.parseEther(process.env.SPAWN_SYNC_CAP_ETHEREUM) }
+  const restore = { ethereum: ethCeiling }
   const op = state.optimism
   await tx('optimism', profile.nets.optimism.usdc, ERC, 'approve', [op.usd, ethers.MaxUint256])
   let n = 0
@@ -293,13 +318,13 @@ async function measure({ profile, url, relay, abi }) {
     const before = relay.records.length
     if (devBuy) await tx('optimism', op.gateway, GW, 'spawnTokenUsdc', [name, sym, meta, 1_000_000n, 1], fee, 1_500_000)
     else await tx('optimism', op.gateway, GW, 'spawnToken', [name, sym, meta, 0, 1], fee, 1_500_000)
-    // the SPAWN lands on the hub
     for (let i = 0; i < 300; i++) {
       const r = relay.records.slice(before).find((x) => x.op === 'SPAWN')
       if (r) {
         await relay.idle()
         return r
       }
+      if (relay.held.length) return null
       await new Promise((res) => setTimeout(res, 300))
     }
     throw new Error('the measurement SPAWN did not land')
@@ -307,7 +332,7 @@ async function measure({ profile, url, relay, abi }) {
   const BIG = ethers.parseEther('1')
   relay.generous = 15_000_000n // measure what it costs, not whether the limit holds (compared below)
   const variants = {}
-  await setCaps({ ethereum: restore.ethereum }) // as launched: Ethereum over its ceiling
+  await setCaps({ ethereum: 1n }) // Ethereum over its ceiling: skipped
   variants.A_ethSkipped = await spawnFromOp({ worst: true, devBuy: true })
   await setCaps({ ethereum: BIG })
   variants.B_ethCeilingUnder = await spawnFromOp({ worst: true, devBuy: true })
@@ -334,7 +359,8 @@ async function measure({ profile, url, relay, abi }) {
   for (const [k, r] of Object.entries(variants)) console.log(`  SPAWN from Optimism, ${k}: ${r.exec} gas (the spoke buys ${r.bought})`)
   console.log(`  ⇒ per remote chain ≈ ${perSend}, per ceiling quote ≈ ${perQuote}, the rest ≈ ${base}`)
 
-  // ── 3. a dev claim from Optimism (CLAIM on the hub, PAYOUT on Optimism) ──
+  // ── 4. a dev claim from Optimism — and THE NEGATIVE CHECK: its delivery is
+  // first attempted with one wei less than the budget it carries ──
   const canary = await (async () => {
     const [len] = await callR('base', PAD, hub.pad, 'tokensLength')
     for (let i = Number(len) - 1; i >= 0; i--) {
@@ -343,47 +369,125 @@ async function measure({ profile, url, relay, abi }) {
       if (m[1] === 'CANARY') return t
     }
   })()
+  relay.underpayNext = true
   const [claimFee] = await callR('optimism', GW, op.gateway, 'quoteClaim')
   await tx('optimism', op.gateway, GW, 'claimFees', [canary], claimFee)
   await relay.idle()
   await relay.idle()
+  out.underpay = relay.underpay
+  if (!relay.underpay?.refused) throw new Error('a delivery with less than its reply budget was NOT refused')
+  const claimRec = relay.records.filter((r) => r.op === 'CLAIM').pop()
+  if (!claimRec?.ok) throw new Error('the underpaid packet did not stay deliverable')
+  console.log(`  ✓ negative check: ${relay.underpay.op} ${relay.underpay.src} → ${relay.underpay.dst} refused with one wei short, then delivered with its budget`)
 
-  // ── 4. SYNC_GAS_FLOOR: a real send, a real quote, their depth — and the most
-  // gas a STARVED call ever leaves behind (callTracer over a gas sweep) ──
+  // ── 5. SYNC_GAS_FLOOR (200,000 since the second round): real sends and
+  // quotes, their depth, and the most gas a STARVED call leaves behind ──
+  const holdOne = async (pred, action) => {
+    relay.hold = pred
+    await action()
+    await waitHeld(relay, 1)
+    relay.hold = null
+    return relay.held.shift()
+  }
   await setCaps({ optimism: BIG, arbitrum: BIG, ethereum: BIG, bnb: BIG }) // four quotes + four sends, then only an event
-  relay.hold = (item) => item.op === 1 && item.dst === 'base'
-  await spawnFromOp({ worst: true, devBuy: false }).catch(() => {})
-  await waitHeld(relay, 1)
-  const heldSpawn = relay.held.shift()
+  const heldSpawn = await holdOne((i) => i.op === 1 && i.dst === 'base', () => spawnFromOp({ worst: true, devBuy: false }))
   out.floorSpawn = await floorSweep({ relay, url, item: heldSpawn, PAD, hub, endpoint: profile.endpoint, expectSends: 4, label: 'spawn, no dev buy, four ceilings under' })
-  relay.hold = null
   await relay.execute(heldSpawn)
   await relay.idle()
 
-  // an OPEN from Ethereum of a token the launch skipped there (variant A)
-  await setCaps({ ethereum: restore.ethereum })
-  const skippedToken = await (async () => {
+  // ── 6. OPEN from Ethereum: the floor sweep, then what its executor gas must
+  // cover — the open served, and the open REFUSED by a leg that reverts ──
+  const opGasOf = (o) => BigInt(profile.opGas?.toHub?.[o] ?? 0)
+  const skippedOnEth = async () => {
+    // a fresh token Ethereum's launch ceiling keeps out
+    await setCaps({ ethereum: 1n })
+    await spawnFromOp({ worst: false, devBuy: false })
     const [len] = await callR('base', PAD, hub.pad, 'tokensLength')
-    for (let i = Number(len) - 1; i >= 0; i--) {
-      const [t] = await callR('base', PAD, hub.pad, 'allTokens', [i])
-      const [rep] = await callR('ethereum', GW, state.ethereum.gateway, 'replicaOf', [t])
-      if (rep === ethers.ZeroAddress) return t
-    }
-  })()
-  if (skippedToken) {
-    relay.hold = (item) => item.op === 6 && item.dst === 'base'
-    const [openFee] = await callR('ethereum', GW, state.ethereum.gateway, 'quoteOpen')
-    await tx('ethereum', state.ethereum.gateway, GW, 'openToken', [skippedToken], openFee)
-    await waitHeld(relay, 1)
-    const heldOpen = relay.held.shift()
-    out.floorOpen = await floorSweep({ relay, url, item: heldOpen, PAD, hub, endpoint: profile.endpoint, expectSends: 1, label: 'open from Ethereum' })
-    relay.hold = null
-    await relay.execute(heldOpen)
-    await relay.idle()
+    return (await callR('base', PAD, hub.pad, 'allTokens', [len - 1n]))[0]
   }
+  const openFrom = async (token) => {
+    const [openFee] = await callR('ethereum', GW, state.ethereum.gateway, 'quoteOpen')
+    await tx('ethereum', state.ethereum.gateway, GW, 'openToken', [token], openFee)
+  }
+  const t1 = await skippedOnEth()
+  const heldOpen = await holdOne((i) => i.op === 6 && i.dst === 'base', () => openFrom(t1))
+  out.floorOpen = await floorSweep({ relay, url, item: heldOpen, PAD, hub, endpoint: profile.endpoint, expectSends: 1, label: 'open from Ethereum' })
+  const openServed = BigInt(out.floorOpen.gMin)
+  // the same kind of open, its leg made to REVERT (no executor gas toward
+  // Ethereum on the hub adapter): the quote fails, the pad needs its 200,000
+  const [ethGas] = await callR('base', LZM, hub.adapter, 'gasLimit', [label('ethereum')])
+  await tx('base', hub.adapter, LZM, 'setDestination', [label('ethereum'), 0, 0])
+  const openRefused = await leastGas({ relay, url, item: heldOpen, endpoint: profile.endpoint })
+  await tx('base', hub.adapter, LZM, 'setDestination', [label('ethereum'), ethGas, 0])
+  await relay.execute(heldOpen)
+  await relay.idle()
+  out.open = { served: openServed, refused: openRefused, bought: opGasOf(6), heldBought: heldOpen.gasLimit }
+  console.log(`  OPEN → hub: least gas served ${openServed}, refused by a reverting leg ${openRefused}; executor gas sold ${heldOpen.gasLimit} (profile opGas ${opGasOf(6)})`)
+  if (heldOpen.gasLimit < openServed || heldOpen.gasLimit < openRefused) throw new Error('the OPEN is sold less executor gas than one of its paths needs')
+
+  // ── 7. MOVE toward the hub: forwarded to Ethereum, refused at the quote,
+  // and the WORST — the quote passes, the send fails, the claim goes home ──
+  const OUSD = new ethers.Interface(['function wrap(uint256) returns (uint256)', 'function balanceOf(address) view returns (uint256)'])
+  await tx('optimism', op.usd, OUSD, 'wrap', [2_000_000n])
+  const me32 = ethers.zeroPadValue(DEPLOYER, 32)
+  const moveOne = async () => {
+    const [moveFee] = await callR('optimism', GW, op.gateway, 'quoteMove', [label('ethereum')])
+    await tx('optimism', op.gateway, GW, 'moveClaim', [label('ethereum'), me32, 500_000_000_000_000_000n], moveFee)
+  }
+  const ethL = label('ethereum')
+  const [capPay] = await callR('base', PAD, hub.pad, 'requestCap', [ethL, 12])
+  const heldMove = await holdOne((i) => i.op === 7 && i.dst === 'base', moveOne)
+  const moveForwarded = await leastGas({ relay, url, item: heldMove, endpoint: profile.endpoint })
+  await tx('base', hub.pad, PAD, 'setRequestCap', [ethL, 12, 1n])
+  const moveOverCap = await leastGas({ relay, url, item: heldMove, endpoint: profile.endpoint })
+  await tx('base', hub.pad, PAD, 'setRequestCap', [ethL, 12, capPay])
+  await relay.execute(heldMove)
+  await relay.idle()
+  // the worst path: the forward leg is under its ceiling, but the hub tank
+  // cannot pay it — the send reverts ("LZM: gas tank empty"), the pad checks
+  // it was not starved (200,000 left), and the claim goes home by a reply.
+  // To get there on a fork: a move priced at ONE leg (so it brings less than
+  // the forward leg costs), a ceiling that lets the forward leg through, and
+  // the hub tank emptied — the move's own budget then pays the way home only.
+  const [legsWas] = await callR('optimism', GW, op.gateway, 'moveLegs', [ethL])
+  await tx('optimism', op.gateway, GW, 'setMoveLegs', [ethL, 1])
+  await tx('base', hub.pad, PAD, 'setRequestCap', [ethL, 12, BIG])
+  const heldMove2 = await holdOne((i) => i.op === 7 && i.dst === 'base', moveOne)
+  const tankWas = BigInt(await rpc(url.base, 'eth_getBalance', [hub.adapter, 'latest']))
+  const [fwdFee] = await callR('base', LZM, hub.adapter, 'quote', [ethL, ethers.zeroPadValue(state.ethereum.gateway, 32), SAMPLE_PAYOUT, 1])
+  let moveWorst
+  let worstNote
+  if (heldMove2.value < fwdFee) {
+    await rpc(url.base, 'anvil_setBalance', [hub.adapter, '0x0'])
+    moveWorst = await leastGas({ relay, url, item: heldMove2, endpoint: profile.endpoint })
+    // that it really took the worst path: a trace at that gas shows the forward send failing and Moved(forwarded = false)
+    const t = await rpc(url.base, 'debug_traceCall', [
+      { from: EXECUTOR, to: profile.endpoint, data: relay.lzReceiveData(heldMove2), value: ethers.toQuantity(heldMove2.value), gas: ethers.toQuantity(moveWorst + 200_000n) },
+      'latest', { tracer: 'callTracer', tracerConfig: { withLog: true } },
+    ], 300_000)
+    const frames = flatten(t)
+    const failedSend = frames.some((f) => f.error && f.to?.toLowerCase() === hub.adapter.toLowerCase() && f.input?.startsWith(ethers.id('send(uint32,bytes32,bytes,uint256)').slice(0, 10)))
+    worstNote = `tank emptied: the move brings ${heldMove2.value} wei, the forward leg costs ${fwdFee}; forward send failed in the trace: ${failedSend}`
+    await rpc(url.base, 'anvil_setBalance', [hub.adapter, ethers.toQuantity(tankWas)])
+    if (!failedSend) throw new Error('the worst MOVE path was not the one measured (no failed send in the trace)')
+  } else {
+    worstNote = `not reachable this way: even at one leg the move brings ${heldMove2.value} wei, more than the forward leg costs (${fwdFee})`
+  }
+  await tx('base', hub.pad, PAD, 'setRequestCap', [ethL, 12, capPay])
+  await tx('optimism', op.gateway, GW, 'setMoveLegs', [ethL, legsWas])
+  // delivered as it stands now: the ceiling is back, so the move comes home
+  await relay.execute(heldMove2)
+  await relay.idle()
+  out.move = { forwarded: moveForwarded, overCap: moveOverCap, worst: moveWorst, worstNote, bought: opGasOf(7), heldBought: heldMove.gasLimit }
+  console.log(
+    `  MOVE → hub: least gas forwarded ${moveForwarded}, refused at the quote ${moveOverCap}, quote + failed send + home ${moveWorst ?? '—'} (${worstNote}); ` +
+      `executor gas sold ${heldMove.gasLimit} (profile opGas ${opGasOf(7)})`,
+  )
+  for (const x of [moveForwarded, moveOverCap, moveWorst]) if (x !== undefined && heldMove.gasLimit < x) throw new Error('the MOVE is sold less executor gas than one of its paths needs')
+  if (moveWorst === undefined) console.log('  ⚠ the worst MOVE path could not be set up on this fork')
   await setCaps({ ethereum: restore.ethereum })
 
-  // ── 5. every op where it lands, from every delivery of the rehearsal ──
+  // ── 8. every op where it lands, from every delivery of the rehearsal ──
   const byOp = {}
   for (const r of relay.records) {
     if (!r.ok) continue
@@ -393,11 +497,36 @@ async function measure({ profile, url, relay, abi }) {
     e.n += 1
     e.min = Math.min(e.min, x)
     e.max = Math.max(e.max, x)
+    if (BigInt(r.bought) < BigInt(e.bought)) e.bought = r.bought
   }
   out.ops = byOp
-  console.log('  every op where it lands (exec gas, min–max over the rehearsal; what the sender bought):')
+  console.log('  every op where it lands (exec gas, min–max over the rehearsal; the least executor gas its sender bought):')
   for (const [k, e] of Object.entries(byOp).sort()) console.log(`    ${k.padEnd(22)} ${String(e.min).padStart(9)} – ${String(e.max).padStart(9)}  (n=${e.n}, bought ${e.bought})`)
   return out
+}
+
+/** The least gas with which a verified, held packet's delivery succeeds
+ * (eth_call: no revert), to 1,000 gas. */
+async function leastGas({ relay, url, item, endpoint }) {
+  const data = relay.lzReceiveData(item)
+  const base = 21_000n + 4n * BigInt(ethers.getBytes(data).reduce((a, b) => a + (b === 0 ? 1 : 4), 0))
+  const ok = async (gas) => {
+    try {
+      await rpc(url[item.dst], 'eth_call', [{ from: EXECUTOR, to: endpoint, data, value: ethers.toQuantity(item.value), gas: ethers.toQuantity(base + gas) }, 'latest'])
+      return true
+    } catch {
+      return false
+    }
+  }
+  let lo = 50_000n
+  let hi = 15_000_000n
+  if (!(await ok(hi))) throw new Error(`the held ${OP_NAMES[item.op]} does not deliver even with 15M gas`)
+  while (hi - lo > 1_000n) {
+    const mid = (lo + hi) / 2n
+    if (await ok(mid)) hi = mid
+    else lo = mid
+  }
+  return hi
 }
 
 async function waitHeld(relay, count, ms = 120_000) {
@@ -518,10 +647,10 @@ async function floorSweep({ relay, url, item, PAD, hub, endpoint, expectSends, l
       maxLeftAt = { gas: String(gas), call: last.input.startsWith(LZM_SEND) ? 'send' : 'quote', childGas: String(last.gas), childUsed: String(last.gasUsed), reason: a.reason ?? a.error }
     }
   }
-  const margin = maxLeft > 0n ? Number(100_000n * 1000n / maxLeft) / 1000 : Infinity
+  const margin = maxLeft > 0n ? Number((FLOOR * 1000n) / maxLeft) / 1000 : Infinity
   console.log(
     `  ${label}: ${runs} deliveries traced from ${from} to ${gMin + 50_000n} gas, step ${step}: ${starved} starved a send/quote ` +
-      `(all reverted), ${holes} hole(s). Most gas left behind a starved call ≈ ${maxLeft} — the floor is 100,000: margin ×${margin}`,
+      `(all reverted), ${holes} hole(s). Most gas left behind a starved call ≈ ${maxLeft} — the floor is ${FLOOR}: margin ×${margin}`,
   )
   return { sendGas, quoteGas, depth, gMin: String(gMin), runs, starved, holes, maxLeft: String(maxLeft), maxLeftAt, margin, analytical: { sixtyFourthsBound: String((BigInt(Math.max(...sendGas)) * BigInt(depth)) / 64n) } }
 }

@@ -19,7 +19,9 @@
 #      dollar: USDC, or USDT on BNB Chain):
 #        the hub, each spoke, the hub again (wires them, sets the launch
 #        ceiling of Ethereum BEFORE its gateway, the request ceilings, the
-#        move routes), each spoke again (move routes to every other chain)
+#        move routes, executor gas per kind of message), each spoke again
+#        (move routes to every other chain), the hub a third time (the
+#        PAYOUT ceilings those moves need)
 #   2. our own LayerZero verifier set on every pathway, both ends
 #      cross-checked
 #   3. prices from live quotes: reply units, spawn / open / move legs, the
@@ -182,6 +184,8 @@ logged "deploy $HUB (hub)" "$PLAN" hh "$HUB" deploy.js
 for n in $SPOKES; do logged "deploy $n" "$PLAN" hh "$n" deploy.js; done
 logged "wire $HUB" "$PLAN" hh "$HUB" deploy.js
 for n in $SPOKES; do logged "refresh $n" "$PLAN" hh "$n" deploy.js; done
+# once more: the request ceilings for the moves the refreshed spokes now price
+logged "ceilings $HUB" "$PLAN" hh "$HUB" deploy.js
 
 if [[ "$WITH_DVN" == "1" ]]; then
   step "2. verifier set (DVNs) — one set on every pathway"

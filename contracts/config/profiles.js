@@ -89,7 +89,7 @@ const testnet = {
       chainId: 11155111, rpc: rpc('ethereumSepolia', 'https://ethereum-sepolia-rpc.publicnode.com'),
       optional: true,
       // the L1 leg has a launch ceiling here too, as on mainnet
-      syncCap: syncCapOf('ethereumSepolia', '0.0003'),
+      syncCap: syncCapOf('ethereumSepolia', '0.002'),
       gasToSpoke: 1_000_000n,
     },
     bnbTestnet: {
@@ -173,12 +173,13 @@ const mainnet = {
       launchCap: 25_000,
     },
     /**
-     * Ethereum L1 — a spoke whose every message costs L1 gas. A launch from
-     * an L2 cannot prepay an L1 SYNC at any price (spawnLegs tops out at 32
-     * of the L2's units), so this chain has a LAUNCH CEILING
+     * Ethereum L1 — a spoke whose every message costs L1 gas, so it has a
+     * LAUNCH CEILING
      * (SpawnPad.syncCap): while its SYNC costs more than `syncCap` (in Base
      * ETH), launches skip Ethereum and a token is opened there later by
-     * whoever wants it (`openToken`), or by anyone paying a `resync`.
+     * whoever wants it (`openToken`), or by anyone paying a `resync`. Below
+     * it, every launch reaches Ethereum and prepays its SYNC: a spoke's
+     * spawnLegs (up to 128 since v7.2) carries it.
      */
     ethereum: {
       eid: 30101, role: 'spoke', label: 2, id: 'ethereum',
@@ -188,9 +189,11 @@ const mainnet = {
       tokenMessenger: CCTP_TOKEN_MESSENGER_V2, cctpDomain: 0,
       confirmations: 15,
       launchCap: 25_000,
-      // ~1 dollar of Base ETH: an Ethereum SYNC above it leaves every launch
-      // (measured on forks — docs/RUNBOOK.md "The Ethereum ceiling")
-      syncCap: syncCapOf('ethereum', '0.0003'),
+      // about twice what an Ethereum SYNC cost on the forks (0.00104 ETH,
+      // 2026-11-14): Ethereum is in every launch while L1 is ordinary, and is
+      // skipped — then opened per token — only when L1 is dear (owner's
+      // decision 2026-11-14; docs/RUNBOOK.md "The Ethereum ceiling")
+      syncCap: syncCapOf('ethereum', '0.002'),
       // An L1 deploy is ~11M gas at L1 prices: the preflight budget is 2 ×
       // the life-cycle gas at the LIVE gas price (lib-net.js → deployBudget).
       // This is only the absolute floor.
@@ -246,16 +249,21 @@ const mainnet = {
   gasToHub: 5_200_000n,
   gasToSpoke: 1_200_000n,
   /**
-   * SEAM (contract round 2): executor gas per destination AND op, set by
-   * tune-fees.js only if the adapter has `setGasForOp` (scripts/lib-ops.js).
-   * Measured on the five forks (exec gas where the op lands, max seen) with
-   * ~30%+ on top. Hub-bound SPAWN (op 1) uses hubGasFor.
-   *   hub:   BUY 0.59M · SELL 0.54M · CLAIM 0.49M · PULL_FEES 0.61M · OPEN 0.55M
-   *   spoke: SYNC 0.773M (worst strings) · DELIVER 0.16M · PAYOUT 0.11M · FEE_DROP 0.114M
+   * Executor gas per destination AND kind of message (second round:
+   * `LayerZeroOmniMessenger.setGasForOp`), set by the deploy where none is
+   * and kept by tune-fees.js. 0 / absent = the destination's own limit
+   * (`gasLimit`: hubGasFor toward the hub — the SPAWN —, gasToSpoke toward a
+   * spoke). Sized from the five-fork measurements (scripts/fork-rehearsal.js;
+   * docs/RUNBOOK.md §11), with the contract agent's rule: a kind of message
+   * that can meet a REFUSING leg (SPAWN, OPEN, MOVE toward the hub) is sold
+   * at least 200,000 gas (SpawnPad.SYNC_GAS_FLOOR) more than its failure
+   * path uses — the rehearsal asserts it for OPEN and MOVE.
    */
   opGas: {
-    toHub: { 1: 0, 2: 800_000, 3: 750_000, 4: 700_000, 5: 800_000, 6: 750_000, 7: 750_000 },
-    toSpoke: { 10: 1_000_000, 11: 250_000, 12: 200_000, 13: 200_000 },
+    // toward the hub: BUY, SELL, CLAIM, PULL_FEES, OPEN, MOVE (SPAWN: gasLimit)
+    toHub: { 2: 800_000, 3: 750_000, 4: 700_000, 5: 800_000, 6: 900_000, 7: 1_200_000 },
+    // toward a spoke: SYNC (a replica deploy), DELIVER, PAYOUT, FEE_DROP
+    toSpoke: { 10: 1_000_000, 11: 250_000, 12: 200_000, 13: 250_000 },
   },
   // the hub tank is a buffer between prepaid reply budgets and reply fees;
   // spokes need none (their users pay each send in full)
@@ -429,10 +437,11 @@ function activeNets(profile) {
  * ceiling, and delivers the dev bag.
  *
  * Measured against the REAL EndpointV2 on forks of the five mainnet chains
- * (scripts/fork-rehearsal.js, "measurements", 2026-11-14 — our verifier set):
- *   worst spawn, 4 remote chains:  no ceiling 4.17M · a ceiling on Ethereum
- *   (under it) 4.25M · ceilings on all four 4.52M · Ethereum skipped 4.04M
- *   ⇒ ≈ 3.34M + 0.209M per remote chain + 0.089M per ceiling quote
+ * (scripts/fork-rehearsal.js, "measurements", 2026-11-14 — our verifier set,
+ * v7.2 second round): worst spawn, 4 remote chains: no ceiling 4.19M · a
+ * ceiling on Ethereum (under it) 4.27M · ceilings on all four 4.53M ·
+ * Ethereum skipped 4.06M  ⇒ ≈ 3.35M + 0.210M per remote chain + 0.089M per
+ * ceiling quote (first round: within 20k of these)
  * Rounded up (3.40M + 0.22M + 0.10M) and +20%, never below the profile's
  * `gasToHub`. A spawn that runs out of gas on the hub is a stuck message —
  * adding a chain must raise this on EVERY spoke adapter (tune-fees.js does).

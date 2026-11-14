@@ -164,6 +164,9 @@ if [[ "$PHASE" == "prepare" ]]; then
   for n in $SPOKES; do
     logged "pre-steps $n" "$PREP" hh "$n" deploy.js
   done
+  # once more on the hub: the spokes now price moves toward $NEW, and the pad
+  # gets the matching ceiling (requestCap, PAYOUT) before anything is scheduled
+  logged "pre-steps $HUB (request ceilings)" "$PREP" hh "$HUB" deploy.js
 
   step "4. one timelock batch per chain, scheduled by OWNER"
   for n in $HUB $SPOKES; do

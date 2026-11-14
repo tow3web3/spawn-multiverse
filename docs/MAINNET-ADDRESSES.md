@@ -65,8 +65,10 @@ exposure to a USDT de-peg (SPEC §7).
 | chain id **1** | | preflight (live) |
 
 Ethereum is a spoke of the one universe since 2026-11-14, with a launch
-ceiling (`SpawnPad.syncCap`, 0.0003 ETH by default): while its SYNC costs
-more, launches skip it and a token is opened there per token (`openToken`).
+ceiling (`SpawnPad.syncCap`, 0.002 ETH — about twice what its SYNC cost on
+the forks, 0.00084 ETH with per-kind executor gas): at ordinary L1 prices
+every launch reaches Ethereum; when L1 is dear, launches skip it and a token
+is opened there per token (`openToken`).
 Deployer today: **0 ETH, 0 USDC** on Ethereum — fund ~0.02 ETH for the
 deploy, and 5 USDC + ~0.02 ETH for its canary.
 

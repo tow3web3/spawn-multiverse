@@ -25,12 +25,13 @@
  *   - unwraps what is left.
  * Expect minutes, not seconds.
  *
- * SLIPPAGE: on the hub chain the trades go through `buyTokenUsdcMin` /
- * `sellTokenMin` with a real minimum computed from the curve, after PROVING
- * that an impossible minimum is refused ("GW: min out"). On a remote chain
- * the script asks the gateway whether its `*Min` covers a cross-chain trade
- * (contract round 2) and uses it when it does; otherwise (round 1) it proves
- * the remote `*Min` refuses, and trades with the plain entrypoints.
+ * SLIPPAGE: every trade goes through `buyTokenUsdcMin` / `sellTokenMin` with
+ * a real minimum computed from the curve (1% tolerance at home, 5% across
+ * chains — the minimum rides the wire and the hub enforces it). The
+ * protection is PROVED first: on the hub chain an impossible minimum reverts
+ * the whole call ("GW: min out", simulated, free); from a spoke a real $1
+ * order with an impossible minimum must be REFUSED by the hub (Refused,
+ * reason 6) and its dollars must come home whole.
  *
  * BUDGET: a chain with a `canaryBudget` in the profile (Ethereum) first
  * prices a round trip at the LIVE gas price against what the deployer holds

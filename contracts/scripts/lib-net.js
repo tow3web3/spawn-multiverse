@@ -26,7 +26,7 @@ const { ethers, network } = require('hardhat')
 const {
   activeNets, dollarUnits, dollarScale, dollarOfNet, nativeOfNet, vaultKind, vaultContract, deployCapOf,
 } = require('../config/profiles')
-const { requestSolvency, providerFor, PAD_ABI } = require('./lib-prices')
+const { requestSolvency, hubUnits, providerFor, PAD_ABI, OP_SYNC, OP_PAYOUT } = require('./lib-prices')
 
 const MAINNET_CONFIRM = 'I_UNDERSTAND_THIS_IS_REAL_MONEY'
 /** The contract generation a state entry was deployed from. A deployment is
@@ -615,7 +615,7 @@ async function padView(ctx) {
  * v7.2 — what a `moveClaim` from this chain prepays, per destination: every
  * other deployed chain gets a price (0 = closed, "GW: route closed"). The
  * initial price is the way home (`tradeLegs`) and never less than what the
- * hub lets a request toward that chain cost its tank (`requestCap`): the
+ * hub lets a MOVE toward that chain cost its tank (`requestCap[D][12]`): the
  * tank must never front more than a move brought. tune-fees.js re-prices it
  * from live quotes; this only opens a route that has none.
  */
@@ -629,7 +629,7 @@ async function setMoveRoutes(ctx, gateway, adapter, tradeLegs) {
     if (c.role === 'spoke' && pad && unit > 0n) {
       let cap
       try {
-        cap = BigInt(await pad.requestCap(c.label))
+        cap = BigInt(await pad.requestCap(c.label, OP_PAYOUT))
       } catch (e) {
         // the hub cannot be read: the route stays CLOSED (a move there would
         // be refused at the gateway) — the next run, or tune-fees.js, opens it
@@ -647,16 +647,17 @@ async function setMoveRoutes(ctx, gateway, adapter, tradeLegs) {
   }
 }
 
-/** v7.2 — the pad's ceiling on what a REQUEST toward each remote chain (the
- * SYNC of an open from it, the PAYOUT of a move toward it) may cost the
- * tank: set, where none is, to what such a request prepays right now (the
- * smallest of them — scripts/lib-prices.js). 0 would leave that chain closed
- * to opens and incoming moves. tune-fees.js keeps it priced. */
+/** v7.2 — the pad's two ceilings on what a REQUEST toward each remote chain
+ * may cost the tank, per kind of message: `requestCap[D][10]` for the SYNC of
+ * an open from D (set to what an open there prepays), `requestCap[D][12]`
+ * for the PAYOUT a move toward D forwards (the smallest prepay of any move
+ * toward it — scripts/lib-prices.js). Set where none is; 0 would leave that
+ * chain closed to that kind of request. tune-fees.js keeps them priced. */
 async function setRequestCaps(ctx, pad) {
   const { profile, nets, all, netKey, signer } = ctx
   if (isStub(pad)) {
-    ctx.plan.push('pad.setRequestCap(<every remote chain>)')
-    ctx.log('  would: pad.setRequestCap(<every remote chain>) — once the gateways exist')
+    ctx.plan.push('pad.setRequestCap(<every remote chain>, 10 | 12)')
+    ctx.log('  would: pad.setRequestCap(<every remote chain>, SYNC | PAYOUT) — once the gateways exist')
     return
   }
   const ready = Object.keys(nets).filter((n) => n === profile.hub || (all[n]?.gateway && all[n]?.ready))
@@ -672,11 +673,41 @@ async function setRequestCaps(ctx, pad) {
     return
   }
   for (const r of solv.rows) {
-    if (r.min === 0n) continue
+    for (const [op, kind, cap] of [[OP_SYNC, 'an open from it', r.open], [OP_PAYOUT, 'a move toward it', r.minMove]]) {
+      if (!cap) continue
+      await ensure(ctx, {
+        desc: `pad.setRequestCap(${r.label} = ${r.net}, op ${op}, ${fmt(cap)} ${nativeOf(profile)}) — what ${kind} prepays`,
+        on: pad, fn: 'setRequestCap', args: [r.label, op, cap], role: 'operator',
+        needed: async () => BigInt(await pad.requestCap(r.label, op)) === 0n,
+      })
+    }
+  }
+}
+
+/** Second round — executor gas per KIND of message (`setGasForOp`), from the
+ * profile's `opGas` (measured on the forks; scripts/fork-rehearsal.js). On a
+ * spoke: toward the hub, every op but the SPAWN (which buys the destination's
+ * own limit, hubGasFor). On the hub: toward each spoke, its SYNC, DELIVER,
+ * PAYOUT and FEE_DROP. Only where none is set (tune-fees.js keeps them). An
+ * adapter without `setGasForOp` (first-round bytecode) is skipped. */
+async function setOpGas(ctx, adapter) {
+  const { profile, netKey, nets } = ctx
+  const table = profile.opGas
+  if (!table || isStub(adapter) || !adapter.interface.getFunction('setGasForOp')) return
+  const plan = []
+  if (netKey === profile.hub) {
+    for (const [net, c] of Object.entries(nets)) {
+      if (c.role !== 'spoke' || !ctx.all[net]?.ready) continue
+      for (const [op, g] of Object.entries({ ...table.toSpoke, ...(c.opGasToSpoke ?? {}) })) plan.push([c.label, Number(op), BigInt(g), net])
+    }
+  } else {
+    for (const [op, g] of Object.entries(table.toHub)) if (BigInt(g) > 0n) plan.push([0, Number(op), BigInt(g), profile.hub])
+  }
+  for (const [label, op, gas, net] of plan) {
     await ensure(ctx, {
-      desc: `pad.setRequestCap(${r.label} = ${r.net}, ${fmt(r.min)} ${nativeOf(profile)}) — what a request toward it prepays`,
-      on: pad, fn: 'setRequestCap', args: [r.label, r.min], role: 'operator',
-      needed: async () => BigInt(await pad.requestCap(r.label)) === 0n,
+      desc: `adapter.setGasForOp(${label} = ${net}, op ${op}, ${gas})`,
+      on: adapter, fn: 'setGasForOp', args: [label, op, gas], role: 'operator',
+      needed: async () => BigInt(await adapter.gasForOp(label, op)) === 0n,
     })
   }
 }
@@ -883,6 +914,7 @@ async function deployHub(ctx, roles) {
   })
   await setRequestCaps(ctx, pad)
   await setMoveRoutes(ctx, local.gateway, adapter, 0)
+  await setOpGas(ctx, adapter)
 }
 
 async function deploySpoke(ctx, roles) {
@@ -903,6 +935,7 @@ async function deploySpoke(ctx, roles) {
     needed: async () => (await adapter.eidOf(0)) === 0n,
   })
   await setDestination(ctx, adapter, 0, profile.gasToHub, profile.returnUnit, 'options spoke -> hub')
+  await setOpGas(ctx, adapter)
   // a trade prepays its one reply; a spawn the SYNC to every spoke
   await setLegs(ctx, side.gateway, 1, remoteSpokes(ctx))
   // v7.2: a claim may move from here to every other deployed chain
@@ -1066,21 +1099,35 @@ async function selfCheck({ profile, netKey, stateFile, provider, providers, role
       // the launch ceiling is a policy figure of the profile (0 = none)
       row(`pad.syncCap(${net})`, await pad.syncCap(c.label), c.syncCap ?? 0n, true)
     }
-    // THE RULE (v7.2), from on-chain values on every chain: no request
-    // toward a chain may cost the tank more than it prepaid
+    // THE RULES (v7.2), from on-chain values on every chain: no request
+    // toward a chain may cost the tank more than it prepaid — per kind
     try {
       const solv = await requestSolvency({ profile, all, providers: { ...providers, [netKey]: provider }, quotes: false })
       for (const r of solv.rows) {
         rows.push({
-          what: `pad.requestCap(${r.net}) ≤ what every open from it / move toward it prepays`,
-          actual: `${r.cap}`, expected: `≤ ${r.min}`, ok: r.capOk, soft: false,
+          what: `pad.requestCap(${r.net}, SYNC) ≤ what an open from it prepays`,
+          actual: `${r.capSync}`, expected: `≤ ${r.open}`, ok: r.syncOk, soft: false,
         })
-        if (r.cap === 0n && all[r.net]?.ready) {
-          rows.push({ what: `pad.requestCap(${r.net}) set (0 = closed to opens and incoming moves)`, actual: '0', expected: '> 0', ok: false, soft: true })
+        rows.push({
+          what: `pad.requestCap(${r.net}, PAYOUT) ≤ what every move toward it prepays`,
+          actual: `${r.capPayout}`, expected: `≤ ${r.minMove ?? 'any (no route toward it)'}`, ok: r.payoutOk, soft: false,
+        })
+        if (all[r.net]?.ready && (r.capSync === 0n || (r.minMove !== undefined && r.capPayout === 0n))) {
+          rows.push({ what: `pad.requestCap(${r.net}) set for both kinds (0 = closed to opens / incoming moves)`, actual: `${r.capSync} / ${r.capPayout}`, expected: '> 0', ok: false, soft: true })
         }
       }
     } catch (e) {
       rows.push({ what: 'request ceilings readable on every chain', actual: e.shortMessage ?? e.message, expected: 'readable', ok: false, soft: true })
+    }
+    // HARD (second round): the pad's skippable messages carry one return
+    // leg, so the hub adapter would attach returnUnit[dst] to every SYNC and
+    // forwarded PAYOUT. On an EVM label it must be 0 — the hub chain's own
+    // gateway included (a move toward it would stop fitting under its zero
+    // ceiling, a local SYNC would stop being free), and every remote one (each
+    // SYNC would gift the unit to that spoke's tank out of the hub's).
+    const units = await hubUnits({ profile, all, providers: { ...providers, [netKey]: provider } })
+    for (const u of units.rows) {
+      rows.push({ what: `hub adapter.returnUnit(${u.label} = ${u.net}) is 0 (an EVM label)`, actual: String(u.unit), expected: '0', ok: u.ok, soft: false })
     }
     for (const [net, c] of spokes) {
       const sp = all[net]

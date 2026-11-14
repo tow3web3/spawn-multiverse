@@ -61,9 +61,9 @@ async function findCanaryToken(pad, creator, symbol, scan = 64) {
 }
 
 // gas of a canary round trip from a remote chain, rounded up from the forks
-// (approve, open, buy, sell, pull, claim, unwrap): what the budget check
-// prices at the LIVE gas price
-const ROUND_TRIP_GAS = 1_600_000n
+// (approve, open, the refused proof order, buy, sell, pull, claim, unwrap):
+// what the budget check prices at the LIVE gas price
+const ROUND_TRIP_GAS = 2_000_000n
 
 async function smoke(opts) {
   const { profile, signer: dev } = opts
@@ -76,6 +76,8 @@ async function smoke(opts) {
   // ALL chains for the first 10 minutes, so play money buys 20 (5 chains ×
   // 20 stays under it), real money 3
   const BUY = opts.buy ?? cfg.canaryBuy ?? (profile.mockUsdc ? 20 : 3)
+  // the cross-chain proof of the protection: a small real order the hub refuses
+  const PROOF = 1
   const POLL_MS = opts.pollMs ?? 10_000
   // THIS CHAIN's dollar: USDC (6 decimals) or, on BNB Chain, USDT (18)
   const dollar = dollarOfNet(profile, NET)
@@ -149,7 +151,7 @@ async function smoke(opts) {
     const feeData = await dev.provider.getFeeData()
     const gasPrice = feeData.gasPrice ?? feeData.maxFeePerGas ?? 0n
     const msgFees =
-      (await fee(gw.quoteBuy())) + (await fee(gw.quoteSell())) + (await fee(gw.quotePull())) +
+      2n * (await fee(gw.quoteBuy())) + (await fee(gw.quoteSell())) + (await fee(gw.quotePull())) +
       (skippedHere ? await fee(gw.quoteOpen()) : 0n) +
       (token ? 0n : await fee(gw.quoteSpawn(NAME, SYM, '{"smoke":true}', false)))
     const gasCost = ROUND_TRIP_GAS * gasPrice
@@ -182,15 +184,17 @@ async function smoke(opts) {
       await (await usdc.mint(dev.address, U(1_000))).wait()
       log(`✓ mock ${SYM_USD} minted`)
     }
-  } else if ((await usdc.balanceOf(dev.address)) < U(BUY)) {
-    throw new Error(`the signer needs ${BUY} ${SYM_USD} on ${NET} (${me.usdc}) for the canary buy`)
+  } else if ((await usdc.balanceOf(dev.address)) < U(local ? BUY : BUY + PROOF)) {
+    throw new Error(`the signer needs ${local ? BUY : BUY + PROOF} ${SYM_USD} on ${NET} (${me.usdc}) for the canary`)
   }
-  if ((await usdc.allowance(dev.address, usdAddr)) < U(BUY)) {
-    // real money: approve exactly what this run spends
-    await (await usdc.approve(usdAddr, profile.mockUsdc ? ethers.MaxUint256 : U(BUY))).wait()
+  // real money: approve exactly what this run spends (the proof order's
+  // dollar comes back, but it is pulled first)
+  const SPEND = local ? BUY : BUY + PROOF
+  if ((await usdc.allowance(dev.address, usdAddr)) < U(SPEND)) {
+    await (await usdc.approve(usdAddr, profile.mockUsdc ? ethers.MaxUint256 : U(SPEND))).wait()
     log(`✓ vault approved for ${SYM_USD}`)
     // a lagging public RPC may not show the allowance yet: wait for it
-    await waitFor('the approval', async () => (await usdc.allowance(dev.address, usdAddr)) >= U(BUY), 60, 2_000)
+    await waitFor('the approval', async () => (await usdc.allowance(dev.address, usdAddr)) >= U(SPEND), 60, 2_000)
   }
 
   const META = '{"smoke":true}'
@@ -253,29 +257,15 @@ async function smoke(opts) {
   const buyFee = await fee(gw.quoteBuy())
   const repC = await ethers.getContractAt('SpawnToken', rep, dev)
   const bag0 = await repC.balanceOf(dev.address)
-  const usdcBefore = await usdc.balanceOf(dev.address)
   const spendUsd = BUY > 250 ? 250 : BUY
+  const impossible = ethers.parseEther('1000000000') // the whole supply
 
-  // Does this gateway's `*Min` cover a CROSS-CHAIN trade? (contract round 2:
-  // the minimum rides the message and the hub enforces it). Asked with a
-  // minimum any trade meets: round 1 refuses it on a remote gateway ("GW: min
-  // out" — the reply has not happened yet), round 2 takes it.
-  let remoteMin = false
-  if (!local) {
-    remoteMin = await gw.buyTokenUsdcMin
-      .staticCall(token, U(BUY), 1n, { value: buyFee })
-      .then(() => true)
-      .catch(() => false)
-  }
-  const protectedPath = local || remoteMin
-
-  if (local || !remoteMin) {
-    // THE PROTECTION, PROVED (simulated against the live state, so it costs
-    // nothing): the very buy about to be sent, with a minimum no trade can
-    // meet, must be refused with "GW: min out" — on a local gateway because
-    // the trade came out below it, on a remote one (round 1) because the
-    // reply has not happened yet. Nothing may move.
-    const impossible = ethers.parseEther('1000000000') // the whole supply
+  // THE PROTECTION, PROVED. Every canary trade goes through the `*Min`
+  // functions (second round: the minimum rides the wire and the hub enforces
+  // it, on every chain). The proof differs by where the hub answers:
+  if (local) {
+    // the hub answers inside the transaction: an impossible minimum reverts
+    // the whole call ("GW: min out"), simulated, so it costs nothing
     let refused
     try {
       await gw.buyTokenUsdcMin.staticCall(token, U(BUY), impossible, { value: buyFee })
@@ -285,33 +275,46 @@ async function smoke(opts) {
     if (!refused || !String(refused).includes('GW: min out')) {
       throw new Error(`a buy with an impossible minimum was NOT refused with "GW: min out" (got: ${refused ?? 'no revert'})`)
     }
-    if ((await usdc.balanceOf(dev.address)) !== usdcBefore || (await repC.balanceOf(dev.address)) !== bag0) {
-      throw new Error('the refused buy moved money')
-    }
     log(`✓ slippage protection: an impossible minimum is refused ("GW: min out"), nothing moves`)
+  } else {
+    // across chains the order really flies: the hub must REFUSE it (Refused,
+    // op 2, reason 6 — the venue would not fill it at that minimum) and send
+    // every dollar home in the DELIVER. A real message, a small real order.
+    const before = await usdc.balanceOf(dev.address)
+    const hubBlock = await hubProvider.getBlockNumber()
+    log(`proving the protection: a $${PROOF} buy that names an impossible minimum (buyTokenUsdcMin) — messaging fee ${ethers.formatEther(buyFee)} ${COIN}…`)
+    await (await gw.buyTokenUsdcMin(token, U(PROOF), impossible, { value: buyFee })).wait()
+    const me32 = ethers.zeroPadValue(dev.address, 32).toLowerCase()
+    const ev = await waitFor('the hub\'s refusal (Refused, reason 6)', async () => {
+      const evs = await pad.queryFilter(pad.filters.Refused(), hubBlock)
+      return evs.find((e) => Number(e.args.op) === 2 && e.args.actor.toLowerCase() === me32 && Number(e.args.reason) === 6)
+    })
+    const home = await waitFor(`the ${SYM_USD} back, whole`, async () => {
+      const b = await usdc.balanceOf(dev.address)
+      return b === before ? b : undefined
+    })
+    if ((await repC.balanceOf(dev.address)) !== bag0) throw new Error('the refused buy delivered tokens')
+    log(`✓ slippage protection across chains: the hub refused the order (Refused, reason ${ev.args.reason}, block ${ev.blockNumber}) and every ${SYM_USD} came home (${fmtU(home)})`)
   }
 
-  let minOut = 0n
-  if (protectedPath) {
-    // local: 1% under the curve's own answer; cross-chain: 5% (the curve
-    // moves while the message flies)
-    const tol = local ? 99n : 95n
-    minOut = ((await quoteBuy(pad, token, dev.address, E(spendUsd))) * tol) / 100n
-    if (minOut === 0n) throw new Error('could not derive a minimum from the curve')
-  }
+  const usdcBefore = await usdc.balanceOf(dev.address)
+  // local: 1% under the curve's own answer; cross-chain: 5% (the curve moves
+  // while the message flies)
+  const tol = local ? 99n : 95n
+  const minOut = ((await quoteBuy(pad, token, dev.address, E(spendUsd))) * tol) / 100n
+  if (minOut === 0n) throw new Error('could not derive a minimum from the curve')
   log(
     `buying $${BUY} of ${SYM_USD}${BUY > 250 ? ' (FAIR GENESIS caps a wallet at $250)' : ''}` +
-      (protectedPath ? ` — minimum ${ethers.formatEther(minOut)} ${SYM} (buyTokenUsdcMin${local ? '' : ', cross-chain'})` : ' — plain buyTokenUsdc (this gateway\'s *Min is local-only)') +
+      ` — minimum ${ethers.formatEther(minOut)} ${SYM} (buyTokenUsdcMin${local ? '' : ', enforced on the hub'})` +
       ` — messaging fee ${ethers.formatEther(buyFee)} ${COIN}…`,
   )
-  if (protectedPath) await (await gw.buyTokenUsdcMin(token, U(BUY), minOut, { value: buyFee })).wait()
-  else await (await gw.buyTokenUsdc(token, U(BUY), { value: buyFee })).wait()
+  await (await gw.buyTokenUsdcMin(token, U(BUY), minOut, { value: buyFee })).wait()
   const bal = await waitFor('token delivery', async () => {
     const b = (await repC.balanceOf(dev.address)) - bag0
     return b > 0n ? b : undefined
   })
   log(`✓ delivered: ${ethers.formatEther(bal)} ${SYM} on ${NET}`)
-  if (protectedPath && bal < minOut) throw new Error(`delivered ${bal} below the minimum ${minOut} — the check did not hold`)
+  if (bal < minOut) throw new Error(`delivered ${bal} below the minimum ${minOut} — the check did not hold`)
 
   // refund leg: tokens and refund ride the same OP_DELIVER, so it is in
   const spent = usdcBefore - (await usdc.balanceOf(dev.address))
@@ -331,15 +334,10 @@ async function smoke(opts) {
   const usdcMid = await usdc.balanceOf(dev.address)
   const claimBefore = await usd.balanceOf(dev.address)
   const sellFee = await fee(gw.quoteSell())
-  if (protectedPath) {
-    const minUsd = ((await quoteSell(pad, token, bal / 2n)) * (local ? 99n : 95n)) / 100n
-    if (minUsd === 0n) throw new Error('could not derive a sell minimum from the curve')
-    log(`selling half the bag — minimum $${ethers.formatEther(minUsd)} (sellTokenMin${local ? '' : ', cross-chain'})…`)
-    await (await gw.sellTokenMin(token, bal / 2n, minUsd, { value: sellFee })).wait()
-  } else {
-    log('selling half the bag…')
-    await (await gw.sellToken(token, bal / 2n, { value: sellFee })).wait()
-  }
+  const minUsd = ((await quoteSell(pad, token, bal / 2n)) * tol) / 100n
+  if (minUsd === 0n) throw new Error('could not derive a sell minimum from the curve')
+  log(`selling half the bag — minimum $${ethers.formatEther(minUsd)} (sellTokenMin${local ? '' : ', enforced on the hub'})…`)
+  await (await gw.sellTokenMin(token, bal / 2n, minUsd, { value: sellFee })).wait()
   const back = await waitFor(`${SYM_USD} payout`, async () => {
     const b = await usdc.balanceOf(dev.address)
     return b > usdcMid ? b - usdcMid : undefined
@@ -433,7 +431,7 @@ async function smoke(opts) {
       ? `🎉 HUB-LOCAL SPAWN + ${SYM_USD} BUY + ${SYM_USD} PAYOUT + HOLDER FEES — EVERY STEP IN ONE TRANSACTION, NO LAYERZERO MESSAGE`
       : `🎉 CROSS-CHAIN ${opened ? 'OPEN + ' : ''}${SYM_USD} BUY + ${SYM_USD} PAYOUT + HOLDER-FEE PULL${moved ? ' + CLAIM MOVED' : ''} FROM ${NET.toUpperCase()} OVER LIVE LAYERZERO — DONE`,
   )
-  return { token, replica: rep, bought: bal, minOut, local, opened, moved, remoteMin }
+  return { token, replica: rep, bought: bal, minOut, local, opened, moved }
 }
 
 module.exports = { smoke, quoteBuy, quoteSell, findCanaryToken, ROUND_TRIP_GAS }

@@ -131,7 +131,8 @@ run('Optimism mainnet fork — a spoke over the real endpoint and real USDC', fu
     expect(packet.options).to.equal(
       ethers.solidityPacked(
         ['uint16', 'uint8', 'uint16', 'uint8', 'uint128', 'uint128'],
-        [3, 1, 33, 1, profile.gasToHub, profile.returnUnit],
+        // a BUY buys its own executor gas (second round: gasForOp), not the SPAWN's limit
+        [3, 1, 33, 1, BigInt(profile.opGas.toHub[2]), profile.returnUnit],
       ),
     )
     const [routed] = h.eventsOf(adapter, rc, 'Routed')

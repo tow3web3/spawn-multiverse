@@ -93,6 +93,11 @@ describe('deploy & ops tooling (profile-driven, in-process)', function () {
     const refreshed = await deploy(OP)
     expect(await opGw.spawnLegs()).to.equal(2n)
     expect(refreshed.check.soft).to.deep.equal([])
+    // the launch order ends with the spokes refreshed and the hub read back:
+    // the moves the refreshed spokes now price give the pad its PAYOUT
+    // ceilings (v7.2, second round: one per kind of request)
+    await deploy(ARB)
+    await deploy(HUB)
 
     for (const net of [HUB, OP, ARB]) {
       const again = await deploy(net)
@@ -500,6 +505,9 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
     expect(hubCtx.blocked.map((b) => b.fn)).to.deep.equal(['setRoute', 'setGateway'])
     expect(hubCtx.blocked.every((b) => b.role === 'admin')).to.equal(true)
     for (const net of [OP, ARB]) expect((await run(net)).blocked).to.deep.equal([])
+    // the spokes now price moves toward the newcomer: the hub, once more,
+    // gives the pad the matching PAYOUT ceiling (an operator step)
+    expect((await run(HUB)).blocked.map((b) => b.fn)).to.deep.equal(['setRoute', 'setGateway'])
     for (const net of [HUB, OP, ARB]) expect(await (await at('SpawnGateway', state()[net].gateway)).spawnLegs()).to.equal(3n)
 
     // spawns still work: 2 SYNCs go out, 3 legs are prepaid (the tank keeps the difference)
@@ -659,7 +667,7 @@ describe('adding a chain to a handed-over deployment (through the timelock)', fu
     const capsRun = await tuneFees({ profile, netKey: HUB, signer: deployer, apply: true, providers, log: quiet })
     for (const c of capsRun.caps) {
       expect(c.target, c.net).to.be.gte(c.live)
-      expect(await pad.requestCap(profile.nets[c.net].label), c.net).to.equal(c.target)
+      expect(await pad.requestCap(profile.nets[c.net].label, c.op), `${c.net} op ${c.op}`).to.equal(c.target)
     }
     // a remote spawn is now fully funded by its sender, dearer SYNCs included
     const fromArb = await spawnFrom(ARB)
@@ -859,6 +867,11 @@ describe('one universe, five chains, two dollars (v7.2 wiring, prices, canaries)
       expect(ctx.check.ok, n).to.equal(true)
       expect(ctx.check.soft.map((r) => r.what), n).to.deep.equal([])
     }
+    // and the hub once more (launch.sh does too): the PAYOUT ceilings follow
+    // the move prices the refreshed spokes just set
+    const again = await run(HUB)
+    expect(again.check.ok).to.equal(true)
+    expect(again.check.soft.map((r) => r.what)).to.deep.equal([])
     await (await endpoint.setDstFee(profile.nets[ETH].eid, E('0.01'))).wait() // an L1: ten times dearer
     const s = state()
     pad = await at('SpawnPad', s[HUB].pad)
@@ -876,7 +889,10 @@ describe('one universe, five chains, two dollars (v7.2 wiring, prices, canaries)
     // requests: every remote chain has a ceiling, and the rule holds
     const solv = await requestSolvency({ profile, all: s, providers })
     expect(solv.ok).to.equal(true)
-    for (const r of solv.rows) expect(r.cap, r.net).to.be.gt(0n)
+    for (const r of solv.rows) {
+      expect(r.capSync, r.net).to.be.gt(0n)
+      expect(r.capPayout, r.net).to.be.gt(0n)
+    }
     // BNB: OmniUSDLocal over an 18-decimal dollar, no wrap, no peer
     const bnbVault = await at('OmniUSDLocal', s[BNB].usd)
     expect(await bnbVault.SCALE()).to.equal(1n)
@@ -907,8 +923,10 @@ describe('one universe, five chains, two dollars (v7.2 wiring, prices, canaries)
     // the hub's SYNC toward Ethereum fits under its REQUEST ceiling: an open from there is served
     const ethRow = (await requestSolvency({ profile, all: s, providers })).rows.find((r) => r.net === ETH)
     expect(ethRow.capOk).to.equal(true)
-    expect(ethRow.covered).to.equal(true)
-    expect(ethRow.cap).to.be.gte(ethRow.need)
+    expect(ethRow.openCovered).to.equal(true)
+    expect(ethRow.movesCovered).to.equal(true)
+    expect(ethRow.capSync).to.be.gte(ethRow.qSync)
+    expect(ethRow.capPayout).to.be.gte(ethRow.qPayout)
     // a move from Optimism toward Ethereum prepays many Optimism legs
     const opGw = await at('SpawnGateway', s[OP].gateway)
     expect(await opGw.moveLegs(profile.nets[ETH].label)).to.be.gt(5n)
@@ -937,7 +955,6 @@ describe('one universe, five chains, two dollars (v7.2 wiring, prices, canaries)
       const r = await canary(n)
       expect(r.token, n).to.equal(hub.token)
       expect(r.opened, n).to.equal(false)
-      expect(r.remoteMin, n).to.equal(false) // round 1: *Min is local-only
     }
     const bnb = await canary(BNB)
     expect(bnb.token).to.equal(hub.token)
@@ -983,15 +1000,33 @@ describe('one universe, five chains, two dollars (v7.2 wiring, prices, canaries)
     const s = state()
     // the operator sets a ceiling far above what any request toward Optimism prepays
     const label = profile.nets[OP].label
-    const fair = await pad.requestCap(label)
-    await (await pad.setRequestCap(label, fair * 10n)).wait()
+    for (const [op, what] of [[10, 'what an open from it prepays'], [12, 'what a move toward it prepays']]) {
+      const fair = await pad.requestCap(label, op)
+      await (await pad.setRequestCap(label, op, fair * 10n)).wait()
+      const st = await status({ profile, providers, log: quiet })
+      expect(st.ok, `op ${op}`).to.equal(false)
+      expect(st.warnings.some((w) => w.includes(`exceeds ${what}`)), `op ${op}`).to.equal(true)
+      await expect(run(HUB)).to.be.rejectedWith(/self-check failed: pad\.requestCap\(optimismSepolia, (SYNC|PAYOUT)\)/)
+      await tune(HUB) // brings it down to the smallest prepay
+      expect(await pad.requestCap(label, op)).to.equal(fair)
+      expect((await status({ profile, providers, log: quiet })).ok).to.equal(true)
+    }
+
+    // a return unit on an EVM label of the hub adapter: the hub chain's own
+    // gateway, and a remote spoke — both hard failures, everywhere
+    const hubAdapter = await at('LayerZeroOmniMessenger', s[HUB].adapter, deployer)
+    for (const net of [HUB, OP]) {
+      const l = profile.nets[net].label
+      const gas = await hubAdapter.gasLimit(l)
+      await (await hubAdapter.setDestination(l, gas, 1n)).wait()
+      const st = await status({ profile, providers, log: quiet })
+      expect(st.ok, net).to.equal(false)
+      expect(st.warnings.some((w) => w.includes(`returnUnit(${l})`)), net).to.equal(true)
+      await expect(run(HUB), net).to.be.rejectedWith(/self-check failed: .*returnUnit\(\d+ = /)
+      await (await hubAdapter.setDestination(l, gas, 0n)).wait()
+    }
     let st = await status({ profile, providers, log: quiet })
-    expect(st.ok).to.equal(false)
-    expect(st.warnings.some((w) => w.includes('exceeds what a request toward it prepays'))).to.equal(true)
-    await expect(run(HUB)).to.be.rejectedWith(/self-check failed: pad\.requestCap\(optimismSepolia\)/)
-    await tune(HUB) // brings it down to the smallest prepay
-    expect(await pad.requestCap(label)).to.equal(fair)
-    expect((await status({ profile, providers, log: quiet })).ok).to.equal(true)
+    expect(st.ok).to.equal(true)
 
     // a remote gateway that prepays no SYNC for an open
     const arbGw = await at('SpawnGateway', s[ARB].gateway, deployer)

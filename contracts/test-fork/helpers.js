@@ -12,6 +12,7 @@ const { ethers } = require('hardhat')
 const { impersonateAccount, setBalance } = require('@nomicfoundation/hardhat-network-helpers')
 const { PROFILES } = require('../config/profiles')
 const { USDC_ABI, CCTP_MESSENGER_ABI, ENDPOINT_ABI, GENERATION, b32, loadState, saveState } = require('../scripts/lib-net')
+const { encodeEnvelope, encodeTrade } = require('../scripts/lib-wire')
 
 const coder = ethers.AbiCoder.defaultAbiCoder()
 const U = (n) => ethers.parseUnits(String(n), 6)
@@ -103,7 +104,8 @@ const payload = (op, types, values) => coder.encode(['uint8', 'bytes'], [op, cod
  * from the endpoint's address, with the prepaid reply budget as msg.value. */
 async function lzDeliver(profile, adapter, { srcEid, srcAdapter, srcSender, dst, data, value = 0n, nonce = 1 }) {
   const endpoint = await impersonate(profile.endpoint)
-  const message = coder.encode(['bytes32', 'bytes32', 'bytes'], [b32(srcSender), b32(dst), data])
+  // v7.2: the envelope's last word is the budget the delivery must bring
+  const message = encodeEnvelope(b32(srcSender), b32(dst), data, value)
   const tx = await adapter
     .connect(endpoint)
     .lzReceive({ srcEid, sender: b32(srcAdapter), nonce }, ethers.id(`guid/${nonce}/${Date.now()}`), message, ethers.ZeroAddress, '0x', { value })
@@ -138,5 +140,5 @@ const quiet = process.env.FORK_VERBOSE === '1' ? console.log : () => {}
 
 module.exports = {
   coder, U, E, SCALE, OP,
-  forkProfile, fakeAddr, injectRemote, impersonate, mintUsdc, fundDollars, usdcAt, payload, lzDeliver, packetsSent, eventsOf, quiet,
+  forkProfile, fakeAddr, injectRemote, impersonate, mintUsdc, fundDollars, usdcAt, payload, encodeTrade, lzDeliver, packetsSent, eventsOf, quiet,
 }

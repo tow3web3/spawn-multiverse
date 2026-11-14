@@ -227,7 +227,8 @@ run('Base mainnet fork — the hub over the real endpoint, real USDC, real CCTP'
     // type 3, executor worker, 33-byte lzReceive option: gas + value
     const expected = ethers.solidityPacked(
       ['uint16', 'uint8', 'uint16', 'uint8', 'uint128', 'uint128'],
-      [3, 1, 33, 1, profile.gasToSpoke, unit],
+      // a PAYOUT buys its own executor gas (second round: gasForOp), not the destination's limit
+      [3, 1, 33, 1, BigInt(profile.opGas.toSpoke[12]), unit],
     )
     expect(packet.options).to.equal(expected)
     expect(await tank()).to.equal(tank0) // paid in full by the caller
@@ -235,7 +236,7 @@ run('Base mainnet fork — the hub over the real endpoint, real USDC, real CCTP'
     // and without a budget: the 17-byte form
     const rc2 = await (await adapter.send(op.label, dst, data, 0, { value: plain })).wait()
     expect(h.packetsSent(profile, rc2)[0].options).to.equal(
-      ethers.solidityPacked(['uint16', 'uint8', 'uint16', 'uint8', 'uint128'], [3, 1, 17, 1, profile.gasToSpoke]),
+      ethers.solidityPacked(['uint16', 'uint8', 'uint16', 'uint8', 'uint128'], [3, 1, 17, 1, BigInt(profile.opGas.toSpoke[12])]),
     )
 
     await (await adapter.setDestination(op.label, profile.gasToSpoke, 0)).wait()
@@ -254,7 +255,7 @@ run('Base mainnet fork — the hub over the real endpoint, real USDC, real CCTP'
       srcAdapter: remote.adapter,
       srcSender: remote.gateway,
       dst: S.pad,
-      data: h.payload(OP.BUY, ['bytes32', 'bytes32', 'uint256'], [b32(token), b32(buyer), usdIn]),
+      data: h.encodeTrade('BUY', b32(token), b32(buyer), usdIn),
       value: budget,
     })
     report.hubBuyGas = rc.gasUsed
@@ -274,7 +275,7 @@ run('Base mainnet fork — the hub over the real endpoint, real USDC, real CCTP'
         srcAdapter: h.fakeAddr('not/the/peer'),
         srcSender: remote.gateway,
         dst: S.pad,
-        data: h.payload(OP.BUY, ['bytes32', 'bytes32', 'uint256'], [b32(token), b32(buyer), usdIn]),
+        data: h.encodeTrade('BUY', b32(token), b32(buyer), usdIn),
         nonce: 2,
       }),
     ).to.be.revertedWith('LZM: not a peer')

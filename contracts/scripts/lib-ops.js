@@ -12,7 +12,8 @@ const {
   loadState, b32, same, hasRole, vaultOf, vaultName, nativeOf, dollarOf, distOf, roleKeys, USDC_ABI, ENDPOINT_ABI, writeManifest,
 } = require('./lib-net')
 const { verifyDvn } = require('./lib-dvn')
-const { readLegs, requestSolvency, WORST_SYNC, SAMPLE_PAYOUT } = require('./lib-prices')
+const { readLegs, requestSolvency, hubUnits, WORST_SYNC, SAMPLE_PAYOUT, SKIPPABLE_LEGS, OP_SYNC, OP_PAYOUT } = require('./lib-prices')
+const { encodeOp } = require('./lib-wire')
 
 const coder = ethers.AbiCoder.defaultAbiCoder()
 const fmt = (wei) => ethers.formatEther(wei)
@@ -24,10 +25,7 @@ function providerOf(profile, net, providers) {
 }
 
 // the replies a hub sends, at the size that matters for their fee
-const SAMPLE_DELIVER = coder.encode(
-  ['uint8', 'bytes'],
-  [11, coder.encode(['bytes32', 'bytes32', 'uint256', 'uint256'], [ethers.ZeroHash, ethers.ZeroHash, 0n, 0n])],
-)
+const SAMPLE_DELIVER = encodeOp('DELIVER', [ethers.ZeroHash, ethers.ZeroHash, 0n, 0n])
 const SAMPLE_SYNC = WORST_SYNC
 
 /* -------------------------------- tune-fees -------------------------------- */
@@ -35,14 +33,11 @@ const SAMPLE_SYNC = WORST_SYNC
 const ceilDiv = (a, b) => (a === 0n ? 0n : (a - 1n) / b + 1n)
 const maxB = (...xs) => xs.reduce((a, b) => (b > a ? b : a))
 
-/* ───────────── SEAM: per-op executor gas (contract round 2) ─────────────
- * ASSUMED, not in the contracts of this branch: the LayerZero adapter gains
+/* ─────────────── per-op executor gas (contract round 2) ───────────────
  *   function setGasForOp(uint32 chainLabel, uint8 op, uint128 gas) external onlyOperator
  *   function gasForOp(uint32 chainLabel, uint8 op) external view returns (uint128)
- * where 0 falls back to gasLimit[chainLabel]. Everything that touches it is
- * here: if the adapter's ABI has no `setGasForOp`, tune-fees says so and
- * leaves the one gas limit per destination alone. If round 2 names it
- * differently, change these two constants (and nothing else). */
+ * 0 falls back to gasLimit[chainLabel]. An adapter without them (first-round
+ * bytecode) keeps its one gas limit per destination, and tune-fees says so. */
 const OP_GAS_SETTER = 'setGasForOp'
 const OP_GAS_GETTER = 'gasForOp'
 const opGasSupported = (adapter) => {
@@ -59,7 +54,8 @@ function opGasPlan(profile, netKey, dstNet, spawnGas) {
   const table = profile.opGas
   if (!table) return []
   if (netKey !== profile.hub) {
-    return Object.entries(table.toHub).map(([op, g]) => ({ label: 0, op: Number(op), gas: Number(op) === 1 ? spawnGas : BigInt(g) }))
+    void spawnGas // the SPAWN buys the destination's own limit (gasLimit = hubGasFor)
+    return Object.entries(table.toHub).filter(([op]) => Number(op) !== 1).map(([op, g]) => ({ label: 0, op: Number(op), gas: BigInt(g) }))
   }
   const own = profile.nets[dstNet]?.opGasToSpoke ?? {}
   return Object.entries({ ...table.toSpoke, ...own }).map(([op, g]) => ({
@@ -125,15 +121,18 @@ async function tuneFees(opts) {
     const r = {
       net,
       label: c.label,
-      sync: await hubAdapter.quote(c.label, gw, SAMPLE_SYNC, 0),
-      payout: await hubAdapter.quote(c.label, gw, SAMPLE_PAYOUT, 0),
+      // the pad's skippable messages carry one return leg (second round)
+      sync: await hubAdapter.quote(c.label, gw, SAMPLE_SYNC, SKIPPABLE_LEGS),
+      payout: await hubAdapter.quote(c.label, gw, SAMPLE_PAYOUT, SKIPPABLE_LEGS),
       deliver: await hubAdapter.quote(c.label, gw, SAMPLE_DELIVER, 0),
       syncCap: await pad.syncCap(c.label),
-      requestCap: await pad.requestCap(c.label),
+      capSync: await pad.requestCap(c.label, OP_SYNC),
+      capPayout: await pad.requestCap(c.label, OP_PAYOUT),
     }
-    // what a request toward this chain must prepay (its SYNC and its PAYOUT
-    // answer to one ceiling on the pad)
-    r.request = withMargin(maxB(r.sync, r.payout))
+    // what each kind of request toward this chain must prepay: an open, the
+    // worst SYNC; a move, the PAYOUT (each has its own ceiling on the pad)
+    r.openNeed = withMargin(r.sync)
+    r.moveNeed = withMargin(r.payout)
     remote.push(r)
   }
   if (!remote.length) {
@@ -147,7 +146,7 @@ async function tuneFees(opts) {
   const reaches = (r, from) => {
     if (r.syncCap === 0n) return true
     let ceiling = r.syncCap
-    if (r.net === from && r.requestCap > ceiling) ceiling = r.requestCap
+    if (r.net === from && r.capSync > ceiling) ceiling = r.capSync
     return r.sync <= ceiling
   }
   const reached = remote.filter((r) => reaches(r, netKey))
@@ -176,9 +175,9 @@ async function tuneFees(opts) {
     basis = `the DELIVER quote + ${marginPct}%`
     // an open prepays at most MAX_OPEN_LEGS units: the unit never falls so
     // low that an open stops covering the CURRENT ceiling toward here
-    const floorUnit = ceilDiv(self.requestCap, BigInt(maxOpen))
+    const floorUnit = ceilDiv(self.capSync, BigInt(maxOpen))
     if (target < floorUnit) {
-      basis += ` — held at the hub's current requestCap ÷ ${maxOpen} until the hub's run lowers it`
+      basis += ` — held at the hub's current requestCap(SYNC) ÷ ${maxOpen} until the hub's run lowers it`
       target = floorUnit
     }
   }
@@ -203,7 +202,7 @@ async function tuneFees(opts) {
   let openTarget = curOpen
   if (isHub) openTarget = 0
   else if (unit > 0n) {
-    openTarget = Math.max(Number(ceilDiv(self.request, unit)), Number(ceilDiv(self.requestCap, unit)), 1)
+    openTarget = Math.max(Number(ceilDiv(self.openNeed, unit)), Number(ceilDiv(self.capSync, unit)), 1)
     if (openTarget > maxOpen) {
       log(`  ⚠ an open from ${netKey} would need ${openTarget} legs, the contract allows ${maxOpen} — clamped; the hub refuses an open above what it prepaid`)
       openTarget = maxOpen
@@ -225,7 +224,7 @@ async function tuneFees(opts) {
     } else if (unit === 0n) {
       legs = current
     } else {
-      legs = Math.max(tradeLegs, 1, Number(ceilDiv(r.request, unit)), Number(ceilDiv(r.requestCap, unit)))
+      legs = Math.max(tradeLegs, 1, Number(ceilDiv(r.moveNeed, unit)), Number(ceilDiv(r.capPayout, unit)))
       if (legs > maxMove) {
         log(`  ⚠ a move ${netKey} → ${net} would need ${legs} legs (> ${maxMove}): that route is CLOSED until prices allow it`)
         legs = 0
@@ -352,23 +351,33 @@ async function tuneFees(opts) {
     for (const r of solv.rows) {
       const q = remote.find((x) => x.net === r.net)
       if (!q) continue // not routed yet: nothing can reach it
-      const current = q.requestCap
-      const want = r.min
-      const lower = want < current
-      const raise = want > current && (current === 0n || (want - current) * 100n > current * tolerancePct)
-      caps.push({ net: r.net, label: r.label, current, target: lower || raise ? want : current, live: maxB(q.sync, q.payout) })
-      log(
-        `  requestCap → ${r.net}: ${fmt(current)}  →  ${fmt(lower || raise ? want : current)} (smallest prepay — open ${fmt(r.open)}` +
-          (r.moves.length ? `, moves ${r.moves.map((m) => `${m.src} ${fmt(m.prepay)}`).join(', ')}` : '') +
-          `; the live price ${fmt(maxB(q.sync, q.payout))})`,
-      )
-      if (want < maxB(q.sync, q.payout)) {
-        log(`  ⚠ ${r.net}: what requests prepay is under the live price — opens and moves toward it are REFUSED until the spokes are re-priced`)
+      for (const [op, kind, current, want, live] of [
+        [OP_SYNC, 'SYNC (an open from it)', q.capSync, r.open, q.sync],
+        [OP_PAYOUT, 'PAYOUT (a move toward it)', q.capPayout, r.minMove, q.payout],
+      ]) {
+        if (want === undefined) continue // no route toward it: nothing to bound
+        const lower = want < current
+        const raise = want > current && (current === 0n || (want - current) * 100n > current * tolerancePct)
+        caps.push({ net: r.net, label: r.label, op, current, target: lower || raise ? want : current, live })
+        log(
+          `  requestCap → ${r.net}, ${kind}: ${fmt(current)}  →  ${fmt(lower || raise ? want : current)} (smallest prepay ${fmt(want)}` +
+            (op === OP_PAYOUT && r.moves.length ? ` — ${r.moves.map((m) => `${m.src} ${fmt(m.prepay)}`).join(', ')}` : '') +
+            `; the live price ${fmt(live)})`,
+        )
+        if (want < live) {
+          log(`  ⚠ ${r.net}: what a ${kind} prepays is under the live price — refused until the spokes are re-priced`)
+        }
+        if (!(lower || raise)) continue
+        out.changed = true
+        await run({ what: `pad.setRequestCap(${r.label} = ${r.net}, op ${op}, ${fmt(want)})`, on: pad, fn: 'setRequestCap', args: [r.label, op, want] })
       }
-      if (!(lower || raise)) continue
-      out.changed = true
-      await run({ what: `pad.setRequestCap(${r.label} = ${r.net}, ${fmt(want)})`, on: pad, fn: 'setRequestCap', args: [r.label, want] })
     }
+    // the second-round rule: no unit on an EVM label of the hub adapter
+    const units = await hubUnits({ profile, all, providers: P })
+    for (const u of units.rows.filter((x) => !x.ok)) {
+      log(`  ✗ hub adapter.returnUnit(${u.label} = ${u.net}) is ${fmt(u.unit)} — it must be 0 on an EVM label (the operator: setDestination(${u.label}, <gas>, 0))`)
+    }
+    out.unitsOk = units.ok
   }
   if (opts.apply && !isOperator && out.blockedAll.length) {
     out.blocked = out.blockedAll.find((b) => same(b.target, adapter.target))
@@ -568,23 +577,44 @@ async function status(opts) {
   let requests
   try {
     requests = await requestSolvency({ profile, all, providers: opts.providers })
+    const p = (x) => (x === undefined ? 'unpriced' : fmt(x))
     for (const r of requests.rows) {
-      const live = r.need === undefined ? 'unpriced' : fmt(r.need)
       log(
-        `  ${r.net.padEnd(16)} requestCap ${fmt(r.cap)} ≤ smallest prepay ${fmt(r.min)} ${r.capOk ? '✓' : '✗'}` +
-          ` | live price ${live}${r.covered === false ? ' (a prepay is UNDER it: some requests are refused)' : ''}` +
+        `  ${r.net.padEnd(16)} SYNC (opens): cap ${fmt(r.capSync)} ≤ open prepay ${fmt(r.open)} ${r.syncOk ? '✓' : '✗'} | live ${p(r.qSync)}` +
+          `${r.openCovered === false ? ' (the open prepay is UNDER it)' : ''}` +
           `${r.syncCap > 0n ? ` | launch ceiling ${fmt(r.syncCap)}${r.qSync !== undefined ? (r.qSync > r.syncCap ? ' — launches SKIP it now' : ' — launches reach it now') : ''}` : ''}`,
       )
-      if (!r.capOk) warn(`✗ ${r.net}: requestCap ${fmt(r.cap)} exceeds what a request toward it prepays (${fmt(r.min)}) — the tank pays the difference. Run tune-fees on ${profile.hub}.`)
+      log(
+        `  ${''.padEnd(16)} PAYOUT (moves): cap ${fmt(r.capPayout)} ≤ smallest move prepay ${r.minMove === undefined ? '— (no route)' : fmt(r.minMove)} ${r.payoutOk ? '✓' : '✗'} | live ${p(r.qPayout)}` +
+          `${r.movesCovered === false ? ' (a move prepay is UNDER it)' : ''}`,
+      )
+      if (!r.syncOk) warn(`✗ ${r.net}: requestCap(SYNC) ${fmt(r.capSync)} exceeds what an open from it prepays (${fmt(r.open)}) — the tank pays the difference. Run tune-fees on ${profile.hub}.`)
+      if (!r.payoutOk) warn(`✗ ${r.net}: requestCap(PAYOUT) ${fmt(r.capPayout)} exceeds what a move toward it prepays (${fmt(r.minMove)}) — the tank pays the difference. Run tune-fees on ${profile.hub}.`)
       if (!r.openOk) warn(`✗ ${r.net}: openLegs = 0 on a REMOTE gateway — the hub tank pays every open there. Run tune-fees on ${r.net}.`)
-      if (r.cap === 0n) warn(`${r.net}: requestCap is 0 — closed to opens and incoming moves until tune-fees prices it`)
-      else if (r.open_for_requests === false) warn(`${r.net}: requestCap is under the live price — opens and moves toward it are refused right now`)
+      if (r.capSync === 0n) warn(`${r.net}: requestCap(SYNC) is 0 — closed to opens until tune-fees prices it`)
+      else if (r.opensServed === false) warn(`${r.net}: requestCap(SYNC) is under the live price — opens from it are refused right now`)
+      if (r.minMove !== undefined && r.capPayout === 0n) warn(`${r.net}: requestCap(PAYOUT) is 0 — incoming moves come home until tune-fees prices it`)
+      else if (r.movesServed === false) warn(`${r.net}: requestCap(PAYOUT) is under the live price — moves toward it come home right now`)
     }
     if (!requests.rows.length) log('  (no remote chain yet)')
   } catch (e) {
     warn(`request ceilings could not be read (${e.shortMessage ?? e.message})`)
   }
-  const requestsOk = !requests || requests.ok
+  // the second-round rule: no return unit on an EVM label of the hub adapter
+  let unitsOk = true
+  try {
+    const units = await hubUnits({ profile, all, providers: opts.providers })
+    for (const u of units.rows) {
+      if (!u.ok) {
+        unitsOk = false
+        warn(`✗ the hub adapter attaches ${fmt(u.unit)} to every skippable message toward ${u.net} (returnUnit(${u.label})) — must be 0 on an EVM label`)
+      }
+    }
+    if (units.ok) log(`  hub adapter: returnUnit 0 on every EVM label (${units.rows.map((u) => u.label).join(', ')}) ✓`)
+  } catch (e) {
+    warn(`hub return units could not be read (${e.shortMessage ?? e.message})`)
+  }
+  const requestsOk = (!requests || requests.ok) && unitsOk
 
   // ── tanks ──
   log('\nGAS TANKS (adapters)')
@@ -677,7 +707,7 @@ async function status(opts) {
   const ok = backed && requestsOk && peersOk
   log(
     `\n${ok ? '✓' : '✗'} backing ${backed ? 'holds' : 'FAILS'}` +
-      `${requestsOk ? '' : ' — a REQUEST CEILING is above what requests prepay'}${peersOk ? '' : ' — THE USDT VAULT IS A CCTP PEER'}` +
+      `${requestsOk ? '' : ' — a REQUEST CEILING is above what requests prepay, or a return unit sits on an EVM label'}${peersOk ? '' : ' — THE USDT VAULT IS A CCTP PEER'}` +
       ` — ${warnings.length} warning(s)`,
   )
   return { ok, backed, deployed: true, held, supply, ledger, byDollar, vaults, bnb, requests, peersOk, warnings, dvn, waiting, missing }
@@ -777,7 +807,7 @@ async function resync(opts) {
     )
     let fee
     try {
-      fee = await adapter.quote(p.label, gw, payload, 0)
+      fee = await adapter.quote(p.label, gw, payload, SKIPPABLE_LEGS) // as the pad sends it: one return leg
     } catch (e) {
       // the leg still refuses the send: resync would revert like the SYNC did
       log(`  ${p.token} ${meta.symbol} → ${p.net}: the leg still cannot be quoted (${e.shortMessage ?? e.message}) — repair it first`)
