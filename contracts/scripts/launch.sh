@@ -38,6 +38,15 @@ PROFILE="${1:-${SPAWN_LAUNCH_PROFILE:-mainnet}}"
 [[ "$PROFILE" == "core" ]] && PROFILE=mainnet
 export SPAWN_PROFILE="$PROFILE"
 
+# HOLD: while deployments/HOLD-MAINNET exists, no mainnet universe is launched
+# from here — the file says why. A fork rehearsal passes SPAWN_IGNORE_HOLD=1
+# (it sends nothing to a live chain). Delete the file to lift the hold.
+if [[ "$PROFILE" != "testnet" && -f deployments/HOLD-MAINNET && "${SPAWN_IGNORE_HOLD:-}" != "1" ]]; then
+  echo "✗ mainnet launch on hold:"
+  sed 's/^/    /' deployments/HOLD-MAINNET
+  exit 1
+fi
+
 # the topology comes from the profile, not from this script
 TOPO=$(node -e "
 const {PROFILES,activeNets}=require('./config/profiles');

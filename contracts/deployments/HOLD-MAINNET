@@ -1,0 +1,14 @@
+2026-11-14 — EN ATTENTE / ON HOLD.
+
+FR : le lancement mainnet est en pause. Le propriétaire veut SIX chains dans
+UN SEUL univers (Base, Arbitrum, Optimism, Ethereum, BNB Chain, Solana). Le
+hub est immuable une fois déployé : il doit passer en v7.2 AVANT le lancement,
+sinon il faudrait le retirer une deuxième fois. Rien à faire de votre côté :
+Claude vous redonnera la ligne à coller quand ce sera prêt.
+
+EN: the owner wants six chains in ONE universe. The hub is immutable once
+deployed, so it is being upgraded to v7.2 (permissionless paid resync, a
+ceiling on what a spawn may spend on one chain's SYNC, portable dollar
+claims, a non-USDC satellite vault) BEFORE any mainnet launch. Launching
+v7.1 now would mean retiring it again. This file is removed when v7.2 has
+passed its tests, its fork rehearsals and a testnet run.
