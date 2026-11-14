@@ -72,6 +72,19 @@ is opened there per token (`openToken`).
 Deployer today: **0 ETH, 0 USDC** on Ethereum — fund ~0.02 ETH for the
 deploy, and 5 USDC + ~0.02 ETH for its canary.
 
+## Solana — label 1, the sixth chain (hub side read 2026-11-14; nothing deployed)
+
+| What | Value | How it is checked |
+|---|---|---|
+| LayerZero eid | **30168** (devnet 40168) | `endpoint.isSupportedEid(30168)` on Base and `(40168)` on Base Sepolia: true (live) |
+| Base's send / receive library toward it | `0xB5320B0B…Dda2` / `0xc70AB6f3…4bAf` (the same as every EVM pathway) | `getSendLibrary` / `getReceiveLibrary`, live |
+| LayerZero's DEFAULT executor config Base → Solana | executor `0x2CCA08ae69E0C44b18a57Ab2A87644234dAebaE4`, **maxMessageSize 200** | live — below every hub message (288–512): `add-solana.sh` raises it to 10,000 before the route; on the forks the real library accepted it |
+| Default executor Base Sepolia → devnet | `0x8A3D588D9f6AC041476b094f97FF94ec30169d3D`, maxMessageSize 10,000 | live — nothing to change on testnet |
+| Default confirmations | Base → Solana 10, Solana → Base 32 (the default verifiers: 4 required, one of them Canary) | live |
+| Our verifiers on Base for eid 30168 | LayerZero Labs, Google, Horizen, Twinstake — the Base addresses above; each `getFee(30168, 10, …)` answers ≈ 0.0000044 ETH | live; on the mainnet fork configured on both sides of the pathway and read back |
+| Our verifiers on Solana (configured by `solana/scripts/wire.ts`) | LayerZero Labs `4VDjp6XQaxoZf5RGwiPU9NR1EXSZn2TP4ATMmiSzLfhb`, Google `F7gu9kLcpn4bSTZn183mhn2RXUuMy7zckdxJZdUjuALw`, Horizen `HR9NQKK1ynW9NzgdM37dU5CBtqRHTukmbMKS7qkwSkHX`, Twinstake `GPjyWr8vCotGuFubDpTxDxy9Vj1ZeEN4F2dwRmFiaGab` | LayerZero's registry ("solana", v2, not lzRead) — NOT checked here: that they quote and sign Solana → Base is the devnet run's to show |
+| What a SYNC toward Solana costs the hub (our set, 3,000,000 lamports attached) | 0.000572 ETH, of which 0.000285 is LayerZero's price for the lamports | the Base mainnet fork, real endpoint quote |
+
 ## Native USDC
 
 Source: <https://developers.circle.com/stablecoins/usdc-contract-addresses>

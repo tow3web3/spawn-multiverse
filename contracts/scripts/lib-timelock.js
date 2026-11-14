@@ -437,4 +437,4 @@ async function actors(profile, netKey, stateFile) {
   return { deployer: first, owner, impersonated: false }
 }
 
-module.exports = { collectAdminSteps, scheduleOps, executeOps, listOps, cancelOp, actors, saltOf, batchOf }
+module.exports = { collectAdminSteps, scheduleOps, executeOps, listOps, cancelOp, actors, saltOf, batchOf, recordOp, ensureGas, executeGas, feePerGas }

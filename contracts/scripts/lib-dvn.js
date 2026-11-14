@@ -305,4 +305,10 @@ module.exports = {
   remotesOf,
   ENDPOINT_CFG_ABI,
   ULN_ABI,
+  encodeUln,
+  storedUln,
+  ulnEq,
+  CONFIG_TYPE_EXECUTOR,
+  CONFIG_TYPE_ULN,
+  EXEC_TUPLE,
 }

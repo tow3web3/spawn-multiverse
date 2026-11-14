@@ -1127,7 +1127,38 @@ async function selfCheck({ profile, netKey, stateFile, provider, providers, role
     // SYNC would gift the unit to that spoke's tank out of the hub's).
     const units = await hubUnits({ profile, all, providers: { ...providers, [netKey]: provider } })
     for (const u of units.rows) {
-      rows.push({ what: `hub adapter.returnUnit(${u.label} = ${u.net}) is 0 (an EVM label)`, actual: String(u.unit), expected: '0', ok: u.ok, soft: false })
+      rows.push(
+        u.evm
+          ? { what: `hub adapter.returnUnit(${u.label} = ${u.net}) is 0 (an EVM label)`, actual: String(u.unit), expected: '0', ok: u.ok, soft: false }
+          : { what: `hub adapter.returnUnit(1 = solana) in LAMPORTS, within ${u.expected}`, actual: String(u.unit), expected: u.expected, ok: u.ok, soft: false },
+      )
+    }
+    // SOLANA (label 1), once recorded: a WIDE gateway there and only there,
+    // its route, compute units within Solana's ceiling, no EVM per-op gas
+    if (profile.solana && all.solana?.store) {
+      const { SOLANA_BOUNDS } = require('../config/profiles')
+      const sol = profile.solana
+      const gw1 = await pad.gateways(1)
+      if (gw1 !== ethers.ZeroHash) {
+        row('pad.gateways(1 = solana) is the recorded store', gw1, all.solana.store)
+        rows.push({ what: 'pad.gateways(1) is WIDE (a Solana key, not an address)', actual: BigInt(gw1) >> 160n !== 0n ? 'wide' : 'ADDRESS-SHAPED', expected: 'wide', ok: BigInt(gw1) >> 160n !== 0n, soft: false })
+        row('pad.autoDrop(1 = solana)', await pad.autoDrop(1), false)
+      }
+      if ((await adapter.eidOf(1)) !== 0n) {
+        row('adapter.eidOf(1 = solana)', await adapter.eidOf(1), sol.eid)
+        row('adapter.peers(solana eid)', await adapter.peers(sol.eid), all.solana.peer)
+      }
+      const g1 = BigInt(await adapter.gasLimit(1))
+      rows.push({ what: `adapter.gasLimit(1) in COMPUTE UNITS, ${SOLANA_BOUNDS.minGas}–${SOLANA_BOUNDS.maxGas}`, actual: String(g1), expected: String(sol.gas), ok: g1 === 0n ? gw1 === ethers.ZeroHash : g1 >= SOLANA_BOUNDS.minGas && g1 <= SOLANA_BOUNDS.maxGas, soft: false })
+      for (const op of [1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13]) {
+        const g = BigInt(await adapter.gasForOp(1, op))
+        if (g !== 0n) rows.push({ what: `adapter.gasForOp(1, op ${op}) is 0 — label 1 never gets the EVM per-op gas`, actual: String(g), expected: '0', ok: false, soft: false })
+      }
+    }
+    // an EVM gateway is never wide (only label 1 may be)
+    for (const [net, c] of Object.entries(nets)) {
+      const g = await pad.gateways(c.label)
+      if (g !== ethers.ZeroHash && BigInt(g) >> 160n !== 0n) rows.push({ what: `pad.gateways(${c.label} = ${net}) is address-shaped (an EVM gateway)`, actual: g, expected: 'an address', ok: false, soft: false })
     }
     for (const [net, c] of spokes) {
       const sp = all[net]

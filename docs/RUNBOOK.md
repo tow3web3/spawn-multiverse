@@ -165,6 +165,12 @@ the endpoint's `lzReceive`, the adapters, the executor's gas limit and the
 native value it delivers — is the real path; a message that needs more gas
 than its sender bought fails there as it would on the chain.
 
+After finish.sh it also runs **`bash scripts/add-solana.sh mainnet … --send`**
+with placeholder Solana ids (§10b): the batch is scheduled on Base's timelock,
+48h pass on every fork, the same line executes it and re-prices every chain
+(`FORK_SOLANA=0` skips it). Nothing toward Solana is delivered (the program
+does not exist; the relay drops those packets).
+
 The rehearsal uses the profile's Ethereum launch ceiling (0.002 ETH): at the
 forks' L1 price every launch reaches Ethereum.
 `SPAWN_SYNC_CAP_ETHEREUM=0.0000001 node scripts/fork-rehearsal.js` forces
@@ -355,10 +361,90 @@ and the pad's request ceilings follow; the wiring read back; the verifier
 sets cross-checked; the canary cap; the canary (it reuses the canary token —
 opening it on the newcomer, where it never existed); the newcomer's
 hand-over; its own launch cap; status. Solana (label 1) is not an EVM chain
-and joins through `solana/`.
+and joins through `scripts/add-solana.sh` (§10b) and `solana/`.
 
 `npm run rehearse:add-chain` rehearses it on forks from the LIVE state file
 (it needs a deployed `deployments/mainnet.json`).
+
+## 10b. Adding Solana — the sixth chain, label 1 (the hub side)
+
+Solana is not an EVM chain: its gateway is a program (`solana/`, wired on
+its own side by `solana/scripts/wire.ts`), its ids are 32-byte keys, the
+gas the hub buys toward it is COMPUTE UNITS and the native value the hub
+attaches is LAMPORTS. It is therefore not one of the profile's `nets`; it is
+`profile.solana` (eid 30168 on mainnet, 40168 on devnet) and its state entry
+`solana` in the state file. The hub side is one command, dry by default:
+
+```bash
+# testnet hub (Base Sepolia) ↔ Solana devnet — DIRECT: the deployer is still the hub's admin
+bash scripts/add-solana.sh testnet --store <store key> --peer <peer key> [--prepays <file.json>]          # the plan
+bash scripts/add-solana.sh testnet --store <store key> --peer <peer key> [--prepays <file.json>] --send   # send it
+
+# mainnet — after finish.sh: through Base's 48h timelock (before finish.sh it goes direct)
+bash scripts/add-solana.sh mainnet --store <key> --peer <key> --vault <vault key> [--prepays <file.json>] --send
+#   …schedules ONE batch and stops (exit 3); after 48h, the SAME line executes it and goes on
+```
+
+Inputs: the store (the pad's gateway 1) and the peer (what the hub adapter
+believes for the Solana eid — the store, per `solana/V7.md` §7), as 0x-hex or
+base58; on mainnet the gateway's USDC vault (a CCTP peer of Base's vault,
+FOREVER — the other USDC chains name it in their own timelocked call); and
+what the Solana side prepays (`--prepays`: `returnUnit` in hub wei,
+`tradeLegs`, `openLegs`, `spawnLegs`, `moveLegs {label: legs}`). Without
+`--prepays` the tooling reads them through the gateway's own client
+(`solana/app`, which needs `npm ci` in `solana/`), and says so loudly when it
+cannot: the request rule is then "unverified" for Solana.
+
+What it sends on Base, in this order (`scripts/lib-solana.js`):
+
+| Who | Call | Why |
+|---|---|---|
+| operator | `adapter.setDestination(1, 400000, 3000000)` | 400,000 COMPUTE UNITS (every message measured ≤ 170k); 3,000,000 LAMPORTS attached to every SYNC and moved PAYOUT toward Solana — the rent of what they create there (a replica: 2,738,120). Refused: a unit that looks like wei (≥ 1e12), over LayerZero's 240,000,000 cap or under a user account's rent; gas over Solana's 1,400,000 |
+| operator | `pad.setSyncCap(1, …)` | only if the profile asks (`SOLANA_SYNC_CAP`); none by default — every launch reaches Solana |
+| delegate | `endpoint.setConfig(send lib, 30168, executor max 10,000 bytes)` | LayerZero's default executor toward Solana MAINNET admits **200 bytes** (read live: `0x2CCA…baE4`, maxMessageSize 200); every hub message is 288–512. Toward devnet the default is already 10,000 (read live): nothing is sent there |
+| delegate | mainnet: both libraries pinned; send ULN (10 confirmations) and receive ULN (32) naming our set | the same verifier set as every pathway: LayerZero Labs + Google required, 1 of Horizen / Twinstake — the four Base addresses, each of which quotes eid 30168 (read live). The Solana end (`wire.ts`) names the same four on Solana, registry-confirmed |
+| admin | `vault.setPeer(1, 5, vault)` | mainnet, if `--vault`: Solana's vault as a CCTP peer (domain 5), forever |
+| admin | `adapter.setRoute(1, eid, peer)` | |
+| admin | `pad.setGateway(1, store)` | LAST — permanent: from here every launch reaches Solana |
+
+Label 1 NEVER gets the EVM per-op gas (`opGas.toSpoke`); the self-check fails
+hard if any `gasForOp(1, op)` is set. Once the gateway is set, the wrapper
+re-prices every chain (tune-fees on each EVM chain, then Base, twice): moves
+toward Solana priced on every gateway, Solana's SYNC — with its lamports —
+counted in every `spawnLegs`, `requestCap(1, 10)` = what an open from Solana
+prepays and `requestCap(1, 12)` = the smallest move toward it, the
+hub-bound gas for one more remote chain. It prints what the SOLANA side must
+prepay, from the hub's live quotes (the figures for `wire.ts`:
+`return_unit`, `open_legs`, `spawn_legs`, `move_legs`).
+
+The self-check and `status` then hold: `returnUnit` on the hub adapter is 0
+on every EVM label and within 1,894,840–240,000,000 lamports on label 1 only;
+a wide gateway on label 1 only; and the backing check includes Solana's
+vault and the claims booked there — read through the client. When it cannot
+read them, status says the books are OPEN and by exactly how much: for the
+equality to hold Solana's vault must hold `supply − held` (everything else)
+more than its claims; a wired Solana that cannot be read fails status
+(`SPAWN_STATUS_ALLOW_UNREAD_SOLANA=1` downgrades it to a warning).
+
+Rehearsed on forks with placeholder Solana ids (`node scripts/fork-run.js
+baseSepolia test-fork/solana.fork.test.js`, and `… base …` for the mainnet
+shape through the timelock; the five-chain rehearsal also runs
+`add-solana.sh mainnet --send` after finish.sh, §3): a launch's fan-out sends a
+SYNC toward the Solana eid whose executor option carries 400,000 of gas and
+3,000,000 of value, the envelope naming the store and the same value; a
+`moveClaim` toward label 1 is forwarded for a 32-byte key and comes home for
+a padded EVM address; both request ceilings stay within what a request
+prepays, built on the endpoint's real quotes toward that eid (Base mainnet,
+our set: a SYNC toward Solana 0.000572 ETH, of which 0.000285 is LayerZero's
+price for delivering the 3,000,000 lamports; Base Sepolia, defaults:
+0.000277).
+
+**Only the devnet run will show:** a packet delivered ON Solana by
+LayerZero's off-chain executor (account resolution, a 1,232-byte
+transaction, 400k CU), the lamports arriving and paying a replica's rent,
+the DVNs of the pathway signing in both directions, Solana's own prices and
+its client read by `status`, and a move into a wallet that never touched the
+gateway.
 
 ## 11. Measured on forks of the five chains (2026-11-14, v7.2 second round, 9f3e13d)
 
@@ -417,6 +503,19 @@ refused proof order, buy, sell, pull, at the fork's gas price) cost about
 less than its envelope's budget was REFUSED by the hub adapter, and landed
 when delivered with its budget. Every one of the 37 messages of the
 rehearsal executed with exactly the gas and value its sender paid for.
+
+**What a launch costs once Solana is in** (the five-chain rehearsal, after
+`add-solana.sh mainnet --send` and the re-pricing; a typical launch's
+messaging fee, before → after; the extra is Solana's SYNC with its lamports,
+0.00057 ETH + 25%):
+
+| From | Before | With Solana | Spawn legs |
+|---|---|---|---|
+| Base | 0.00161 ETH | **0.00232 ETH** | 4 → 5 |
+| Optimism | 0.00224 ETH | **0.00300 ETH** | 11 → 15 |
+| Arbitrum | 0.00217 ETH | **0.00307 ETH** | 9 → 13 |
+| Ethereum | 0.00512 ETH | **0.00632 ETH** | 4 → 5 |
+| BNB Chain | 0.00684 BNB | **0.00937 BNB** | 10 → 14 |
 
 **Deploy and hand-over:** launch.sh ≈ 4 min and finish.sh ≈ 0.7 min on the
 forks.

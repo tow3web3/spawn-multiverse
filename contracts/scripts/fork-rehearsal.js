@@ -188,6 +188,10 @@ async function main() {
       console.log(`\n━━━ measurements — ${mins()} ━━━`)
       report.measure = await measure({ profile, url, relay, abi })
     }
+    if (process.env.FORK_SOLANA !== '0') {
+      console.log(`\n━━━ Solana joins: bash scripts/add-solana.sh mainnet … --send, through the 48h timelock — ${mins()} ━━━`)
+      report.solana = await solanaPhase({ profile, url, env })
+    }
     report.totalMin = mins()
     report.relayErrors = relay.errors
     fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, (k, v) => (typeof v === 'bigint' ? v.toString() : v), 2))
@@ -563,6 +567,60 @@ async function leastGas({ relay, url, item, endpoint }) {
     else lo = mid
   }
   return hi
+}
+
+/**
+ * SOLANA JOINS THE HANDED-OVER UNIVERSE, the way the owner will do it after
+ * finish.sh: `bash scripts/add-solana.sh mainnet --store … --peer … --vault …
+ * --prepays … --send` — the operator steps sent and ONE batch scheduled on
+ * Base's timelock (exit 3: waiting), 48h of time travel on every fork, the
+ * same command again (it executes the batch, then re-prices every chain and
+ * runs status). With placeholder Solana ids: the program does not exist, so
+ * nothing toward Solana is delivered (the relay drops it). Then: what a
+ * launch costs from each chain with Solana in it.
+ */
+async function solanaPhase({ profile, url, env }) {
+  const STORE = ethers.id('spawn/rehearsal/solana/store')
+  const VAULT = ethers.id('spawn/rehearsal/solana/vault')
+  const prepaysFile = path.join(dir, 'solana-prepays.json')
+  // V7.md §6 step 8: what the Solana side would prepay (an input: the program is not deployed)
+  fs.writeFileSync(prepaysFile, JSON.stringify({ returnUnit: '350000000000000', tradeLegs: 1, openLegs: 2, spawnLegs: 12, moveLegs: { 2: 40, 3: 2, 4: 2, 5: 2, 6: 2 } }))
+  const GW = new ethers.Interface(abi('SpawnGateway'))
+  const state = () => JSON.parse(fs.readFileSync(process.env.SPAWN_STATE_FILE, 'utf8'))
+  const callR = async (net, iface, to, fn, args = []) =>
+    iface.decodeFunctionResult(fn, await rpc(url[net], 'eth_call', [{ to, data: iface.encodeFunctionData(fn, args) }, 'latest']))
+  const costs = async () => {
+    const out = {}
+    for (const n of NETS) {
+      const [q] = await callR(n, GW, state()[n].gateway, 'quoteSpawn', ['CANARY TWO', 'CNRY', '{"image":"ipfs://x"}', false])
+      const [legs] = await callR(n, GW, state()[n].gateway, 'spawnLegs')
+      out[n] = { fee: q, legs }
+    }
+    return out
+  }
+  const before = await costs()
+  const args = ['scripts/add-solana.sh', 'mainnet', '--store', STORE, '--peer', STORE, '--vault', VAULT, '--prepays', prepaysFile, '--send']
+  const senv = { ...env, SPAWN_SOLANA_READ: '0', SPAWN_STATUS_ALLOW_UNREAD_SOLANA: '1' }
+  const first = await runAsync('add-solana.sh mainnet --send (schedules the batch)', 'bash', args, senv)
+  if (first !== 3) throw new Error(`add-solana.sh should have scheduled the batch and stopped (exit 3), it exited ${first}`)
+  for (const n of NETS) {
+    await rpc(url[n], 'evm_increaseTime', [48 * 3600 + 120])
+    await rpc(url[n], 'evm_mine')
+  }
+  const second = await runAsync('add-solana.sh mainnet --send (after the delay: executes, re-prices every chain)', 'bash', args, senv)
+  if (second !== 0) throw new Error(`add-solana.sh failed after the delay (exit ${second})`)
+  const after = await costs()
+  const out = {}
+  console.log('  what a launch costs from each chain (messaging fee, a typical launch), before → with Solana:')
+  for (const n of NETS) {
+    const coin = profile.nets[n].native ?? 'ETH'
+    out[n] = { before: before[n].fee, after: after[n].fee, legsBefore: before[n].legs, legsAfter: after[n].legs, coin }
+    console.log(`    ${n.padEnd(9)} ${ethers.formatEther(before[n].fee)} → ${ethers.formatEther(after[n].fee)} ${coin}  (spawn legs ${before[n].legs} → ${after[n].legs})`)
+  }
+  const pad = new ethers.Interface(abi('SpawnPad'))
+  const [gw1] = await callR('base', pad, state().base.pad, 'gateways', [1])
+  if (gw1 !== STORE) throw new Error('the pad does not name the store as gateway 1')
+  return out
 }
 
 async function waitHeld(relay, count, ms = 120_000) {

@@ -1251,3 +1251,35 @@ describe('the mainnet profile: one universe, five EVM chains', function () {
     expect(P.hubGasFor(m, 4, 4)).to.be.gte((4_515_748n * 120n) / 100n)
   })
 })
+
+/** Solana (label 1), the hub side: what the tooling refuses before it sends
+ * anything (the wiring itself runs on forks: test-fork/solana.fork.test.js). */
+describe('Solana (label 1): ids, compute units, lamports — refused before anything is sent', function () {
+  const lib = require('../scripts/lib-solana')
+  const P = require('../config/profiles')
+
+  it('a Solana id is 32 bytes and WIDE; base58 and hex agree', () => {
+    const store = 'GF11J7y5MhHFVDKJhcMFBYwVD2QirCDF2bJi9U2dUzKB'
+    const hex = '0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa'
+    expect(lib.toKey32(store)).to.equal(hex)
+    expect(lib.checkIds({ store, peer: hex }).peer).to.equal(hex)
+    expect(() => lib.checkIds({ store: ethers.zeroPadValue('0x' + '11'.repeat(20), 32), peer: hex })).to.throw(/address-shaped/)
+    expect(() => lib.checkIds({ store: '0xabcd', peer: hex })).to.throw(/32 bytes/)
+  })
+
+  it('the unit is LAMPORTS and the gas COMPUTE UNITS: a figure in wei, over the caps or under a rent is refused', () => {
+    expect(lib.checkSolanaParams({ gas: 400_000n, unit: 3_000_000n })).to.deep.equal({ gas: 400_000n, unit: 3_000_000n })
+    expect(() => lib.checkSolanaParams({ gas: 400_000n, unit: ethers.parseEther('0.003') })).to.throw(/looks like WEI/)
+    expect(() => lib.checkSolanaParams({ gas: 400_000n, unit: 240_000_001n })).to.throw(/LayerZero's cap/)
+    expect(() => lib.checkSolanaParams({ gas: 400_000n, unit: 1_000n })).to.throw(/rent/)
+    expect(() => lib.checkSolanaParams({ gas: 5_256_000n, unit: 3_000_000n })).to.throw(/COMPUTE UNITS/)
+    for (const name of ['testnet', 'mainnet']) {
+      const s = P.PROFILES[name].solana
+      expect(s.label, name).to.equal(1)
+      expect(lib.checkSolanaParams(s), name).to.deep.equal({ gas: 400_000n, unit: 3_000_000n })
+      expect(s.eid, name).to.equal(name === 'mainnet' ? 30168 : 40168)
+      // label 1 is never one of the EVM nets: no loop over nets ever touches it
+      expect(Object.values(P.PROFILES[name].nets).map((c) => c.label), name).to.not.include(1)
+    }
+  })
+})

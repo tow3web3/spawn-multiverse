@@ -70,10 +70,12 @@ function providerFor(profile, net, providers) {
 }
 
 /** Every deployed chain's legs and reply unit, read from its own chain. */
-async function readLegs({ profile, all, providers, only }) {
+async function readLegs({ profile, all, providers, only, solana }) {
   const nets = activeNets(profile)
   const deployed = Object.keys(nets).filter((n) => all[n]?.gateway && all[n]?.adapter && (!only || only.includes(n)))
-  const labels = deployed.map((n) => nets[n].label)
+  // Solana (label 1) is not an EVM net: its prices live in the program
+  const sol = profile.solana && all.solana?.store ? all.solana : null
+  const labels = [...deployed.map((n) => nets[n].label), ...(sol ? [1] : [])]
   const out = {}
   for (const net of deployed) {
     const P = providerFor(profile, net, providers)
@@ -90,8 +92,17 @@ async function readLegs({ profile, all, providers, only }) {
       moveLegs,
     }
   }
+  if (sol) {
+    // what the SOLANA side prepays: through its client, else the recorded
+    // input, else UNKNOWN — said loudly wherever it matters
+    const legs = solana !== undefined ? solana : require('./lib-solana').solanaLegs(profile, all)
+    out.solana = legs ?? { label: 1, kind: 'solana', unknown: true, unit: 0n, tradeLegs: 0, openLegs: 0, spawnLegs: 0, moveLegs: {} }
+  }
   return out
 }
+
+/** The 32-byte id a gateway rides as: an EVM gateway left-padded, Solana's store as it is. */
+const gatewayId = (all, net) => (net === 'solana' ? all.solana.store : b32(all[net].gateway))
 
 /** What one move from `src` toward `dstLabel` prepays (0 = route closed). */
 function movePrepay(legs, dstLabel) {
@@ -112,9 +123,17 @@ async function hubUnits({ profile, all, providers }) {
   const adapter = new ethers.Contract(hub.adapter, ADAPTER_ABI, providerFor(profile, profile.hub, providers))
   const rows = []
   for (const [net, c] of Object.entries(activeNets(profile))) {
-    if (c.kind && c.kind !== 'evm') continue // a chain that charges for accounts may have one
     const unit = BigInt(await adapter.returnUnit(c.label))
-    rows.push({ net, label: c.label, unit, ok: unit === 0n })
+    rows.push({ net, label: c.label, unit, ok: unit === 0n, evm: true })
+  }
+  // label 1, Solana: the ONE label that may carry a unit — lamports, within
+  // what a message creates there and LayerZero's cap; anything else is wrong
+  if (profile.solana) {
+    const { SOLANA_BOUNDS } = require('../config/profiles')
+    const unit = BigInt(await adapter.returnUnit(1))
+    const wired = all.solana?.store ? true : false
+    const inRange = unit >= SOLANA_BOUNDS.minUnit && unit <= SOLANA_BOUNDS.maxUnit
+    rows.push({ net: 'solana', label: 1, unit, evm: false, ok: wired ? inRange : unit === 0n || inRange, expected: `${SOLANA_BOUNDS.minUnit}–${SOLANA_BOUNDS.maxUnit} lamports` })
   }
   return { rows, ok: rows.every((r) => r.ok) }
 }
@@ -135,7 +154,7 @@ async function requestSolvency(opts) {
   const hubAdapter = hub?.adapter ? new ethers.Contract(hub.adapter, ADAPTER_ABI, HP) : null
   const rows = []
   for (const [dst, d] of Object.entries(legs)) {
-    if (dst === profile.hub || nets[dst].role !== 'spoke') continue
+    if (dst === profile.hub || (dst !== 'solana' && nets[dst].role !== 'spoke')) continue
     const label = d.label
     const open = BigInt(d.openLegs) * d.unit
     const moves = []
@@ -150,18 +169,22 @@ async function requestSolvency(opts) {
     const syncCap = pad ? BigInt(await pad.syncCap(label)) : 0n
     let qSync
     let qPayout
-    const routed = hubAdapter && all[dst]?.gateway && (await hubAdapter.eidOf(label)) !== 0n
+    const routed = hubAdapter && (dst === 'solana' || all[dst]?.gateway) && (await hubAdapter.eidOf(label)) !== 0n
     if (opts.quotes !== false && routed) {
       try {
-        qSync = BigInt(await hubAdapter.quote(label, b32(all[dst].gateway), WORST_SYNC, SKIPPABLE_LEGS))
-        qPayout = BigInt(await hubAdapter.quote(label, b32(all[dst].gateway), SAMPLE_PAYOUT, SKIPPABLE_LEGS))
+        qSync = BigInt(await hubAdapter.quote(label, gatewayId(all, dst), WORST_SYNC, SKIPPABLE_LEGS))
+        qPayout = BigInt(await hubAdapter.quote(label, gatewayId(all, dst), SAMPLE_PAYOUT, SKIPPABLE_LEGS))
       } catch {
         /* a leg that cannot be quoted: reported below */
       }
     }
+    // prices we could not read (Solana's, when its client does not answer
+    // and no input was recorded): the rule cannot be verified for them
+    const unverified = [...(d.unknown ? [`${dst} (opens from it)`] : []), ...Object.entries(legs).filter(([src, s]) => src !== dst && s.unknown).map(([src]) => `${src} (moves from it)`)]
     rows.push({
       net: dst,
       label,
+      unverified,
       open,
       openLegs: d.openLegs,
       moves,
@@ -176,7 +199,7 @@ async function requestSolvency(opts) {
       payoutOk: minMove === undefined ? true : capPayout <= minMove,
       // a remote gateway that prepays no SYNC for an open: anyone could make
       // the tank pay one
-      openOk: d.openLegs >= 1,
+      openOk: d.unknown ? true : d.openLegs >= 1,
       // what is prepaid covers the live price (a ceiling under it closes the
       // chain to that kind of request in effect: refused, not unsafe)
       openCovered: qSync === undefined ? undefined : open >= qSync,
@@ -190,6 +213,6 @@ async function requestSolvency(opts) {
 }
 
 module.exports = {
-  readLegs, requestSolvency, hubUnits, movePrepay, providerFor,
+  readLegs, requestSolvency, hubUnits, movePrepay, providerFor, gatewayId,
   WORST_SYNC, SAMPLE_PAYOUT, SKIPPABLE_LEGS, OP_SYNC, OP_PAYOUT, GW_ABI, ADAPTER_ABI, PAD_ABI,
 }

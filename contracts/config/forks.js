@@ -21,6 +21,8 @@ module.exports = {
     chainId: 1,
     port: 8549,
   },
+  // the TESTNET hub, for the Solana rehearsal (scripts/add-solana.sh testnet)
+  baseSepolia: { url: 'https://sepolia.base.org', chainId: 84532, port: 8551 },
   bnb: {
     url: 'https://bsc-mainnet.public.blastapi.io',
     alt: ['https://bsc-rpc.publicnode.com', 'https://bsc-dataseed.bnbchain.org'],

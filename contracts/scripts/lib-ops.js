@@ -114,10 +114,13 @@ async function tuneFees(opts) {
 
   // ── live quotes from the hub, for every remote chain it routes to ──
   const remote = []
-  for (const [net, c] of Object.entries(nets)) {
-    if (c.role !== 'spoke' || !all[net]?.ready) continue
+  // the remote chains the hub routes to: every EVM spoke, and Solana (label
+  // 1) once its route exists — its id is the store's 32-byte key, and every
+  // quote toward it carries the hub adapter's unit for it, in lamports
+  const targets = Object.entries(nets).filter(([net, c]) => c.role === 'spoke' && all[net]?.ready).map(([net, c]) => [net, c, b32(all[net].gateway)])
+  if (profile.solana && all.solana?.store) targets.push(['solana', profile.solana, all.solana.store])
+  for (const [net, c, gw] of targets) {
     if ((await hubAdapter.eidOf(c.label)) === 0n) continue
-    const gw = b32(all[net].gateway)
     const r = {
       net,
       label: c.label,
@@ -212,12 +215,16 @@ async function tuneFees(opts) {
 
   // ── what a move from here toward each other chain prepays ──
   const moves = []
-  for (const [net, c] of Object.entries(nets)) {
-    if (net === netKey || !all[net]?.gateway) continue
+  const moveTargets = Object.entries(nets).filter(([net]) => net !== netKey && all[net]?.gateway)
+  if (profile.solana && all.solana?.store) moveTargets.push(['solana', profile.solana])
+  for (const [net, c] of moveTargets) {
     const current = Number(await gateway.moveLegs(c.label))
     const r = remote.find((x) => x.net === net)
     let legs
-    if (!r) {
+    if (!r && net === 'solana') {
+      // Solana not routed yet: its moves stay as they are (closed)
+      legs = current
+    } else if (!r) {
       // the hub chain's own gateway (a local call forwards it), or a chain the
       // hub does not route to yet: a move prepays the way home
       legs = Math.max(1, tradeLegs)
@@ -280,7 +287,8 @@ async function tuneFees(opts) {
 
   // ── the seam: per-op executor gas ──
   if (opGasSupported(adapter)) {
-    const plans = isHub ? remote.flatMap((r) => opGasPlan(profile, netKey, r.net)) : opGasPlan(profile, netKey, profile.hub, gasTarget)
+    // label 1 NEVER gets the EVM per-op table: its compute units are setDestination's
+    const plans = isHub ? remote.filter((r) => r.net !== 'solana').flatMap((r) => opGasPlan(profile, netKey, r.net)) : opGasPlan(profile, netKey, profile.hub, gasTarget)
     for (const p of plans) {
       if (BigInt(await adapter[OP_GAS_GETTER](p.label, p.op)) !== p.gas) {
         calls.push({ what: `adapter.${OP_GAS_SETTER}(${p.label}, op ${p.op}, ${p.gas})`, on: adapter, fn: OP_GAS_SETTER, args: [p.label, p.op, p.gas] })
@@ -293,7 +301,7 @@ async function tuneFees(opts) {
   // ── the hub: the profile's launch ceilings ──
   if (isHub) {
     for (const r of remote) {
-      const want = BigInt(nets[r.net].syncCap ?? 0n)
+      const want = BigInt((r.net === 'solana' ? profile.solana.syncCap : nets[r.net].syncCap) ?? 0n)
       if (want !== r.syncCap) calls.push({ what: `pad.setSyncCap(${r.label} = ${r.net}, ${fmt(want)})`, on: pad, fn: 'setSyncCap', args: [r.label, want] })
     }
   }
@@ -351,8 +359,9 @@ async function tuneFees(opts) {
     for (const r of solv.rows) {
       const q = remote.find((x) => x.net === r.net)
       if (!q) continue // not routed yet: nothing can reach it
+      if (r.unverified?.length) log(`  ⚠ ${r.net}: Solana's prices could not be read (${r.unverified.join(', ')}) — its ceilings are set from what IS known; read them (SPAWN_SOLANA_READ, the client) or record them (add-solana.sh --prepays)`)
       for (const [op, kind, current, want, live] of [
-        [OP_SYNC, 'SYNC (an open from it)', q.capSync, r.open, q.sync],
+        [OP_SYNC, 'SYNC (an open from it)', q.capSync, r.unverified?.some((u) => u.startsWith(`${r.net} (opens`)) ? undefined : r.open, q.sync],
         [OP_PAYOUT, 'PAYOUT (a move toward it)', q.capPayout, r.minMove, q.payout],
       ]) {
         if (want === undefined) continue // no route toward it: nothing to bound
@@ -527,6 +536,32 @@ async function status(opts) {
       )
     }
   }
+  // ── SOLANA (label 1): its vault and the claims booked there belong in the
+  // same global equality; read through the gateway's client (solana/app) ──
+  let solana
+  if (profile.solana && all.solana?.store) {
+    const { readSolana } = require('./lib-solana')
+    const wired = (await pad.gateways(1)) !== ethers.ZeroHash
+    const r = readSolana(profile, opts.solanaRead ?? {})
+    if (r.ok && same(r.store, all.solana.store)) {
+      const vault18 = BigInt(r.vaultUsdc) * 10n ** 12n
+      const owed18 = (BigInt(r.claimsTotal) + BigInt(r.poolTotal)) * 10n ** 12n + BigInt(r.usdDustE18)
+      held += vault18
+      supply += owed18
+      const b = (byDollar.USDC ??= { held18: 0n, claims: 0n, chains: [] })
+      b.held18 += vault18
+      b.claims += owed18
+      b.chains.push('solana')
+      solana = { read: true, wired, vault18, owed18, reader: r }
+      log(
+        `  ${'solana'.padEnd(16)} ${ethers.formatUnits(BigInt(r.vaultUsdc), 6).padStart(14)} USDC | owed there ${ethers.formatEther(owed18).padStart(12)} ` +
+          `(claims ${ethers.formatUnits(BigInt(r.claimsTotal), 6)}, fee pool ${ethers.formatUnits(BigInt(r.poolTotal), 6)}, dust ${ethers.formatEther(BigInt(r.usdDustE18))}) | read through the gateway's client${r.paused ? ' | STORE PAUSED' : ''}`,
+      )
+      if (owed18 > vault18) warn('solana: vault is locally short — claims there wait for USDC (redeem_claim) or move (move_claim)')
+    } else {
+      solana = { read: false, wired, error: r.ok ? `the client read store ${r.store}, not the recorded ${all.solana.store}` : r.error }
+    }
+  }
   log(`  hub ledger (books of the curve and fee pots): ${ethers.formatEther(ledger)} oUSD`)
   log('\nBY DOLLAR (18-decimal dollars: USDC × 1e12, USDT × 1)')
   for (const [sym, b] of Object.entries(byDollar)) {
@@ -534,6 +569,17 @@ async function status(opts) {
   }
   const inflight = BigInt(opts.inflightUsdc ?? 0) * 10n ** 18n
   const backed = held + inflight >= supply
+  if (solana && !solana.read) {
+    // the books are OPEN by exactly Solana's net position: for the global
+    // equality to hold, Solana must hold (vault − what is owed there) =
+    // supply − held of everything else
+    solana.mustHold = supply - held - inflight
+    warn(
+      `✗ SOLANA NOT READ (${solana.error}) — the backing check is OPEN by Solana's net position: for the books to balance, ` +
+        `Solana's vault must hold ${ethers.formatEther(solana.mustHold)} dollars MORE than the claims booked there` +
+        `${solana.mustHold < 0n ? ' (negative: the other chains hold a surplus of that much)' : ''}. Unverified.`,
+    )
+  }
   log(
     `\nBACKING  Σ vault dollars ${ethers.formatEther(held)}  vs  Σ oUSD supply ${ethers.formatEther(supply)} (hub ledger included)  →  ` +
       (backed
@@ -588,6 +634,7 @@ async function status(opts) {
         `  ${''.padEnd(16)} PAYOUT (moves): cap ${fmt(r.capPayout)} ≤ smallest move prepay ${r.minMove === undefined ? '— (no route)' : fmt(r.minMove)} ${r.payoutOk ? '✓' : '✗'} | live ${p(r.qPayout)}` +
           `${r.movesCovered === false ? ' (a move prepay is UNDER it)' : ''}`,
       )
+      if (r.unverified?.length) warn(`${r.net}: the request rule cannot be verified for ${r.unverified.join(', ')} — Solana's prices were not read`)
       if (!r.syncOk) warn(`✗ ${r.net}: requestCap(SYNC) ${fmt(r.capSync)} exceeds what an open from it prepays (${fmt(r.open)}) — the tank pays the difference. Run tune-fees on ${profile.hub}.`)
       if (!r.payoutOk) warn(`✗ ${r.net}: requestCap(PAYOUT) ${fmt(r.capPayout)} exceeds what a move toward it prepays (${fmt(r.minMove)}) — the tank pays the difference. Run tune-fees on ${profile.hub}.`)
       if (!r.openOk) warn(`✗ ${r.net}: openLegs = 0 on a REMOTE gateway — the hub tank pays every open there. Run tune-fees on ${r.net}.`)
@@ -607,10 +654,17 @@ async function status(opts) {
     for (const u of units.rows) {
       if (!u.ok) {
         unitsOk = false
-        warn(`✗ the hub adapter attaches ${fmt(u.unit)} to every skippable message toward ${u.net} (returnUnit(${u.label})) — must be 0 on an EVM label`)
+        warn(
+          u.evm
+            ? `✗ the hub adapter attaches ${fmt(u.unit)} to every skippable message toward ${u.net} (returnUnit(${u.label})) — must be 0 on an EVM label`
+            : `✗ the hub adapter's unit toward Solana is ${u.unit} lamports — must be ${u.expected} (LAMPORTS: a figure in wei is refused)`,
+        )
       }
     }
-    if (units.ok) log(`  hub adapter: returnUnit 0 on every EVM label (${units.rows.map((u) => u.label).join(', ')}) ✓`)
+    if (units.ok) {
+      const sol = units.rows.find((u) => !u.evm)
+      log(`  hub adapter: returnUnit 0 on every EVM label (${units.rows.filter((u) => u.evm).map((u) => u.label).join(', ')}) ✓${sol ? `; label 1 (Solana) ${sol.unit} lamports ✓` : ''}`)
+    }
   } catch (e) {
     warn(`hub return units could not be read (${e.shortMessage ?? e.message})`)
   }
@@ -704,13 +758,17 @@ async function status(opts) {
     if (!dvn.ok) warn('a pathway is not on the configured verifier set')
   }
 
-  const ok = backed && requestsOk && peersOk
+  // a WIRED Solana that cannot be read leaves the books open: not "ok"
+  // (SPAWN_STATUS_ALLOW_UNREAD_SOLANA=1 downgrades it to the warning above)
+  const solanaOk = !solana || solana.read || !solana.wired || process.env.SPAWN_STATUS_ALLOW_UNREAD_SOLANA === '1'
+  const ok = (solana && !solana.read && solana.wired ? true : backed) && requestsOk && peersOk && solanaOk
   log(
     `\n${ok ? '✓' : '✗'} backing ${backed ? 'holds' : 'FAILS'}` +
-      `${requestsOk ? '' : ' — a REQUEST CEILING is above what requests prepay, or a return unit sits on an EVM label'}${peersOk ? '' : ' — THE USDT VAULT IS A CCTP PEER'}` +
+      `${requestsOk ? '' : ' — a REQUEST CEILING is above what requests prepay, or a return unit is wrong'}${peersOk ? '' : ' — THE USDT VAULT IS A CCTP PEER'}` +
+      `${solanaOk ? '' : ' — SOLANA COULD NOT BE READ: the books are open'}` +
       ` — ${warnings.length} warning(s)`,
   )
-  return { ok, backed, deployed: true, held, supply, ledger, byDollar, vaults, bnb, requests, peersOk, warnings, dvn, waiting, missing }
+  return { ok, backed, deployed: true, held, supply, ledger, byDollar, vaults, bnb, requests, peersOk, solana, warnings, dvn, waiting, missing }
 }
 
 /* ------------------------- missing replicas, resync ------------------------- */

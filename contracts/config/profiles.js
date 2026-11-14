@@ -78,6 +78,53 @@ const OP_GAS = {
   toSpoke: { 10: 1_000_000, 11: 250_000, 12: 200_000, 13: 250_000 },
 }
 
+/**
+ * SOLANA — the sixth chain, label 1: NOT an EVM chain, so it is deliberately
+ * not in `nets` (every loop over `nets` deploys, configures and reads EVM
+ * contracts). It joins a live hub through scripts/add-solana.sh (the
+ * gateway program and its wiring are solana/; solana/V7.md §7, §9).
+ *
+ *   gas   COMPUTE UNITS, not EVM gas: what the hub adapter buys for every
+ *         message toward Solana (`setDestination(1, gas, unit)`); every
+ *         kind fits in 400,000 (measured ≤ 170k). Bounded by Solana's own
+ *         1,400,000 per transaction, not by the adapter's 15,000,000. Label 1
+ *         NEVER gets `opGas.toSpoke` (EVM gas).
+ *   unit  LAMPORTS (9 decimals), not wei: what the hub attaches to a SYNC or
+ *         a moved PAYOUT toward Solana to pay the rent of what it creates
+ *         there — a replica's two accounts, 2,738,120 lamports at today's
+ *         rent, plus a tenth. Bounded by LayerZero's executor cap toward
+ *         Solana (240,000,000) and at least the rent of a user account.
+ *   confirmations  of the SOURCE chain on the hub's receive side (Solana →
+ *         Base: 32, LayerZero's default for that pathway).
+ */
+const solanaOf = (net) => ({
+  label: 1,
+  id: 'solana',
+  kind: 'solana',
+  cluster: net === 'mainnet' ? 'mainnet-beta' : 'devnet',
+  eid: net === 'mainnet' ? 30168 : 40168,
+  rpc: env('RPC_SOLANA', net === 'mainnet' ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com'),
+  programId: env('SOLANA_PROGRAM_ID', '3mypQvfiLtRHQhWStYyQ6cUu6YC4hqUFBXcNNme3H95g'),
+  gas: BigInt(env('SOLANA_GAS', '400000')),
+  unit: BigInt(env('SOLANA_UNIT', '3000000')),
+  confirmations: 32,
+  cctpDomain: 5,
+  // the executor's message-size setting for the Solana eid on the hub's send
+  // library: LayerZero's default toward Solana mainnet is 200 bytes, below
+  // every hub message (288–512): raised BEFORE the pad learns the gateway
+  maxMessageSize: 10_000,
+  // a launch ceiling for label 1 (SpawnPad.syncCap), hub-native wei; none by
+  // default — every launch reaches Solana (SOLANA_SYNC_CAP overrides)
+  ...(env('SOLANA_SYNC_CAP', '') ? { syncCap: eth(env('SOLANA_SYNC_CAP', '0')) } : {}),
+})
+/** Bounds the tooling enforces on label 1 (V7.md §9). */
+const SOLANA_BOUNDS = {
+  maxGas: 1_400_000n, // Solana's compute ceiling per transaction
+  minGas: 200_000n,
+  maxUnit: 240_000_000n, // LayerZero's executor native cap toward Solana (0.24 SOL)
+  minUnit: 1_894_840n, // a user account's rent: a moved PAYOUT may open one
+}
+
 /* ------------------------------- testnet ------------------------------- */
 
 const testnet = {
@@ -141,6 +188,8 @@ const testnet = {
   // LayerZero's testnet defaults are fine for play money
   dvn: null,
   timelockDelay: 0,
+  // the sixth chain on Solana devnet (eid 40168), joined by add-solana.sh
+  solana: solanaOf('testnet'),
 }
 
 /* ------------------------------- mainnet ------------------------------- */
@@ -329,6 +378,9 @@ const mainnet = {
   },
   // every topology / custody change waits this long in public (seconds)
   timelockDelay: Number(env('SPAWN_TIMELOCK_DELAY', String(48 * 3600))),
+  // the sixth chain (eid 30168), joined by add-solana.sh — the Solana
+  // verifier addresses for its own end live in solana/scripts/wire.ts
+  solana: solanaOf('mainnet'),
 }
 
 /* ------------------------------- access ------------------------------- */
@@ -475,6 +527,7 @@ module.exports = {
   PROFILES,
   RETIRED,
   RESERVED_LABELS,
+  SOLANA_BOUNDS,
   validate,
   getProfile,
   netKeyOf,
