@@ -1,14 +1,20 @@
 /**
- * Time limits on the two places where a hardhat script waits with none.
+ * What hardhat-ethers needs before it meets a public RPC. Three things, all
+ * met on the mainnet launch of 2026-11-15, none of which a fork can show.
  *
  * 1. HardhatEthersSigner.sendTransaction (hardhat-ethers 3.1) sends, then
  *    polls eth_getTransactionByHash every 4 s UNTIL the node shows the
  *    transaction. A public RPC that accepts a transaction and then drops it
- *    never shows it, and the script polls for ever: on the mainnet launch of
- *    2026-11-15 the Ethereum deploy sat 45 minutes on a transaction no node
- *    had. Here: the same send and the same poll, with a deadline.
+ *    never shows it, and the script polls for ever: the Ethereum deploy sat
+ *    45 minutes on a transaction no node had. Here: the same send and the
+ *    same poll, with a deadline.
  * 2. TransactionResponse.wait() has no timeout unless one is passed. Here: a
  *    default one.
+ * 3. bsc-rpc.publicnode.com answers a contract creation with `to: ""` where
+ *    the standard says null, pending or mined. ethers refuses "" as an
+ *    address, so every deploy on BNB Chain was MINED and then reported as a
+ *    failure: eight orphan adapters before the run stopped. Here: "" is read
+ *    as null.
  *
  * Past either limit the step throws. launch.sh, finish.sh and the add-a-chain
  * scripts run a failed step again, and every step resumes: what is on chain
@@ -18,6 +24,7 @@
  */
 const { TransactionResponse } = require('ethers')
 const { HardhatEthersSigner } = require('@nomicfoundation/hardhat-ethers/signers')
+const ethersUtils = require('@nomicfoundation/hardhat-ethers/internal/ethers-utils')
 
 function ms(name, dflt) {
   const v = Number(process.env[name] ?? dflt)
@@ -39,9 +46,18 @@ const secs = (t) => `${Math.round(t / 1000)} s`
 function install() {
   const signer = HardhatEthersSigner.prototype
   if (signer.__spawnTxLimits) return
-  if (typeof signer._sendUncheckedTransaction !== 'function' || typeof signer.sendTransaction !== 'function') {
+  if (
+    typeof signer._sendUncheckedTransaction !== 'function' ||
+    typeof signer.sendTransaction !== 'function' ||
+    typeof ethersUtils.formatTransactionResponse !== 'function'
+  ) {
     throw new Error('lib-txlimits: hardhat-ethers changed shape — re-read its sendTransaction before any launch')
   }
+
+  // 3. the provider looks this export up at every call, so one wrapper covers
+  // every transaction it reads from an RPC
+  const format = ethersUtils.formatTransactionResponse
+  ethersUtils.formatTransactionResponse = (value) => format(value && value.to === '' ? { ...value, to: null } : value)
 
   // As hardhat-ethers 3.1.3 writes it (same send, same pauses), plus the deadline.
   signer.sendTransaction = async function (tx) {

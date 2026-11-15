@@ -60,6 +60,51 @@ describe('transaction time limits', () => {
     expect((await tx.wait()).status).to.equal(1)
   })
 
+  describe('an RPC that answers a contract creation with to: "" (bsc-rpc.publicnode.com)', () => {
+    let restore
+    let answers
+    beforeEach(() => {
+      const inner = ethers.provider._hardhatProvider
+      const send = inner.send
+      answers = 0
+      inner.send = async function (method, params) {
+        const result = await send.call(this, method, params)
+        if (method === 'eth_getTransactionByHash' && result && result.to === null) {
+          answers += 1
+          return { ...result, to: '' } // the shape that RPC gives, pending and mined
+        }
+        return result
+      }
+      restore = () => {
+        inner.send = send
+      }
+    })
+    afterEach(() => restore())
+
+    it('a deploy is read as a deploy: it does not fail after it was mined', async () => {
+      const [a] = await ethers.getSigners()
+      const factory = new ethers.ContractFactory([], '0x00', a) // creation code: STOP
+      const before = await ethers.provider.getTransactionCount(a.address)
+      const c = await factory.deploy()
+      const receipt = await c.deploymentTransaction().wait()
+      expect(receipt.status).to.equal(1)
+      expect(receipt.contractAddress).to.equal(c.target)
+      expect(c.deploymentTransaction().to).to.equal(null)
+      expect(answers).to.be.greaterThan(0) // the odd answer really was served
+      // ONE transaction, not one per attempt: what cost eight orphans on BNB Chain
+      expect(await ethers.provider.getTransactionCount(a.address)).to.equal(before + 1)
+    })
+
+    it('looking a creation up by its hash works too, and an ordinary call is untouched', async () => {
+      const [a, b] = await ethers.getSigners()
+      const c = await new ethers.ContractFactory([], '0x00', a).deploy()
+      const created = await ethers.provider.getTransaction(c.deploymentTransaction().hash)
+      expect(created.to).to.equal(null)
+      const call = await a.sendTransaction({ to: b.address, value: 1n })
+      expect((await ethers.provider.getTransaction(call.hash)).to).to.equal(b.address)
+    })
+  })
+
   it('an explicit timeout still wins over the default', async () => {
     const [a, b] = await ethers.getSigners()
     await network.provider.send('evm_setAutomine', [false])
