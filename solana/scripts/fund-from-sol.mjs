@@ -151,7 +151,11 @@ function checkQuote(q, order, lamports, wantOut) {
   if (lc(d.currencyOut.currency.address) !== lc(wantCur)) fail(`currency ${d.currencyOut.currency.address}`)
   const usdIn = Number(d.currencyIn.amountUsd)
   const usdOut = Number(d.currencyOut.amountUsd)
-  if (!(usdOut >= usdIn * 0.97)) fail(`cost ${(100 * (1 - usdOut / usdIn)).toFixed(2)}% > 3%`)
+  // 3% of the order, or 30 cents flat: a few dollars landing on Ethereum
+  // carry that chain's fixed gas, which is more than 3% of a small order
+  if (!(usdIn - usdOut <= Math.max(usdIn * 0.03, 0.3))) {
+    fail(`cost ${(100 * (1 - usdOut / usdIn)).toFixed(2)}% ($${(usdIn - usdOut).toFixed(2)}) > 3% and > $0.30`)
+  }
   if (wantOut !== undefined && !(out >= wantOut * 0.98 && out <= wantOut * 1.15)) {
     fail(`output ${out} vs wanted ${wantOut}`)
   }

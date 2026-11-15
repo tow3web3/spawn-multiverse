@@ -28,6 +28,7 @@
 # cap, and the script says so. Resumable: finished steps send nothing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib-net.sh # slow links: each address gets 5 s, IPv4 first
 
 PROFILE="${1:-${SPAWN_LAUNCH_PROFILE:-mainnet}}"
 case "$PROFILE" in

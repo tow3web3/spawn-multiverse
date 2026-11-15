@@ -39,6 +39,7 @@
 # caps, publishing the site. Those are scripts/finish.sh.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib-net.sh # slow links: each address gets 5 s, IPv4 first
 
 PROFILE="${1:-${SPAWN_LAUNCH_PROFILE:-mainnet}}"
 case "$PROFILE" in

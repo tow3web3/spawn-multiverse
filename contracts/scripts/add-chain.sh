@@ -50,6 +50,7 @@
 # timelocks have no delay: prepare, then finish at once).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib-net.sh # slow links: each address gets 5 s, IPv4 first
 
 NEW="${1:-}"
 PHASE="${2:-}"
