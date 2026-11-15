@@ -1,6 +1,9 @@
 require('@nomicfoundation/hardhat-toolbox')
 const fs = require('fs')
 
+// no step may wait for ever on a transaction a public RPC lost
+require('./scripts/lib-txlimits').install()
+
 /** Deployer key from contracts/.env (gitignored). `name` selects the line:
  * DEPLOYER_PK for testnets; mainnet networks prefer MAINNET_DEPLOYER_PK and
  * fall back to DEPLOYER_PK (the same deployer address on every chain). */
