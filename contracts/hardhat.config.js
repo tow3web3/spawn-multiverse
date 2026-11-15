@@ -117,7 +117,7 @@ module.exports = {
     },
     // BNB Chain — the BNB universe (SPAWN_PROFILE=bnb), settled in BSC USDT
     bnb: {
-      url: process.env.RPC_BNB ?? 'https://bsc-rpc.publicnode.com',
+      url: process.env.RPC_BNB ?? 'https://bsc-dataseed.bnbchain.org', // see config/profiles.js
       chainId: 56,
       accounts: mainnetAccounts(),
     },

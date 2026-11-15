@@ -285,7 +285,11 @@ const mainnet = {
      */
     bnb: {
       eid: 30102, role: 'spoke', label: 4, id: 'bnb',
-      chainId: 56, rpc: rpc('bnb', 'https://bsc-rpc.publicnode.com'),
+      // BNB Chain's own endpoint. NOT bsc-rpc.publicnode.com: it answers an
+      // unknown hash with an error and a contract creation with to: "", and
+      // both failed deploys that had been mined (12 orphans on the launch).
+      // This one serves no eth_getLogs — nothing here reads BNB Chain's logs.
+      chainId: 56, rpc: rpc('bnb', 'https://bsc-dataseed.bnbchain.org'),
       vault: 'local',
       usdc: '0x55d398326f99059fF775485246999027B3197955', // "the dollar token" of this chain: BSC USDT
       dollar: { symbol: 'USDT', decimals: 18, minSupply: 1_000_000_000n, maxSupply: 100_000_000_000n },

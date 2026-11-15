@@ -342,6 +342,27 @@ async function preflight(ctx) {
   const chainId = Number((await provider.getNetwork()).chainId)
   check('chain id', chainId === cfg.chainId, `${chainId} (expected ${cfg.chainId})`)
 
+  // A script sends, then asks for the transaction and its receipt until the
+  // node has them. An RPC that answers a hash it does not know with an ERROR
+  // instead of null (bsc-rpc.publicnode.com: "Archive requests require a
+  // personal token") fails every send AFTER the transaction was mined: the
+  // step is run again and deploys again. Seen on the mainnet launch.
+  const unknown = ethers.id(`spawn preflight ${netKey} ${Date.now()}`)
+  const asked = async (method) => {
+    try {
+      return (await provider.send(method, [unknown])) === null ? null : 'answered a transaction that does not exist'
+    } catch (e) {
+      return `error: ${String(e.shortMessage ?? e.message).slice(0, 90)}`
+    }
+  }
+  const byHash = await asked('eth_getTransactionByHash')
+  const receipt = await asked('eth_getTransactionReceipt')
+  check(
+    'RPC answers an unknown transaction with null (a sent transaction can be polled)',
+    byHash === null && receipt === null,
+    byHash === null && receipt === null ? 'transaction and receipt' : `transaction: ${byHash ?? 'null'} · receipt: ${receipt ?? 'null'}`,
+  )
+
   const endpoint = new ethers.Contract(profile.endpoint, ENDPOINT_ABI, provider)
   let eid
   try {
