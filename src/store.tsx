@@ -484,6 +484,20 @@ export interface ChainInfo {
   paused: boolean
   /** Native messaging fee each action must attach (0 when sponsored). */
   fee: { buy: number; sell: number; claim: number; pull: number; open: number }
+  /** The chain's block explorer ("https://basescan.org"), when known. */
+  explorer?: string
+}
+
+/** Where a token's contracts are. */
+export interface TokenContracts {
+  /** The chain the hub runs on, and the hub's own token there: the curve's
+   * canonical record of the token. Wallets do not hold it. */
+  hubChain: string
+  hub: string
+  /** Per chain: the replica that chain's gateway mints — what a buy there
+   * delivers, what a wallet holds and what to add to a wallet. The hub
+   * chain has one too (its local gateway's). Absent: not open there yet. */
+  replicas: Record<string, string>
 }
 
 /** Can a token be opened on a chain right now (v7.2)? Checked against the
@@ -581,6 +595,9 @@ export interface StoreValue {
      * come by itself — open it from that chain) or `failed` (the same on a
      * pre-v7.2 gateway: only the hub can resend it). */
     unavailable?: Record<number, Record<string, 'arriving' | 'closed' | 'failed'>>
+    /** Per creature num: the hub token and each chain's replica, as the
+     * gateways' `replicaOf` returned them. */
+    contracts?: Record<number, TokenContracts>
     /** v7.2: would the hub open this token on `chain` right now, and at what fee? */
     checkOpen?: (num: number, chain: string) => Promise<OpenCheck>
     /** v7.2: ask the hub for this token's replica on `chain`. */

@@ -98,6 +98,7 @@ import {
   type SpawnInput,
   type StoreValue,
   type TradeExpectation,
+  type TokenContracts,
   type TradeResult,
   type Wallet,
 } from '../store'
@@ -2692,7 +2693,26 @@ export function OnchainProvider({
           pull: ef(s.fee.pull),
           open: ef(s.fee.open),
         },
+        explorer: c.chain.blockExplorers?.default.url,
       }
+    }
+    return out
+  }, [version])
+
+  /** Each token's contracts: the hub token, and the replicas the polls
+   * already resolved through the gateways' `replicaOf` (step 2b) — nothing
+   * is read again for the page. */
+  const contracts = useMemo(() => {
+    void version
+    const out: Record<number, TokenContracts> = {}
+    const hubChain = iosRef.current.find((c) => c.local)?.id ?? iosRef.current[0]?.id ?? ''
+    for (const [num, entry] of entriesRef.current) {
+      const replicas: Record<string, string> = {}
+      for (const c of iosRef.current) {
+        const rep = replicaCache.current.get(`${c.id}:${entry.token}`)
+        if (rep) replicas[c.id] = rep
+      }
+      out[num] = { hubChain, hub: entry.token, replicas }
     }
     return out
   }, [version])
@@ -2766,6 +2786,7 @@ export function OnchainProvider({
         expect,
         slippage,
         unavailable: unavailableRef.current,
+        contracts,
         checkOpen,
         openToken,
         moveOptions,
@@ -2792,6 +2813,7 @@ export function OnchainProvider({
       airdrop,
       chainIds,
       chainInfo,
+      contracts,
       hubPaused,
       walletSource,
       disconnect,

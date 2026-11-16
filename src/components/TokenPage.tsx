@@ -29,6 +29,7 @@ import { CreatureArt } from './CreatureCard'
 import { ChainLogo, CoinLogo, coinOf } from './ChainLogos'
 import { PriceChart } from './PriceChart'
 import { OpenToken } from './OpenToken'
+import { ContractAddresses } from './ContractAddresses'
 import { ttlText } from '../lib/v72'
 
 const QUICK_USD = [10, 50, 100]
@@ -1107,7 +1108,14 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
           {/* chain sync grid */}
           <div className={card}>
             <p className={label}>
-              ONE GLOBAL PRICE · {chainSet.word} {chainSet.joining.length ? '' : 'LIVE '}CHAIN{chainSet.count === 1 ? '' : 'S'}
+              ONE GLOBAL PRICE ·{' '}
+              {chainSet.count === 6
+                ? chainSet.joining.length
+                  ? 'SIX CHAINS'
+                  : 'SIX LIVE CHAINS'
+                : chainSet.single
+                  ? chainSet.names.toUpperCase()
+                  : 'EVERY LIVE CHAIN'}
             </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-2">
               {liveChains.map((ch) => {
@@ -1161,6 +1169,16 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
               ))}
             </div>
           </div>
+
+          {/* each chain's contract address (on-chain modes only) */}
+          <ContractAddresses
+            num={num}
+            ticker={c.ticker}
+            onOpenOn={(id) => {
+              setChain(id)
+              document.querySelector(`button[data-chain="${id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            }}
+          />
 
           <p className="text-center font-mono text-[9px] font-bold tracking-wide opacity-40">
             {mode === 'sim'
