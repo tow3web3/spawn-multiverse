@@ -8,7 +8,16 @@
     "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     "localUsd": "0xD0699BE3550C531B8B1996a67f4d817c0E04581f",
     "gateway": "0x42164Fc00fF0A981B7b61FdA120CCa0D5e6E10De",
-    "localDist": "0x33658677B9d53cC289b215eF91c0E19D114c9a74"
+    "localDist": "0x33658677B9d53cC289b215eF91c0E19D114c9a74",
+    "timelock": "0x7dd66D0a2f53e192Ee649892b3A001EA5698BACB",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 172800,
+      "timelock": "0x7dd66D0a2f53e192Ee649892b3A001EA5698BACB",
+      "at": "2026-11-16T01:53:37.504Z"
+    }
   },
   "optimism": {
     "adapter": "0x464984dA65D184501393D99DEd50169d99262276",
@@ -17,7 +26,16 @@
     "usd": "0x4BaED9092270dF784E945795eDfb5973862b285e",
     "gateway": "0xD90F1B78aAc6c9A3F683475690767A5D872f32f8",
     "dist": "0x306509134AA61676A120C3D4ccC86CA1BBcFb00f",
-    "ready": true
+    "ready": true,
+    "timelock": "0xffD5F1015CA1240F52B9f798CCA2b361655EbD47",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 172800,
+      "timelock": "0xffD5F1015CA1240F52B9f798CCA2b361655EbD47",
+      "at": "2026-11-16T01:54:04.140Z"
+    }
   },
   "arbitrum": {
     "adapter": "0x464984dA65D184501393D99DEd50169d99262276",
@@ -26,7 +44,16 @@
     "usd": "0x4BaED9092270dF784E945795eDfb5973862b285e",
     "gateway": "0xD90F1B78aAc6c9A3F683475690767A5D872f32f8",
     "dist": "0x306509134AA61676A120C3D4ccC86CA1BBcFb00f",
-    "ready": true
+    "ready": true,
+    "timelock": "0xF453509a749BCA1D526e6fd2a4Dbc128A684282D",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 172800,
+      "timelock": "0xF453509a749BCA1D526e6fd2a4Dbc128A684282D",
+      "at": "2026-11-16T01:54:50.759Z"
+    }
   },
   "ethereum": {
     "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
@@ -35,7 +62,16 @@
     "usd": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5",
     "gateway": "0x08B3fa634bd37325aB8322fd7258Fb6A52375E78",
     "dist": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
-    "ready": true
+    "ready": true,
+    "timelock": "0xFDf332794da0d35c4C2C8518DB475548433CA41F",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 172800,
+      "timelock": "0xFDf332794da0d35c4C2C8518DB475548433CA41F",
+      "at": "2026-11-16T01:58:39.413Z"
+    }
   },
   "bnb": {
     "adapter": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
@@ -44,6 +80,15 @@
     "usd": "0x0DecBE2518683A4EeaDAE228edEaabcDD7Ba82A7",
     "gateway": "0xA705C9Fc0511e105F523b5CD5551b473Bbd700cE",
     "dist": "0x41EF79573dC463FD08aAD0f6e40Bd78Dea955B4D",
-    "ready": true
+    "ready": true,
+    "timelock": "0xC26d497ec75F8472f8a9B36B4bf6a9350E84E192",
+    "handover": {
+      "owner": "0x851A68f28074849e40dD7df3663a6085A742C34B",
+      "operator": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "guardian": "0x483E931A279B136A2C3fCA6BF5eC2c4239c1B904",
+      "delay": 172800,
+      "timelock": "0xC26d497ec75F8472f8a9B36B4bf6a9350E84E192",
+      "at": "2026-11-16T01:59:00.475Z"
+    }
   }
 }
