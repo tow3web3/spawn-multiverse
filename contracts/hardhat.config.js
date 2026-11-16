@@ -15,6 +15,15 @@ function envKey(name) {
     return []
   }
 }
+/** Any other `NAME=value` line of contracts/.env (undefined when absent). */
+function envValue(name) {
+  try {
+    const m = fs.readFileSync(`${__dirname}/.env`, 'utf8').match(new RegExp(`^${name}=(\\S+)`, 'm'))
+    return m ? m[1] : undefined
+  } catch {
+    return undefined
+  }
+}
 const deployerAccounts = () => envKey('DEPLOYER_PK')
 const mainnetAccounts = () => {
   const k = envKey('MAINNET_DEPLOYER_PK')
@@ -122,5 +131,11 @@ module.exports = {
       accounts: mainnetAccounts(),
     },
   },
+  // Source verification (scripts/verify-all.js, or `npx hardhat verify`). A
+  // single string = Etherscan's V2 API: one key for every chain it indexes
+  // (Base, Optimism, Arbitrum, Ethereum, BNB Chain and their testnets).
+  etherscan: { apiKey: process.env.ETHERSCAN_API_KEY ?? envValue('ETHERSCAN_API_KEY') ?? '' },
+  // the plugin's own Sourcify client speaks the legacy API; verify-all.js uses v2
+  sourcify: { enabled: false },
   mocha: { timeout: fork ? 600_000 : 120_000 },
 }

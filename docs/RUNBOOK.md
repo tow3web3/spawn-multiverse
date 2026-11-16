@@ -277,6 +277,8 @@ remote gateway prepays no open, or the USDT vault is a CCTP peer. It prints:
   behind a launch ceiling is EXPECTED to miss tokens — not a warning), roles,
   verifier sets.
 
+**Source verification** (Sourcify + Etherscan V2, every contract and every token replica; read-only, skips what is verified, re-run after launches; `ETHERSCAN_API_KEY` in `contracts/.env`): `cd contracts && npx hardhat run scripts/verify-all.js` (`VERIFY_DRY=1` checks without submitting, `VERIFY_TOKENS_ONLY=1` for new tokens only).
+
 ## 7. Hand-over and roles
 
 After `finish.sh`, on every chain: **admin** = that chain's 48h timelock
