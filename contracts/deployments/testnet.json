@@ -237,5 +237,14 @@
     "gateway": "0xe0cdBF396D018dEEC14388E58b69011cE7e74c51",
     "dist": "0x3d38131f5105384E62b123b680f2e0eCBF77e13e",
     "ready": true
+  },
+  "solana": {
+    "kind": "solana",
+    "label": 1,
+    "eid": 40168,
+    "store": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
+    "peer": "0xe27570e3d9d6dca198b299fae076f3dc69a86c1f543637ed0c21d61d1661aefa",
+    "vault": "0x9ebd9f0c854704a11ae17de3522e5f8e272844b2e337209681be2da182b560ce",
+    "wired": true
   }
 }
