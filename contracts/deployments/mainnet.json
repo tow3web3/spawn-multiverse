@@ -1,0 +1,49 @@
+{
+  "base": {
+    "adapter": "0x78a8250941dA89766e4dCAF62f4E80BEf455F621",
+    "transport": "v7.2",
+    "usd": "0xAe1a0E5060923dCEb9A384cC8B38fa6be00DEe0B",
+    "pad": "0x205c13693DDf5A1b0acAa74205EC9B2Eea7A56D7",
+    "venue": "0x7e79123e6B8199296F3e677223aDFC0d6397947C",
+    "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "localUsd": "0xD0699BE3550C531B8B1996a67f4d817c0E04581f",
+    "gateway": "0x42164Fc00fF0A981B7b61FdA120CCa0D5e6E10De",
+    "localDist": "0x33658677B9d53cC289b215eF91c0E19D114c9a74"
+  },
+  "optimism": {
+    "adapter": "0x464984dA65D184501393D99DEd50169d99262276",
+    "transport": "v7.2",
+    "usdc": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+    "usd": "0x4BaED9092270dF784E945795eDfb5973862b285e",
+    "gateway": "0xD90F1B78aAc6c9A3F683475690767A5D872f32f8",
+    "dist": "0x306509134AA61676A120C3D4ccC86CA1BBcFb00f",
+    "ready": true
+  },
+  "arbitrum": {
+    "adapter": "0x464984dA65D184501393D99DEd50169d99262276",
+    "transport": "v7.2",
+    "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    "usd": "0x4BaED9092270dF784E945795eDfb5973862b285e",
+    "gateway": "0xD90F1B78aAc6c9A3F683475690767A5D872f32f8",
+    "dist": "0x306509134AA61676A120C3D4ccC86CA1BBcFb00f",
+    "ready": true
+  },
+  "ethereum": {
+    "adapter": "0xc030EB69fba66A8A123f7EB1450cA3249654Ce34",
+    "transport": "v7.2",
+    "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+    "usd": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5",
+    "gateway": "0x08B3fa634bd37325aB8322fd7258Fb6A52375E78",
+    "dist": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
+    "ready": true
+  },
+  "bnb": {
+    "adapter": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
+    "transport": "v7.2",
+    "usdc": "0x55d398326f99059fF775485246999027B3197955",
+    "usd": "0x0DecBE2518683A4EeaDAE228edEaabcDD7Ba82A7",
+    "gateway": "0xA705C9Fc0511e105F523b5CD5551b473Bbd700cE",
+    "dist": "0x41EF79573dC463FD08aAD0f6e40Bd78Dea955B4D",
+    "ready": true
+  }
+}

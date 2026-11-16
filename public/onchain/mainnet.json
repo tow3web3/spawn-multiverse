@@ -1,0 +1,85 @@
+{
+  "network": "mainnet",
+  "universe": "mainnet",
+  "generation": "v7.2",
+  "dollar": {
+    "symbol": "USDC",
+    "decimals": 6
+  },
+  "chainId": 8453,
+  "rpc": "https://mainnet.base.org",
+  "pad": "0x205c13693DDf5A1b0acAa74205EC9B2Eea7A56D7",
+  "venue": "0x7e79123e6B8199296F3e677223aDFC0d6397947C",
+  "hubUsd": "0xAe1a0E5060923dCEb9A384cC8B38fa6be00DEe0B",
+  "hubMessenger": "0x78a8250941dA89766e4dCAF62f4E80BEf455F621",
+  "fromBlock": 57941365,
+  "sponsored": false,
+  "chains": [
+    {
+      "label": 3,
+      "id": "base",
+      "gateway": "0x42164Fc00fF0A981B7b61FdA120CCa0D5e6E10De",
+      "usd": "0xD0699BE3550C531B8B1996a67f4d817c0E04581f",
+      "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "dist": "0x33658677B9d53cC289b215eF91c0E19D114c9a74",
+      "chainId": 8453,
+      "rpc": "https://mainnet.base.org",
+      "local": true,
+      "vault": "cctp",
+      "depositCap": "100000000"
+    },
+    {
+      "label": 6,
+      "id": "optimism",
+      "gateway": "0xD90F1B78aAc6c9A3F683475690767A5D872f32f8",
+      "usd": "0x4BaED9092270dF784E945795eDfb5973862b285e",
+      "usdc": "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+      "dist": "0x306509134AA61676A120C3D4ccC86CA1BBcFb00f",
+      "chainId": 10,
+      "rpc": "https://mainnet.optimism.io",
+      "vault": "cctp",
+      "depositCap": "100000000"
+    },
+    {
+      "label": 5,
+      "id": "arbitrum",
+      "gateway": "0xD90F1B78aAc6c9A3F683475690767A5D872f32f8",
+      "usd": "0x4BaED9092270dF784E945795eDfb5973862b285e",
+      "usdc": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      "dist": "0x306509134AA61676A120C3D4ccC86CA1BBcFb00f",
+      "chainId": 42161,
+      "rpc": "https://arb1.arbitrum.io/rpc",
+      "vault": "cctp",
+      "depositCap": "100000000"
+    },
+    {
+      "label": 2,
+      "id": "ethereum",
+      "gateway": "0x08B3fa634bd37325aB8322fd7258Fb6A52375E78",
+      "usd": "0x169e79e69b58F17B5C2d65d4c6E20478488927B5",
+      "usdc": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "dist": "0x59B888bEB9a9C047e4a603ef52281cBC0f046100",
+      "chainId": 1,
+      "rpc": "https://ethereum-rpc.publicnode.com",
+      "vault": "cctp",
+      "depositCap": "100000000"
+    },
+    {
+      "label": 4,
+      "id": "bnb",
+      "gateway": "0xA705C9Fc0511e105F523b5CD5551b473Bbd700cE",
+      "usd": "0x0DecBE2518683A4EeaDAE228edEaabcDD7Ba82A7",
+      "usdc": "0x55d398326f99059fF775485246999027B3197955",
+      "dist": "0x41EF79573dC463FD08aAD0f6e40Bd78Dea955B4D",
+      "chainId": 56,
+      "rpc": "https://bsc-dataseed.bnbchain.org",
+      "vault": "local",
+      "dollar": {
+        "symbol": "USDT",
+        "decimals": 18
+      },
+      "depositCap": "100000000000000000000"
+    }
+  ],
+  "deployedAt": 1794789420842
+}
