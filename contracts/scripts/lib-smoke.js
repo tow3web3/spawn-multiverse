@@ -112,19 +112,37 @@ async function smoke(opts) {
    * asks for one growing range: it scans forward in small windows from
    * where the last successful poll stopped.
    */
-  function eventScanner(contract, filter, from, match, windowBlocks = 100) {
+  function eventScanner(contracts, filter, from, match, windowBlocks = 100) {
     let scanned = from - 1
+    let at = 0
     return async () => {
-      const latest = await contract.runner.provider.getBlockNumber()
-      while (scanned < latest) {
-        const to = Math.min(latest, scanned + windowBlocks)
-        const evs = await contract.queryFilter(filter, scanned + 1, to)
-        scanned = to
-        const hit = evs.find(match)
-        if (hit) return hit
+      // one RPC per poll, its own head with its own logs (a second RPC's head
+      // may be ahead of what this one can already serve)
+      const contract = contracts[at % contracts.length]
+      try {
+        const latest = await contract.runner.provider.getBlockNumber()
+        while (scanned < latest) {
+          const to = Math.min(latest, scanned + windowBlocks)
+          const evs = await contract.queryFilter(filter, scanned + 1, to)
+          scanned = to
+          const hit = evs.find(match)
+          if (hit) return hit
+        }
+        return undefined
+      } catch (e) {
+        at += 1 // the next poll asks the next RPC; nothing scanned is lost
+        throw e
       }
-      return undefined
     }
+  }
+
+  /** An RPC for reading events: 15 s and two attempts, then the next one.
+   * ethers' default is five minutes of retries on a 429, per request. */
+  const quickProvider = (url, chainId) => {
+    const req = new ethers.FetchRequest(url)
+    req.timeout = 15_000
+    req.setThrottleParams({ maxAttempts: 2 })
+    return new ethers.JsonRpcProvider(req, chainId, { staticNetwork: true })
   }
 
   const all = JSON.parse(fs.readFileSync(FILE, 'utf8'))
@@ -149,6 +167,26 @@ async function smoke(opts) {
     (local ? dev.provider : new ethers.JsonRpcProvider(profile.nets[HUB_NET].rpc, profile.nets[HUB_NET].chainId, { staticNetwork: true }))
   const padAbi = (await ethers.getContractFactory('SpawnPad')).interface
   const pad = new ethers.Contract(hub.pad, padAbi, hubProvider)
+  // The hub's EVENTS are read from RPCs that serve eth_getLogs — a chain's
+  // public endpoint may not: mainnet.base.org answers every eth_getLogs with
+  // 429 "request limit reached" (the mainnet launch waited on a refusal the
+  // hub had emitted minutes before). State is still read from hubProvider.
+  const hubCfg = profile.nets[HUB_NET]
+  const padForLogs =
+    local || opts.providers?.[HUB_NET]
+      ? [pad]
+      : [...(hubCfg.logsRpc ?? []), hubCfg.rpc].map((u) => new ethers.Contract(hub.pad, padAbi, quickProvider(u, hubCfg.chainId)))
+  const hubLogs = async (filter, from, to) => {
+    let lastErr
+    for (const c of padForLogs) {
+      try {
+        return await c.queryFilter(filter, from, to)
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    throw lastErr
+  }
 
   // who pays: a sponsored gateway rides its adapter's tank, otherwise the
   // caller attaches the quoted fee
@@ -171,7 +209,7 @@ async function smoke(opts) {
   let skippedHere = false
   if (token && replicaNow === ethers.ZeroAddress && !local) {
     const block = Number(await pad.spawnBlock(token))
-    const evs = await pad.queryFilter(pad.filters.SyncFailed(token, cfg.label), block, block).catch(() => [])
+    const evs = await hubLogs(pad.filters.SyncFailed(token, cfg.label), block, block).catch(() => [])
     skippedHere = evs.length > 0
   }
 
@@ -317,7 +355,7 @@ async function smoke(opts) {
     const ev = await waitFor(
       'the hub\'s refusal (Refused, reason 6)',
       eventScanner(
-        pad,
+        padForLogs,
         pad.filters.Refused(),
         hubBlock,
         (e) => Number(e.args.op) === 2 && e.args.actor.toLowerCase() === me32 && Number(e.args.reason) === 6,

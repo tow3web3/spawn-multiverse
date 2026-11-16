@@ -217,6 +217,10 @@ const mainnet = {
     base: {
       eid: 30184, role: 'hub', label: 3, id: 'base',
       chainId: 8453, rpc: rpc('base', 'https://mainnet.base.org'),
+      // where the hub's EVENTS are read, tried in order before `rpc`:
+      // mainnet.base.org answers every eth_getLogs with 429 "request limit
+      // reached". An RPC_BASE of your own (or a fork) serves its own logs.
+      logsRpc: process.env.RPC_BASE ? [] : ['https://base-rpc.publicnode.com', 'https://base.gateway.tenderly.co', 'https://base.drpc.org'],
       vault: 'cctp',
       usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
       tokenMessenger: CCTP_TOKEN_MESSENGER_V2, cctpDomain: 6,
