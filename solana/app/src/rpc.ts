@@ -78,7 +78,10 @@ export function connectionRpc(conn: Connection, commitment: Commitment = 'confir
       return (await conn.getLatestBlockhash(commitment)).blockhash
     },
     async slot() {
-      return conn.getSlot('finalized')
+      // a public RPC is several nodes: the one that simulates may be behind
+      // the one that answered getSlot ("N is not a recent slot", seen on
+      // devnet). SlotHashes keeps 512 slots: 50 back is recent on every node.
+      return (await conn.getSlot('finalized')) - 50
     },
     async rent(bytes) {
       return BigInt(await conn.getMinimumBalanceForRentExemption(bytes, commitment))
