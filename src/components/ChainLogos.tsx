@@ -262,12 +262,16 @@ export function ChainChip({
   size = 22,
   className = '',
   dim = false,
+  joining,
 }: {
   id: string
   size?: number
   className?: string
   /** A chain that is not live here: greyed, dashed ring. */
   dim?: boolean
+  /** A chain with a day to join ("JOINS 18 NOV"): full colour, dashed ring,
+   * the day in its title. */
+  joining?: string
 }) {
   if (!isChainLogoId(id)) return null
   const ring = size >= 22 ? 2 : 1.5
@@ -276,11 +280,12 @@ export function ChainChip({
   const logo = Math.round(id === 'base' ? inner * 0.62 : inner - 3)
   return (
     <span
-      title={CHAIN_NAME[id]}
+      title={joining ? `${CHAIN_NAME[id]} — ${joining.toLowerCase()}` : CHAIN_NAME[id]}
+      data-joining={joining ? id : undefined}
       className={`inline-flex shrink-0 items-center justify-center rounded-full bg-white ${
-        dim ? 'border-dashed border-ink/40 opacity-60 grayscale' : 'border-ink'
+        dim ? 'border-dashed border-ink/40 opacity-60 grayscale' : joining ? 'border-ink/60' : 'border-ink'
       } ${className}`}
-      style={{ width: size, height: size, borderWidth: ring, borderStyle: dim ? 'dashed' : 'solid' }}
+      style={{ width: size, height: size, borderWidth: ring, borderStyle: dim || joining ? 'dashed' : 'solid' }}
     >
       <ChainLogo id={id} size={logo} />
     </span>

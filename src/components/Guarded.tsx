@@ -90,7 +90,7 @@ export function RiskNotice() {
     ],
     [
       'ONE UNIVERSE, SIX CHAINS',
-      `One token, one supply, one price on every chain. Trading is live on ${listNames(live) || cs.names}; a chain that is not listed there cannot be traded on yet.`,
+      `One token, one supply, one price on every chain. Trading is live on ${listNames(live) || cs.names}; a chain that is not listed there cannot be traded on yet.${cs.joinNote ? ` ${cs.joinNote}` : ''}`,
     ],
     ...(bnb
       ? ([

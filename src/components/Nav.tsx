@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useStore, shortAddr, type WalletSource } from '../store'
 import { fmtUsd } from '../lib/format'
-import { useDollars } from '../lib/liveChains'
+import { chainName, useDollars } from '../lib/liveChains'
+import { JOINING_MAINNET, joinSentence } from '../lib/chains'
 import { PUBLIC_DEMO, type AppMode } from '../App'
 import { GuardedBanner } from './Guarded'
 import { ChainLogo, CoinLogo } from './ChainLogos'
@@ -68,7 +69,9 @@ export function Nav({
   const [minting, setMinting] = useState(false)
   // mainnet first once it is live, then SIM, TESTNET; LOCAL only outside the public build
   const modes: AppMode[] = [
-    ...(mainnet ? (['mainnet'] as const) : []),
+    // (while its manifest is being checked, the tab is there for the
+    // visitor who opened straight on it)
+    ...(mainnet || mode === 'mainnet' ? (['mainnet'] as const) : []),
     'sim',
     'testnet',
     ...(PUBLIC_DEMO ? [] : (['chain'] as const)),
@@ -120,8 +123,12 @@ export function Nav({
         >
           {modes.map((m, i) => {
             const real = m === 'mainnet' && mainnet
+            const joiningNote = Object.entries(JOINING_MAINNET)
+              .filter(([id]) => !mainnet?.includes(id))
+              .map(([id, j]) => ` ${joinSentence(chainName(id), j)}.`)
+              .join('')
             const title = real
-              ? 'Mainnet — real money, one universe. Each chain trades in its own dollar.'
+              ? `Mainnet — real money, one universe on six chains. Each chain trades in its own dollar.${joiningNote}`
               : MODE_TITLE[m as keyof typeof MODE_TITLE]
             return (
               <button
@@ -141,9 +148,19 @@ export function Nav({
                       {mainnet.map((id) => (
                         <ChainLogo key={id} id={id} size={12} />
                       ))}
+                      {/* a chain with a day to join wears its logo, set apart */}
+                      {Object.keys(JOINING_MAINNET)
+                        .filter((id) => !mainnet.includes(id))
+                        .map((id) => (
+                          <span key={id} className="pl-1.5 opacity-60" data-joining={id}>
+                            <ChainLogo id={id} size={12} />
+                          </span>
+                        ))}
                     </span>
                     ◉ MAINNET
                   </>
+                ) : m === 'mainnet' ? (
+                  '◉ MAINNET'
                 ) : (
                   MODE_LABEL[m as keyof typeof MODE_LABEL]
                 )}

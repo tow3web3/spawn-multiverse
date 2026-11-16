@@ -104,7 +104,7 @@ export function ThePit({
             Freshly spawned. Ferociously unhinged.
             <br />
             {onchain
-              ? `Every token here trades on ${chainSet.names}${chainSet.single ? '' : ', at one price'}.`
+              ? `Every token here trades on ${chainSet.names}${chainSet.single ? '' : ', at one price'}.${chainSet.joinNote ? ` ${chainSet.joinNote}` : ''}`
               : 'Every token starts its life across all six chains.'}
           </p>
           <p className="mt-1 font-mono text-[10px] font-bold tracking-wide opacity-50">

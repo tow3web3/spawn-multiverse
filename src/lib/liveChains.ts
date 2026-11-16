@@ -1,5 +1,5 @@
 import { useStore } from '../store'
-import { CHAINS, DESIGN_CHAINS, type Chain } from './chains'
+import { CHAINS, DESIGN_CHAINS, JOINING_MAINNET, joinSentence, joinText, type Chain, type Joining } from './chains'
 import { designDollar } from './v72'
 import { CHAIN_NAME, coinOf, isChainLogoId, type CoinLogoId } from '../components/ChainLogos'
 
@@ -49,16 +49,32 @@ export function listNames(chains: Chain[]): string {
   return labels.length <= 1 ? (labels[0] ?? '') : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`
 }
 
+/** A chain about to join the live mainnet, with what the page says of it. */
+export interface JoiningChain extends Joining {
+  chain: Chain
+  /** "JOINS 18 NOV" */
+  text: string
+  /** "Solana joins on 18 Nov" */
+  sentence: string
+}
+
 export interface ChainSet {
   /** Chains a user can actually trade on in the current mode: the
    * manifest's list on-chain (never more), the six in the simulation. */
   live: Chain[]
+  /** Mainnet only: the chains of the universe not live yet that have a day
+   * to join (Solana, 18 Nov) — shown with that day, never as tradable. */
+  joining: JoiningChain[]
+  /** "Solana joins on 18 Nov." — empty when nothing is joining. */
+  joinNote: string
   /** The six chains of the universe — for the concept copy only. */
   design: Chain[]
+  /** The live chains plus the joining ones: the size of the universe the
+   * deployment runs, or is about to (mainnet: six). */
   count: number
-  /** "FIVE", "SIX"… for display copy. */
+  /** "SIX"… for display copy (live + joining). */
   word: string
-  /** "five", "six"… for sentence copy. */
+  /** "six"… for sentence copy (live + joining). */
   lower: string
   /** "Base, Optimism and Arbitrum" — the live chains. */
   names: string
@@ -75,13 +91,23 @@ export function useChainSet(): ChainSet {
   const { onchain } = useStore()
   const ids = onchain?.chains
   const live = ids ? CHAINS.filter((c) => ids.includes(c.id)) : DESIGN_CHAINS
+  const joining: JoiningChain[] =
+    onchain?.network === 'mainnet' && ids
+      ? CHAINS.filter((c) => !ids.includes(c.id) && JOINING_MAINNET[c.id]).map((c) => {
+          const j = JOINING_MAINNET[c.id]
+          return { ...j, chain: c, text: joinText(j), sentence: joinSentence(chainName(c.id), j) }
+        })
+      : []
+  const count = live.length + joining.length
   return {
     live,
+    joining,
+    joinNote: joining.map((j) => `${j.sentence}.`).join(' '),
     design: DESIGN_CHAINS,
-    count: live.length,
-    word: WORDS[live.length] ?? String(live.length),
-    lower: LOWER[live.length] ?? String(live.length),
+    count,
+    word: WORDS[count] ?? String(count),
+    lower: LOWER[count] ?? String(count),
     names: listNames(live),
-    single: live.length === 1,
+    single: count === 1,
   }
 }

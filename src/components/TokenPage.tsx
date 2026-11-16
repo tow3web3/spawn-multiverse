@@ -701,6 +701,23 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   </button>
                 )
               })}
+              {/* mainnet: a chain with a day to join, shown with that day —
+                  never selectable before the hub has wired it */}
+              {chainSet.joining.map(({ chain: jc, text, sentence }) => (
+                <button
+                  key={jc.id}
+                  type="button"
+                  disabled
+                  data-chain={jc.id}
+                  data-joining={jc.id}
+                  title={`${sentence}: its link to the hub is scheduled on the timelock. Trade from another chain until then.`}
+                  className="inline-flex cursor-default items-center gap-1.5 rounded-lg border-2 border-dashed border-ink/30 bg-white py-1 pl-1.5 pr-2.5 font-mono text-[10px] font-bold"
+                >
+                  <ChainLogo id={jc.id} size={18} />
+                  <span className="opacity-50">{jc.label}</span>
+                  <span className="whitespace-nowrap rounded bg-ink px-1 text-[8px] text-lime">{text}</span>
+                </button>
+              ))}
             </div>
             <p className="mt-1.5 font-mono text-[9px] font-bold opacity-45">
               {chainSet.single ? 'ONE CHAIN, ONE TRANSACTION ⚡' : 'SAME PRICE EVERYWHERE ✓'}
@@ -1090,7 +1107,7 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
           {/* chain sync grid */}
           <div className={card}>
             <p className={label}>
-              ONE GLOBAL PRICE · {chainSet.word} LIVE CHAIN{liveChains.length === 1 ? '' : 'S'}
+              ONE GLOBAL PRICE · {chainSet.word} {chainSet.joining.length ? '' : 'LIVE '}CHAIN{chainSet.count === 1 ? '' : 'S'}
             </p>
             <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-2">
               {liveChains.map((ch) => {
@@ -1129,6 +1146,19 @@ export function TokenPage({ num, onBack }: { num: number; onBack: () => void }) 
                   </div>
                 )
               })}
+              {chainSet.joining.map(({ chain: jc, text, sentence }) => (
+                <div
+                  key={jc.id}
+                  data-joining={jc.id}
+                  className="flex items-center gap-2 rounded-lg border-2 border-dashed border-ink/30 bg-cream/60 px-2 py-1.5"
+                  title={`${sentence} — the same price will hold there`}
+                >
+                  <ChainLogo id={jc.id} size={20} />
+                  <span className="ml-auto shrink-0 whitespace-nowrap rounded bg-ink px-1 font-mono text-[8px] font-bold text-lime">
+                    {text}
+                  </span>
+                </div>
+              ))}
             </div>
           </div>
 

@@ -167,6 +167,20 @@ export function Hero({
                 </span>
               )
             })}
+            {/* mainnet: a chain with a day to join is named with that day,
+                never offered as tradable */}
+            {chainSet.joining.map(({ chain, text, sentence }) => (
+              <span
+                key={chain.id}
+                data-joining={chain.id}
+                className="flex items-center gap-1.5 rounded-full border-2 border-dashed border-ink bg-white/60 px-3 py-1.5 font-mono text-[10px] font-bold tracking-wide"
+                title={`${sentence} — its link to the hub is scheduled on the timelock`}
+              >
+                <ChainLogo id={chain.id} size={18} />
+                {chain.label}
+                <span className="whitespace-nowrap rounded-full bg-ink px-1.5 py-0.5 text-[9px] text-lime">{text}</span>
+              </span>
+            ))}
           </div>
         </div>
       </div>

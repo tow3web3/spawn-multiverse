@@ -37,14 +37,19 @@ export function Asterisk({ className = '', size = 24, color = '#141414' }: { cla
   )
 }
 
-/** The chains this mode really runs, as their real logos, overlapping. */
+/** The chains this mode really runs, as their real logos, overlapping —
+ * then, on mainnet, the ones with a day to join, ringed dashed. */
 export function ChainDots({ size = 'md' }: { size?: 'sm' | 'md' }) {
   // only the chains this mode really runs (a deployment may run fewer than six)
-  const { live } = useChainSet()
+  const { live, joining } = useChainSet()
+  const px = size === 'sm' ? 22 : 28
   return (
     <div className="flex items-center -space-x-1">
       {live.map((c) => (
-        <ChainChip key={c.id} id={c.id} size={size === 'sm' ? 22 : 28} />
+        <ChainChip key={c.id} id={c.id} size={px} />
+      ))}
+      {joining.map((j) => (
+        <ChainChip key={j.chain.id} id={j.chain.id} size={px} joining={j.text} />
       ))}
     </div>
   )

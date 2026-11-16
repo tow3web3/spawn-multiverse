@@ -122,7 +122,7 @@ import {
   usdcAbi,
   type Manifest,
 } from './abi'
-import { rpcTransport } from './rpc'
+import { logReader, logSources, rpcTransport, type LogReader } from './rpc'
 import type { FaceId } from '../components/Faces'
 
 const FEE_MODE_NAME: readonly FeeMode[] = ['holders', 'split', 'dev', 'burn']
@@ -161,11 +161,12 @@ const OP_SYNC_TOKEN = 10
 // Hardhat's well-known dev account #0 — funds wallets with gas on the LOCAL
 // dev chain only. Never reuse outside a throwaway devnet.
 const FUNDER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' as const
-// Public RPCs cap eth_getLogs hard (Base Sepolia: 200 blocks per call).
-const LOG_CHUNK_LOCAL = 100_000n
-const LOG_CHUNK_PUBLIC = 199n
-// First load only backfills this many hub blocks of tape (~33h on Base's 2s
-// blocks) — keeps page loads fast on capped public RPCs.
+// On a testnet the first load only backfills this many hub blocks of tape
+// (~33h on Base's 2s blocks) — keeps page loads fast on capped public RPCs.
+// Mainnet reads its whole tape from the manifest's `fromBlock`: holders, the
+// chain allocation and volume are summed from it, and a truncated tape would
+// show them wrong. Its log endpoints take 10,000-block calls (rpc.ts), about
+// five calls per day of history.
 const BACKFILL_BLOCKS = 60_000n
 /** The risk notice is accepted once per deployment generation: v7.2 (one
  * universe, six chains, two dollars) carries risks the v7.1 notice did not. */
@@ -286,30 +287,6 @@ function mkChain(id: number, rpc: string): Chain {
     rpcUrls: { default: { http: [rpc] } },
     blockExplorers: known?.explorer ? { default: { name: 'Explorer', url: known.explorer } } : undefined,
   })
-}
-
-async function getLogsChunked(
-  client: PublicClient,
-  address: Address,
-  from: bigint,
-  to: bigint,
-  chunk: bigint,
-) {
-  const ranges: [bigint, bigint][] = []
-  for (let b = from; b <= to; b += chunk + 1n) {
-    ranges.push([b, b + chunk > to ? to : b + chunk])
-  }
-  const out = []
-  const BATCH = 8 // parallel requests per wave — fast backfill, polite to RPCs
-  for (let i = 0; i < ranges.length; i += BATCH) {
-    const wave = await Promise.all(
-      ranges
-        .slice(i, i + BATCH)
-        .map(([f, t]) => client.getLogs({ address, fromBlock: f, toBlock: t })),
-    )
-    for (const r of wave) out.push(...r)
-  }
-  return out
 }
 
 function loadBurner(): PrivateKeyAccount {
@@ -515,6 +492,9 @@ export function OnchainProvider({
   const manifestRef = useRef<Manifest | null>(null)
   const hubClientRef = useRef<PublicClient | null>(null)
   const hubChainRef = useRef<Chain | null>(null)
+  /** The pad's event logs: read from endpoints that serve logs (rpc.ts),
+   * which on mainnet is NOT the manifest's hub RPC. */
+  const hubLogsRef = useRef<LogReader | null>(null)
   const iosRef = useRef<ChainIO[]>([])
   /** The hub is a hardhat node: gas comes from its dev account, logs are
    * cheap to scan, blocks only move when someone transacts. */
@@ -807,15 +787,14 @@ export function OnchainProvider({
 
     // 2. event tape -> history, volume, holders, chain allocation (hub).
     //    No block-number cache: a poll right after a trade must see its block.
-    const latest = await hub.getBlockNumber({ cacheTime: 0 })
+    //    The tape is a cursor: a block read too early is never read again. Logs
+    //    come from other nodes than the head (rpc.ts), which can trail it by a
+    //    block or two — so on a public network the cursor stops 2 blocks short
+    //    (~4s on Base) instead of trusting a node to have the head already.
+    const head = await hub.getBlockNumber({ cacheTime: 0 })
+    const latest = isLocalRef.current || head < 2n ? head : head - 2n
     if (latest >= lastBlockRef.current) {
-      const logs = await getLogsChunked(
-        hub,
-        m.pad,
-        lastBlockRef.current,
-        latest,
-        isLocalRef.current ? LOG_CHUNK_LOCAL : LOG_CHUNK_PUBLIC,
-      )
+      const logs = await hubLogsRef.current!.getLogs(m.pad, lastBlockRef.current, latest)
       lastBlockRef.current = latest + 1n
       const parsed = parseEventLogs({ abi: padAbi, logs })
       const byToken = new Map<string, TokenEntry>()
@@ -1172,6 +1151,7 @@ export function OnchainProvider({
         })
         await hub.getChainId()
         hubClientRef.current = hub
+        hubLogsRef.current = logReader(hubChain, logSources(manifest.chainId, manifest.rpc, isLocalRef.current))
         // the chain's clock vs this browser's, once (see skewRef). The
         // pending block carries the time the NEXT block will have — on a
         // quiet devnet the latest block can be arbitrarily old.
@@ -1185,7 +1165,7 @@ export function OnchainProvider({
           skewRef.current = 0
         }
         lastBlockRef.current = BigInt(manifest.fromBlock ?? 0)
-        if (!isLocalRef.current) {
+        if (!isLocalRef.current && profile !== 'mainnet') {
           const tip = await hub.getBlockNumber()
           const floor = tip > BACKFILL_BLOCKS ? tip - BACKFILL_BLOCKS : 0n
           if (floor > lastBlockRef.current) lastBlockRef.current = floor
@@ -1529,13 +1509,7 @@ export function OnchainProvider({
         try {
           const latest = await hub.getBlockNumber({ cacheTime: 0 })
           if (latest >= fromBlock) {
-            const logs = await getLogsChunked(
-              hub,
-              m.pad,
-              fromBlock,
-              latest,
-              isLocalRef.current ? LOG_CHUNK_LOCAL : LOG_CHUNK_PUBLIC,
-            )
+            const logs = await hubLogsRef.current!.getLogs(m.pad, fromBlock, latest)
             const got = pick(logs)
             if (got) return got
           }
@@ -2103,13 +2077,7 @@ export function OnchainProvider({
             }
             if (!token) {
               const latest = await hub.getBlockNumber()
-              const logs = await getLogsChunked(
-                hub,
-                m.pad,
-                hubMark,
-                latest,
-                isLocalRef.current ? LOG_CHUNK_LOCAL : LOG_CHUNK_PUBLIC,
-              )
+              const logs = await hubLogsRef.current!.getLogs(m.pad, hubMark, latest)
               const no = refusedIn(logs)
               if (no) throw refusal(no)
             }
@@ -2146,13 +2114,7 @@ export function OnchainProvider({
           const logs =
             syncRef.current || c.local
               ? receipt.logs
-              : await getLogsChunked(
-                  hub,
-                  m.pad,
-                  hubMark,
-                  await hub.getBlockNumber({ cacheTime: 0 }),
-                  isLocalRef.current ? LOG_CHUNK_LOCAL : LOG_CHUNK_PUBLIC,
-                )
+              : await hubLogsRef.current!.getLogs(m.pad, hubMark, await hub.getBlockNumber({ cacheTime: 0 }))
           const got = readOutcome(logs, token, addr, 'buy', c.label)
           if (got?.kind === 'trade') {
             costsRef.current[num] = (costsRef.current[num] ?? 0) + got.usd

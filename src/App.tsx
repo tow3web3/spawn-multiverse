@@ -35,6 +35,11 @@ const LS_MAINNET_SEEN = 'spawn.mode.mainnetSeen'
 
 function loadMode(): AppMode {
   try {
+    // Mainnet is live: a first visit (or the first since it went live) opens
+    // straight on it — no flash of the simulation first, and a shared
+    // `#/token/N` link means the mainnet token. If its manifest turns out
+    // not to be there, the probe below falls back to the simulation.
+    if (!localStorage.getItem(LS_MAINNET_SEEN)) return 'mainnet'
     const m = localStorage.getItem(LS_MODE)
     if (m === 'testnet') return 'testnet'
     // the retired per-universe modes ('bnb', 'ethereum') all mean mainnet now
@@ -42,7 +47,8 @@ function loadMode(): AppMode {
     if (m === 'chain') return PUBLIC_DEMO ? 'sim' : 'chain'
     return 'sim'
   } catch {
-    return 'sim'
+    // no storage: nothing remembered, so the live market
+    return 'mainnet'
   }
 }
 

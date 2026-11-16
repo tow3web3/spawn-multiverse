@@ -208,6 +208,21 @@ export function HowItWorks() {
                   <p className="mt-0.5 font-mono text-[8px] font-bold text-up">SYNCED ✓</p>
                 </div>
               ))}
+              {cs.joining.map(({ chain: jc, text, sentence }) => (
+                <div
+                  key={jc.id}
+                  data-joining={jc.id}
+                  title={sentence}
+                  className="rounded-xl border-2 border-dashed border-white/25 bg-ink px-3 py-3 text-center"
+                >
+                  <span className="mx-auto flex h-8 w-8 items-center justify-center">
+                    <ChainLogo id={jc.id} size={30} />
+                  </span>
+                  <p className="mt-2 font-mono text-[9px] font-bold tracking-wide text-white/40">{jc.label}</p>
+                  <p className="mt-1 font-mono text-[12px] font-bold text-white/60">{text}</p>
+                  <p className="mt-0.5 font-mono text-[8px] font-bold text-white/40">SAME PRICE FROM DAY ONE</p>
+                </div>
+              ))}
             </div>
           </div>
         )}

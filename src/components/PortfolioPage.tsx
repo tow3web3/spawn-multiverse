@@ -96,7 +96,9 @@ export function PortfolioPage({
         {chainSet.single
           ? ` ON ${chainSet.names.toUpperCase()}`
           : onchain
-            ? `, ACROSS EVERY LIVE CHAIN (${chainSet.word})`
+            ? chainSet.joining.length
+              ? `, ACROSS ALL ${chainSet.word} CHAINS`
+              : `, ACROSS EVERY LIVE CHAIN (${chainSet.word})`
             : ', ACROSS ALL SIX CHAINS'}
         , IN ONE PLACE.
       </p>

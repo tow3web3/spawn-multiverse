@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore, GLOBAL_SUPPLY, START_PRICE, type CreatureLinks, type FeeMode } from '../store'
-import { dollarOn, useChainSet } from '../lib/liveChains'
+import { chainName, dollarOn, useChainSet } from '../lib/liveChains'
 import { fmtNum, fmtPrice } from '../lib/format'
 import { cleanLinks, LINK_META } from '../lib/links'
 import { processImage, uploadTokenImage } from '../lib/tokenImage'
@@ -361,11 +361,24 @@ export function GenesisLab({
                 {liveChains.map((ch) => (
                   <ChainChip key={ch.id} id={ch.id} size={30} />
                 ))}
+                {chainSet.joining.map((j) => (
+                  <ChainChip key={j.chain.id} id={j.chain.id} size={30} joining={j.text} />
+                ))}
               </div>
               <span className="font-mono text-[11px] font-bold text-lime">
-                {liveChains.length === 1 ? '1 CHAIN' : `${chainSet.word} CHAINS`} ✓
+                {chainSet.count === 1 ? '1 CHAIN' : `${chainSet.word} CHAINS`} ✓
               </span>
             </div>
+            {chainSet.joining.length > 0 && (
+              <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40" data-testid="lab-joining">
+                {chainSet.joining.map((j) => (
+                  <span key={j.chain.id}>
+                    ◌ {j.sentence}. A token launched before then is born on {chainSet.names}, and anyone
+                    on {chainName(j.chain.id)} can open it there once it has joined.{' '}
+                  </span>
+                ))}
+              </p>
+            )}
             {onchain && !chainSet.single && (
               <p className="mt-2 font-mono text-[10px] leading-relaxed text-white/40" data-testid="lab-open-note">
                 🚪 A chain that is too expensive at the moment of launch — usually Ethereum — can be skipped by
